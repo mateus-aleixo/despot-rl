@@ -1,0 +1,11 @@
+.venv/
+data/raw/
+data/extracted/
+tools/bin/
+__pycache__/
+*.pyc
+runs/
+scratch_*
+swag.json
+runs/
+core/target/
