@@ -1107,3 +1107,126 @@ Despot2 forms'. The run-level baseline did not move at all -- the heuristic
 stays at 2.283 over 240 seeds and the mutation shelf at +0.13 levels -- because
 those are rare rows in a run that mostly ends on level 2 or 3. The fight-level
 effect is real; the run-level one is below measurement.
+
+
+## Every room has a fight, and the shop opens after you win it
+
+Read out of the binary on 2026-09-02, prompted by a player saying the sim did
+not match the game. It does not, and this is the largest fidelity gap the
+project has found: **`sim/run.py` fights only in `fight` and `boss` rooms and
+treats every shop as peaceful.** The game fights in all of them.
+
+### The evidence
+
+`M_Room` carries, on every room:
+
+    RoomType type        Quest questType      RoomState state
+    int fightResult      bool wonMainFight    M_Shop shop, shopStorage
+    float expectedPower  float goldReward     M_Shrine shrine
+    bool activatesSecret bool secretIsActive  Biom biom
+
+`wonMainFight` sitting next to `shop` is the shape of the thing. Then
+`C_Room.AfterFight(bool win)` (`off=0x6b5b40`) calls, in order:
+
+    M_Room.set_fightResult
+    C_Room.OpenAll                 the doors open
+    V_Shrine.Open                  the shrine opens
+    M_Room.get_goldReward -> C_ResLog.RoomReward -> M_Room.set_goldReward
+    M_Room.get_shop, get_wonMainFight, get_type -> M_Shop.set_open
+    SubscriptionToken.Unsubscribe
+
+So winning the room's fight is what opens its doors, its shrine and its shop,
+and what pays its gold. `C_Room.InitShop` reads `M_Room.get_fightResult` when it
+decides the shop's initial `set_open`, which is the same gate from the other
+side, and `RoomType` carries an inactive variant of every shop for exactly this:
+
+    Inactive = 8192   InactiveItemShop = 8196    InactiveFoodShop = 8200
+    InactiveTreasure = 8256   InactiveShrine = 8384
+    InactiveMutationShop = 8512   InactiveTalentShop = 12352
+    InactiveConsumableShop = 24576
+
+each being `Inactive` OR'd with the shop's own bit. `RoomType` is a flags enum
+throughout, which is also why `Shrine = 192`, `MutationShop = 320` and
+`TalentShop = 4160` all carry the `Treasure = 64` bit.
+
+`C_Rooms.ChoosePacks` (`off=0x6bd6a0`) then settles it. It walks **every** room
+in `M_Rooms.rooms`, looks the room up in a `Dictionary<string, M_EnemyPack>`,
+and on a miss logs the error string **"No enemy pack is set for room "**. A room
+without enemies is a bug in the game's own view.
+
+### The consumer of `expectedPower`, found at last
+
+`M_EnemyPacks` holds `packsByID`, `packsByRoom` and
+**`packsByType: Dictionary<string, Dictionary<RoomType, List<M_EnemyPack>>>`**,
+and `M_EnemyPack` has `ID`, `minPower`, `maxPower`, `enemiesByZone`. So a room's
+`expectedPower` selects among the packs registered for that room's type. This
+retires the note in `sim/assumptions.py` that `expectedPower` is set for every
+room including shops and its consumer could not be found: the consumer is the
+pack chooser, and it is set for shops because shops fight.
+
+The old objection to using it, that a first food shop of 1,389 Power against a
+750-Power squad makes level 1 unplayable, was reasoning from the wrong premise.
+It is not an extra fight bolted onto a peaceful room; it is the room's own fight,
+and the level's Power budget is spread over rooms accordingly.
+
+### What we are throwing away
+
+`EnemyPacks.json` ships 212 rows over 135 packs, by room type:
+
+| RoomType | rows |
+|---|---|
+| Boss | 55 |
+| Treasure | 53 |
+| ItemShop | 47 |
+| FoodShop | 32 |
+| Default | 25 |
+
+`RunState.enemy_specs` filters `p.get("RoomType") in (want, None)` with `want`
+being `Boss` or `Default`, so **132 of the 212 rows, 62% of the shipped enemy
+packs, have never been used by this project**, precisely the ones for the rooms
+we decided were peaceful. There is no Start pack, which is consistent with the
+start room not fighting.
+
+Rows sharing an ID differ in `Min`/`Max` (78 of 135 packs are uniform, and pack
+4 is `Mancrack e1 1-20` with `RangeBlinker e2 1-1`), so those are per-class
+counts per zone, which is how `enemy_specs` already reads them. That part is
+right; only the room-type filter is wrong.
+
+### Also found, and unrelated to rooms
+
+`C_Fight` carries a fight-escalation schedule the sim does not model at all:
+
+    _MIDDLE_FIGHT_TIME = 120        _MIDDLE_FIGHT_TIME_FINAL_BOSS = 1200
+    _LONG_FIGHT_TIME = 180          _LONG_FIGHT_TIME_FINAL_BOSS = 1320
+    _LONG_TIME_WITHOUT_DAMAGE = 8   _LONG_TIME_WITHOUT_DAMAGE_FINAL_BOSS = 12
+    DELAY_SINGLE = 0.5              DELAY_KOH = 3.5
+
+with `_enhanceStatusController` over `M_DamageBonusOverTimeStatus` and
+`_exhaustStatusController` over `M_DyingDotStatus`. So a long fight is escalated,
+first by a damage bonus over time and then by a dying damage-over-time, rather
+than being cut off. `sim/assumptions.py` caps a fight at
+`max_fight_seconds = 120` and calls it a draw, which is the same number wearing
+the wrong meaning: 120s is where the game starts *pushing*, not where it stops.
+
+### Quests
+
+`C_Rooms.CreateQuest` walks the rooms, reads each `type`, resolves a quest name
+through `EnumUtils.ToEnum<Quest>` and reflection over `"M_" + Name` and
+`"C_" + Name + "Quest"`, reads an `"outcomes"` array, and sets
+`M_Room.questType`. The `Quest` enum has eleven entries (Sci, Reaper, Nurgle,
+Pit, SecretRoom, Cube, Spider, Rat, Flight, Sword, Bot) with a `QuestStatus` of
+Accepted, Declined, Acquired or Finished, and `Quests.json` ships alongside.
+None of this is modelled. Whether a quest room fights is still open: there is no
+Quest pack in `EnemyPacks.json`, which suggests not.
+
+### Still open after this pass
+
+- Whether the first room of a level after level 1 is a shop, and whether a level
+  transition always runs an event. Both are player-visible claims that this pass
+  did not settle.
+- `RoomType.Portal`, `Secret`, `PermanentShop`, `ConsumableShop`, `QuestExtra`
+  and `FinalBoss`, none of them modelled.
+- `activatesSecret` / `secretIsActive`, with `C_Rooms.roomsToActivateSecret = 2`
+  and `MaybeActivateSecretRoom`.
+- `C_RoomCleanerConsumable.Use` calls `AfterFight` directly, i.e. it clears a
+  room without fighting it.
