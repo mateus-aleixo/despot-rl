@@ -1444,3 +1444,72 @@ difficulty question, it decides whether a whole mutation has any value.
 **Not acted on yet.** A twelve-seed reward sweep is training against the current
 observation as this is written, and changing `obs_dim` under it would throw the
 comparison away.
+
+## What is left, and in what order
+
+"Implement every feature" is the right direction and the wrong target, for
+three reasons this project has already paid for.
+
+**Some features provably cannot fire in Default play.** `StatShops` is 0 on all
+twelve level rows, `C_Consumables.Add` has exactly one caller
+(`C_ConsumableShop.Buy`), and that shop is only built in a `TalentShop` room, so
+consumables are unreachable. Implementing them would add code that can never
+execute and a maintenance surface that can never be tested. That is not
+fidelity.
+
+**Every environment change invalidates every agent and every number.** This has
+happened four times in a day. The cost is not the implementation, it is the
+re-baselining, so features that touch the same measurement should land together
+rather than one at a time.
+
+**The thing worth being faithful about is the decision.** A gap matters if it
+changes what the agent chooses between or how a fight resolves. Sorted that way:
+
+**Tier 1, navigation. Land as one change.** Fog of war and portals. Portals are
+a navigation option and fog is what makes navigation a decision at all; done
+separately they cost two invalidations for one result. This also removes an
+advantage the agent currently has over a player, which no other item on this
+list does.
+
+**Tier 2, fight outcomes.** `C_Fight`'s escalation schedule: a damage bonus over
+time at 120s, a dying DoT at 180s, and `_LONG_TIME_WITHOUT_DAMAGE = 8`. Our
+`max_fight_seconds = 120` is that number wearing the wrong meaning, and it
+changes how every long fight ends. Alongside it, mutation coverage: 259 of 1,094
+offers are implemented, which is what caps the shelf at +0.13 and therefore
+caps every mutation result this project has measured.
+
+**Tier 3, the decision layer that does not exist yet.** Quest rooms and the
+level-entry dialog. `M_Dialog` carries `choices`, branching `outcomes`, `events`
+and `unlocks`, and `C_Levels.StartDialog` fires one on every level change.
+**The agent currently makes zero choices per level transition where a player
+makes one**, and there are eleven quests in `Quests.json` on top. In decision
+terms this is the largest hole in the sim, and it is a bigger build than
+everything above it put together.
+
+**Tier 4, completeness.** Secret rooms (`activatesSecret`,
+`roomsToActivateSecret = 2`, level 7 only), `PermanentShop`, `TalentShop`,
+`QuestExtra`, `FinalBoss`, and the three `GenerationParams` fields whose values
+could not be recovered. Low decision impact, worth doing when the tiers above
+are done.
+
+**Explicitly not:** consumables and the consumable shop, while `StatShops` stays
+0 in Default. Record the reason rather than the omission, so nobody re-derives
+it a third time.
+
+### The design decision fog forces
+
+`to_boss` is a BFS over the whole graph and four observation features read it.
+Under fog there is no whole graph, so something has to replace it, and the
+choice changes what the agent knows:
+
+- drop the boss-distance features and let the policy navigate on the local view
+  and the room-kind one-hot alone;
+- compute distance over the **revealed** subgraph, which needs a convention for
+  unreached rooms (optimistic, pessimistic, or a separate "unknown" flag);
+- expose a frontier instead: how many revealed rooms are still unentered, and in
+  which directions.
+
+These are different agents, not different implementations of one agent, so the
+choice wants measuring rather than picking. `obs_dim` moves either way, so it
+gets the `--blind-*` treatment: hold the replacement features at zero and keep
+them in the vector.
