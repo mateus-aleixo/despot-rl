@@ -45,6 +45,65 @@ Six broadswords against six enemies, on one layout:
 | Rust, one call at a time | 1.9 | **142x** |
 | Rust, batched across threads | 0.29 | **957x** |
 
+### Which of those numbers training actually gets, and why batching is not worth it
+
+Training takes the **one call at a time** row. `rl.train.rollout` steps its eight
+envs in a Python loop, so every fight is its own `fast_battle`, and the batched
+entry point the 957x measures (`despot_battle_batch`, bound as `fast_batch`) has
+exactly one caller in the repository: `tools/diff_core.py`. Using it in training
+would mean letting `env.step` defer a fight and resume once a batch comes back,
+which is a change to the env contract rather than a flag, so it wanted a
+measurement first.
+
+`tools/profile_train.py` wraps `rollout`, `DespotRunEnv.step`, `_encode`,
+`action_mask`, `RunState.apply` and `fast_battle`, then runs the real
+`rl.train.main`. 100k steps, 195 update cycles, twice, agreeing to a tenth of a
+percent:
+
+| part | share of wall clock |
+|---|---|
+| rollout | 86.2% |
+| &nbsp;&nbsp;policy forward and buffer writes | 25.2% |
+| &nbsp;&nbsp;`env.step`, Python run layer | **44.4%** |
+| &nbsp;&nbsp;&nbsp;&nbsp;`_encode`, building the 195 floats | 16.0% |
+| &nbsp;&nbsp;&nbsp;&nbsp;`action_mask`, called twice a step | 7.5% |
+| &nbsp;&nbsp;&nbsp;&nbsp;`RunState.apply`, less the fight | 20.5% |
+| &nbsp;&nbsp;`env.step`, Rust battle core | **16.6%** |
+| PPO update and bookkeeping | 13.8% |
+
+10,352 fights at a mean of **1.00 ms**, already better than the 1.9 ms the 6v6
+benchmark above measures, because a typical fight is smaller than that one.
+
+**So batching is worth at most 1.16x.** Fights are 16.6% of the clock, and the
+benchmark's best case takes them to 0.29 ms, which is 6.5x on 16.6%, or 14% of
+the loop. That is a poor trade for making `env.step` re-entrant, and it would put
+a deferred-fight state machine underneath the part of the codebase the fidelity
+work lives in.
+
+**The Python run layer is 2.7x the core.** That is where the time is, and none of
+it needs the env contract touched:
+
+- `action_mask` is called twice per `step`, once to check the action against the
+  pre-action state and once for the info dict afterwards. The second one is what
+  the caller stores and hands back as the next step's mask, so the first is
+  recomputing a value `rollout` already holds. Memoising it against a state
+  counter is worth about half of the 7.5%.
+- `RunState.apply` at 20.5% and `_encode` at 16.0% have not been profiled
+  internally yet. `_encode` calls `squad_power`, `mutation_effect` and
+  `ensure_stock` on every step, and each has a cache that may not be hitting.
+
+**And for a sweep, aggregate throughput is the number that matters, not
+single-run speed.** Six concurrent runs measured 6,206 steps/s against 2,077 for
+one, which is 3x for 6x the processes, so something is already saturating before
+the cores are. Finding where that ceiling is may beat any of the above for the
+wall clock of a twelve-seed arm.
+
+One caveat on the table: it was measured while a twelve-seed 4M sweep held six
+cores, at 1,606 steps/s against the 2,077 a lone run gets. Every part of the loop
+is single-threaded CPU work, so contention should scale them together, and the
+two runs agreed, but the shares are worth re-taking on an idle machine before
+anything is optimised against them.
+
 ## Differential testing, and what it caught
 
 `tools/diff_core.py` runs the same fights through both engines, restricted to
