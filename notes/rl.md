@@ -13,31 +13,51 @@ whether placement matters, and `tools/run_policies.py` compares run policies.
 
 ## The high level: `DespotRunEnv`
 
-One run per episode. The policy chooses where to move, what to buy, when to feed
-and which mutation to take; battles resolve inside `RunState.apply`.
+One run per episode. The policy chooses where to move, what to buy and which
+mutation to take; battles resolve inside `RunState.apply`. There is no `feed`:
+moving feeds the team, so food is the price of a room rather than a decision.
 
-**Observation** is 128 floats: fifteen scalars (level, gold, food, hunger level,
-moves left, squad size, mutation count, current damage penalty, step fraction,
-mean and minimum unit level, progress toward the next level, shop level, squad
-Power, and squad Power against the Power of the room being stood in), an 11-wide
-squad composition by player class, 14 floats for the shop shelf (quality and
-affordability per slot), and four 22-wide per-room vectors (which room you are
-in, which are cleared, which are adjacent, and each room's kind). Everything is
-scaled into roughly unit range, gold and food through `log1p` because they grow
-without bound.
+> This section describes the **current** interface, 195 observations by 33
+> actions. Both numbers have moved eight times, and the sections below are in
+> the order the changes happened, so a table further down may be quoting a
+> shape that no longer exists. The history is at the end of this list.
 
-**Actions are fixed and masked**, not variable-length: indices 0..21 are "move
-to room *i*" using the room map's sorted ids, then fourteen non-move actions --
-seven shop slots, then reroll, upgrade, buy experience, buy food, buy human,
-take mutation and sacrifice. There is no `feed`: moving feeds the team, so food
-is the price of a room rather than a decision. A stable index per room is what lets the
-network learn per-room value; a variable-length action list would relearn the
-meaning of index 3 every step, and the same argument is why the shop is one
-index per slot rather than one `buy_item`.
+**Observation** is 195 floats, scaled into roughly unit range, with gold, food
+and Power through `log1p` because they grow without bound:
 
-Both shapes changed with progression and the food fix (108 -> 128 observations,
-28 -> 37 -> 36 actions), so every agent saved before them no longer loads. The section at the end of this file has the
-details.
+| floats | what |
+|---|---|
+| 15 | scalars: level, gold, food, hunger level, moves left, squad size, mutations held, damage penalty, step fraction, mean and minimum unit level, mean progress toward the next unit level, shop level, squad Power, and squad Power against the Power of the room being stood in |
+| 4 | the level as a whole: distance to the boss, fraction of rooms cleared, room count, fraction of the food shops still holding something |
+| 11 | squad composition by player class |
+| 9 | the kind of room being stood in, one-hot |
+| 14 | the item shelf: quality and affordability, per slot, over seven slots |
+| 10 | the food shop: stock and affordability, per pack, over five packs |
+| 72 | the mutation shelf: seven per slot over ten slots (present, implemented, fraction of the squad touched, relative Damage and Health deltas, the largest other stat delta, and whether it attaches a passive), plus the shop's takes left and the shrine's stock |
+| 60 | what lies one step away, per direction: whether there is a room, whether it is cleared, whether it is nearer the boss, and its kind one-hot |
+
+**Actions are fixed and masked**, not variable-length: five moves (north, south,
+west, east, portal) then 28 non-move actions, being seven item slots, five food
+packs, ten mutation slots, and then reroll, upgrade shop, buy experience, buy
+human, take mutation and sacrifice.
+
+**A move is a direction, not a room.** It was a room id until levels started
+being generated per level, at which point ids stopped being stable and a
+per-room index stopped meaning anything across episodes. Everything else is
+still one index per thing rather than one parameterised action, for the reason
+that survived: a variable-length action list would relearn the meaning of index
+3 every step, which is also why the shop is one index per slot rather than one
+`buy_item`.
+
+Both shapes have moved with almost every change to the environment, and **an
+agent saved before a change does not load after it**:
+
+    observations  108 -> 128 -> 138 -> 111 -> 134 -> 184 -> 194 -> 195
+    actions        28 ->  37 ->  36 ->  40 ->  23 ->  33 (stable since)
+
+progression and the food fix, the food shop, per-level maps, treasure rooms,
+the described mutation shelf, the passive flag, and the shrine's stock bit, in
+that order. Each has its own section below.
 
 `action_mask()` marks what is currently legal. Stepping an illegal action is a
 **no-op with a -0.05 penalty rather than an exception**, so a policy that has
@@ -2155,3 +2175,107 @@ The methodological point, which is the third time this file has arrived at it
 from a different direction: **an A/B on an environment feature is only
 meaningful once both arms have trained long enough to use that feature.** Before
 that the comparison is two copies of the same policy with different labels.
+
+
+### The described shelf at 2M, against a control designed in from the start
+
+Every previous test of the mutation-shelf description was either at 600k, where
+no agent engaged with the mutation shop at all, or against a control that moved
+`obs_dim` and therefore the architecture with it. `tools/sweep_arms.py --sweep
+shelf` is the version without either defect: `--blind-shelf` holds the five
+description floats and the passive bit at zero for every slot and leaves
+`present`, the takes left and the shrine bit standing, so both arms are 195
+dimensions with the same first layer and differ only in information. Each arm is
+graded on the vector it trained on, because handing a blind agent a description
+it has never seen would measure a distribution shift instead of the value of the
+information.
+
+Twelve seeds an arm at 2M, `--checkpoint-every 600000`, init seed shared, 240
+evaluation seeds from 30,000. Training took 91.2 minutes for 40M steps at six
+concurrent.
+
+| init seed | described | blind | described minus blind |
+|---|---|---|---|
+| 0 | 2.99 | 2.92 | +0.06 |
+| 1 | 3.04 | 2.83 | +0.21 |
+| 2 | 2.89 | 2.84 | +0.05 |
+| 3 | 2.95 | 2.96 | -0.00 |
+| 4 | 2.63 | 2.82 | -0.19 |
+| 5 | 2.99 | 2.98 | +0.01 |
+| 6 | 3.03 | 2.94 | +0.09 |
+| 7 | 2.89 | 2.96 | -0.07 |
+| 8 | 2.77 | 2.98 | -0.21 |
+| 9 | 2.98 | 2.92 | +0.05 |
+| 10 | 2.94 | 2.92 | +0.01 |
+| 11 | 2.88 | 2.79 | +0.10 |
+
+    described arm  2.914      blind arm  2.906      heuristic  2.283
+    paired per training seed  +0.01 [-0.06, +0.08], positive on 7 of 12
+    per eval seed (n=2,880, not independent)  +0.01 [-0.03, +0.05]
+
+| arm | mutations held | `take_mutation` | any mutation |
+|---|---|---|---|
+| described | 1.92 | 26.3% | 61.0% |
+| blind | 1.82 | 19.6% | 58.5% |
+| heuristic | 2.23 | 100.0% | 61.3% |
+
+**This null is the informative kind.** Both arms use the mutation shop: they
+hold 1.92 and 1.82 mutations and take the free one 26.3% and 19.6% of the time,
+against 0.34 and 0.2% for the same comparison at 600k. So this is not two copies
+of a policy that ignores the thing under test, which is what every earlier null
+on this question turned out to be. The blind agents reach the same level and
+nearly the same uptake **without ever being told what is on the shelf**, which
+says they get what they need from the presence bit, the action mask and the
+room-kind one-hot, and that the description was redundant rather than unused.
+
+That makes five observation features in a row that measure null against their
+own control: the described shelf, the passive flag, the exempted step cost, the
+shrine bit, and now the shelf again under the protocol the shrine bit forced.
+The standing reading is unchanged and now has a fifth data point: **this
+project's observation changes buy architecture, not information.**
+
+Standard deviation across the 24 identically configured agents is **0.093
+levels** (2.63 to 3.04), which independently reproduces the 0.098 measured
+across the 24 agents of the 2M passives sweep. Two separate sets of 24 agents
+now agree that the spread at 2M is about a tenth of a level, against 0.183 at
+600k.
+
+### Training does not reproduce from `--seed` alone
+
+Found while writing the section above, and it qualifies every paired number in
+this file.
+
+`shrine2m_s0..s11` and `shelf2m_described_s0..s11` are the same command: same
+2M steps, same `--fast-core`, same `--shaping none`, same step cost, no arm
+flags on either, same init seed, same code. They were launched on different
+days. Comparing the saved weights directly:
+
+    seed  0   identical at 600k, 1.2M, 1.8M and 2M
+    seed  1   identical at 600k, 1.2M, 1.8M and 2M
+    seeds 2-11  differ, and already differ at the 600k checkpoint
+
+Ten of twelve diverge, with a maximum weight difference of 0.42 to 0.55, which
+is the scale of the weights themselves rather than a rounding artifact. Two
+reproduce exactly all the way to 2M, so the code, the command and the seed do
+control the setup: this is not a configuration difference between the two
+sweeps. And the divergence is present at the **first** checkpoint, so it is not
+drift accumulating over a long run, it is an early fork.
+
+**What this costs.** The pairing in every sweep in this file pairs two arms on
+the init draw, which is real and worth having, but it does **not** pair them on
+the trajectory. Two runs that share a seed can end up half a level apart on
+their own, and the twelve-seed intervals here are wide enough to have absorbed
+that without anyone noticing. It does not overturn any conclusion, because every
+headline result in this file is a null and a null does not get less null when
+the noise turns out to be larger; but it does mean the intervals are honest only
+if read as including this.
+
+**Untested hypothesis, recorded so it is not re-derived.** The `shelf2m` launch
+log opens with `resuming: 4 of 24 already saved`, so four of its runs came from
+an earlier, smaller launch, and the two that reproduce are the two lowest seeds.
+That fits a nondeterminism that depends on how many runs are training at once,
+which would point at a thread-count-dependent reduction surviving the
+`OMP_NUM_THREADS=1` the workers already set, or at torch's inter-op threads. The
+cheap test is two runs of the same seed at 200k, once alone and once against
+five concurrent runs, comparing weights. Until that is run, treat the mechanism
+as unknown and the observation as the fact.

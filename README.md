@@ -141,6 +141,12 @@ has been retracted. Read those before re-deriving anything.
 
 ## Running it
 
+Python 3.12 or newer.
+
+    pip install -e .                 # the simulator and the RL side
+    pip install -e ".[render]"       # plus the video renderer (ffmpeg on PATH)
+    pip install -e ".[datamining]"   # plus the extraction pipeline
+
     python tools/validate_sim.py        # the sim's check suite
     python tools/validate_rl.py         # the RL side's check suite
     python tools/run_demo.py            # a narrated run under a random policy
@@ -148,8 +154,12 @@ has been retracted. Read those before re-deriving anything.
     python tools/compare_agents.py --agent runs/<checkpoint>.pt
     python tools/render_run.py --agent runs/<checkpoint>.pt --seed 30039
 
+Everything past the installs reads the extracted balance tables, so it needs the
+data step in the next section first.
+
 Build the Rust core with `cargo build --release` in `core/`. Without it
-everything still runs, roughly 140x slower per fight.
+everything still runs, roughly 140x slower per fight. Training defaults to CPU;
+the net is a two-layer MLP and a GPU buys it nothing.
 
 ## Data
 

@@ -55,6 +55,17 @@ SWEEPS = {
         "flags": {"described": [], "blind": ["--blind-shelf"]},
         "env": {"described": {}, "blind": {"blind_shelf": True}},
     },
+    # One arm, because the question is the budget rather than a difference
+    # between two environments: twelve seeds of the plain live environment,
+    # scored at each `--checkpoint-every` mark with `score --at`. Nothing in
+    # `rl/train.py` is scheduled off `--steps` (fixed LR, fixed entropy), so a
+    # long run's checkpoint is the same trajectory a short run would have had at
+    # that mark, and the curve carries no init or sampling difference.
+    "budget": {
+        "arms": ("long",),
+        "flags": {"long": []},
+        "env": {"long": {}},
+    },
 }
 PY_EXE = sys.executable
 
@@ -68,8 +79,15 @@ PY_EXE = sys.executable
 WORKER_ENV = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
 
 
-def out_path(tag: str, arm: str, seed: int) -> pathlib.Path:
-    return pathlib.Path("runs") / f"{tag}_{arm}_s{seed}.pt"
+def out_path(tag: str, arm: str, seed: int, at: int = 0) -> pathlib.Path:
+    """The run's final agent, or its checkpoint at `at` steps.
+
+    `rl/train.py --checkpoint-every N` writes `<out>.<steps>.pt` alongside the
+    final `<out>.pt`, so `score --at 1000000` grades the budget curve off the
+    same runs rather than a second set of shorter ones.
+    """
+    stem = f"{tag}_{arm}_s{seed}"
+    return pathlib.Path("runs") / (f"{stem}.{at}.pt" if at else f"{stem}.pt")
 
 
 def train_one(tag: str, sweep: str, arm: str, seed: int, steps: int,
@@ -186,7 +204,7 @@ def do_score(args) -> None:
     behaviour: dict[str, list[dict]] = {a: [] for a in arms}
     for seed in SEEDS:
         for arm in arms:
-            path = out_path(args.tag, arm, seed)
+            path = out_path(args.tag, arm, seed, args.at)
             try:
                 policy = make_ppo(str(path), probe)
             except (FileNotFoundError, StaleCheckpoint) as exc:
@@ -200,15 +218,28 @@ def do_score(args) -> None:
                   f"held {beh['held']:.2f}, take {beh['uptake']:.1%}, "
                   f"any {beh['any']:.1%}")
 
-    a, b = arms
-    paired = [means[a][s] - means[b][s] for s in SEEDS
-              if s in means[a] and s in means[b]]
-    print(f"\n| init seed | {a} | {b} | {a} minus {b} |")
-    print("|---|---|---|---|")
-    for s in SEEDS:
-        if s in means[a] and s in means[b]:
-            print(f"| {s} | {means[a][s]:.2f} | {means[b][s]:.2f} | "
-                  f"{means[a][s] - means[b][s]:+.2f} |")
+    # A one-arm sweep (`--sweep budget`) has nothing to pair against: the
+    # comparison there is between checkpoints of the same runs, made by scoring
+    # the tag at several `--at` marks, so print the per-seed column and skip the
+    # paired block rather than unpacking two arms that do not exist.
+    paired: list[float] = []
+    if len(arms) >= 2:
+        a, b = arms[0], arms[1]
+        paired = [means[a][s] - means[b][s] for s in SEEDS
+                  if s in means[a] and s in means[b]]
+        print(f"\n| init seed | {a} | {b} | {a} minus {b} |")
+        print("|---|---|---|---|")
+        for s in SEEDS:
+            if s in means[a] and s in means[b]:
+                print(f"| {s} | {means[a][s]:.2f} | {means[b][s]:.2f} | "
+                      f"{means[a][s] - means[b][s]:+.2f} |")
+    else:
+        only = arms[0]
+        print(f"\n| init seed | {only} |")
+        print("|---|---|")
+        for s in SEEDS:
+            if s in means[only]:
+                print(f"| {s} | {means[only][s]:.3f} |")
 
     def ci95(xs):
         half = 1.96 * statistics.stdev(xs) / len(xs) ** 0.5
@@ -270,6 +301,10 @@ c = sub.add_parser("score")
 c.add_argument("--sweep", default="passives", choices=sorted(SWEEPS))
 c.add_argument("--runs", type=int, default=240)
 c.add_argument("--tag", default="arm2")
+c.add_argument("--at", type=int, default=0,
+               help="score the `<out>.<steps>.pt` checkpoint at this many "
+                    "steps instead of the final agent, for a budget curve off "
+                    "one run per seed")
 c.set_defaults(fn=do_score)
 args = ap.parse_args()
 args.fn(args)
