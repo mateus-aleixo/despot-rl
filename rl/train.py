@@ -177,6 +177,13 @@ def main():
                     help="hold the shrine bit at zero while leaving it in the "
                          "observation, so an arm trained without the information "
                          "has the same obs_dim and first layer as one with it")
+    ap.add_argument("--blind-squad", action="store_true",
+                    help="hold the squad one-hot at zero while leaving it in "
+                         "the vector, so an arm that is not told which squad it "
+                         "is playing has the same obs_dim and first layer")
+    ap.add_argument("--squad", default=None,
+                    help="pin the starting squad; the default cycles all eight "
+                         "by episode seed")
     ap.add_argument("--blind-shelf", action="store_true",
                     help="hold the five description floats and the passive bit "
                          "at zero for every mutation slot, leaving `present`, "
@@ -214,7 +221,9 @@ def main():
                          level_reward=args.level_reward,
                          free_mutation_steps=args.free_mutation_steps,
                          blind_shrine=args.blind_shrine,
-                         blind_shelf=args.blind_shelf)
+                         blind_shelf=args.blind_shelf,
+                         squad=args.squad,
+                         blind_squad=args.blind_squad)
             for i in range(args.envs)]
 
     states = np.zeros((args.envs, envs[0].obs_dim), dtype=np.float32)

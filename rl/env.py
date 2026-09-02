@@ -35,7 +35,7 @@ except ImportError:  # the env is usable without gymnasium installed
     spaces = None
 
 from sim.data import load_ruleset
-from sim.run import MAX_UNIT_LEVEL, RunState
+from sim.run import MAX_UNIT_LEVEL, RunState, squad_names
 
 # The widest shop is `max(ItemShopData.Quantity)` = 7 slots, at shop level 5.
 # Checked against the table in `__init__` rather than trusted.
@@ -82,7 +82,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  level_reward: str = "flat",
                  free_mutation_steps: bool = False,
                  blind_shrine: bool = False,
-                 blind_shelf: bool = False):
+                 blind_shelf: bool = False,
+                 squad: str | None = None,
+                 blind_squad: bool = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -112,6 +114,19 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # and leaves `present`, the takes left and the shrine bit alone, which
         # is exactly the vector the pre-`mutshelf` agents saw, at 195 dims.
         self.blind_shelf = blind_shelf
+        # Which squad a run opens with. `ChipChoice/Squads.json` ships eight and
+        # they are worth about a level of spread between them, more than any
+        # environment feature measured here, so this is a decision rather than a
+        # constant. `squad=None` cycles them by episode seed, which is uniform
+        # and reproducible and gives an even split over any block of seeds; a
+        # name pins one, which is how a per-squad score is taken.
+        self.squads = squad_names(self.tables)
+        self.squad = squad
+        self.squad_name: str | None = None
+        # The same control every other observation feature gets: hold the entry
+        # at zero and keep it in the vector, so `obs_dim` and the first layer do
+        # not move and the comparison is information-only.
+        self.blind_squad = blind_squad
         # "flat": +10 a level. "rising": +10 x the level reached, so the fifth
         # level is worth five times the first. Levels get exponentially harder
         # (a room is 800 Power at level 1 and 24,600 by level 6) while a flat
@@ -310,11 +325,19 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             / max(1, len(pantries)),
         ]
 
+        # Which squad this run is playing. The policy has to know: the eight
+        # differ in size, in whether they field a frontline and in whether they
+        # field anything ranged, and a two-unit squad pays half the food a
+        # four-unit one does for the same move.
+        who = np.zeros(len(self.squads), dtype=np.float32)
+        if not self.blind_squad and self.squad_name in self.squads:
+            who[self.squads.index(self.squad_name)] = 1.0
+
         return np.concatenate([
             np.asarray(scalars, dtype=np.float32),
             np.asarray(level_view, dtype=np.float32),
             np.asarray(comp, dtype=np.float32),
-            here_kind, shelf, larder, shelf_m, around,
+            here_kind, shelf, larder, shelf_m, around, who,
         ]).astype(np.float32)
 
     def _move_targets(self, st: RunState) -> list:
@@ -430,7 +453,10 @@ class DespotRunEnv(gym.Env if gym is not None else object):
     def reset(self, *, seed: int | None = None, options=None):
         if seed is not None:
             self._seed = seed
-        self.state = RunState.new(self.tables, seed=self._seed)
+        self.squad_name = (self.squad if self.squad is not None
+                           else self.squads[self._seed % len(self.squads)])
+        self.state = RunState.new(self.tables, seed=self._seed,
+                                  squad_name=self.squad_name)
         self.state.use_fast_core = self.fast_core
         if self.placement_policy is not None:
             self.state.placement_policy = self.placement_policy
