@@ -223,3 +223,36 @@ implemented, and the coverage report should say so rather than counting it.
 RL results are worth taking only at a boundary. Training against an interface
 that is about to move is the single thing this project has wasted the most time
 on.
+
+---
+
+## Where the next session picks up
+
+State at the close of 2026-09-02: nothing running, `main` clean and pushed,
+`room-fights` merged. Baselines on the current environment are **random 1.429,
+heuristic 3.946** over 240 seeds with the squads cycled; the best trained agent
+is `roomfight4m_long_s9` at 4.600 against an arm mean of 3.918, which is a draw
+with the heuristic rather than a win.
+
+The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
+**stopped part-way and its checkpoints deleted**. Do not look for its results.
+Re-run it after Batch 1 if the question still matters; it will have to be
+re-trained against the new interface anyway.
+
+**Start with Batch 1**, and inside it start with the two things that unblock the
+rest:
+
+1. **Locate the dialog table.** It is not in `EncryptedMainGroup/DB`. Try the
+   Localizations, DLC and MainTasks groups, and `Game.json`'s own `Dialogs`,
+   `WinDialog` and `LossDialog` keys. Everything about the level-transition
+   decision depends on finding it, and it is the one Batch 1 item that could
+   turn out to be blocked.
+2. **Fog, since it is the item every other observation change has to be built
+   on.** `RoomState`, the reveal in `C_Rooms.SetCurrent`, then the `to_boss`
+   fork, which needs measuring rather than picking.
+
+Tools that did not exist before this session and are worth knowing about:
+`tools/coverage.py` (what the game ships against what the sim reads),
+`tools/data_xrefs.py` (rip-relative references to a string literal, which is how
+`FightInFirst` was found), `tools/determinism_probe.py`, and
+`tools/profile_train.py --deep`.
