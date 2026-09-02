@@ -119,6 +119,13 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.level_reward = level_reward
         self.gamma = gamma
         self._seed = seed
+        # `step` asks for the mask twice: once against the pre-action state to
+        # check the action, and once afterwards for the info dict. The first of
+        # those recomputes exactly what the caller was handed at the end of the
+        # previous step, and `legal_actions` is 7.7% of training wall clock
+        # (see notes/rust-core.md), so the last mask is kept and invalidated at
+        # the two places the state moves: `reset`, and `apply` inside `step`.
+        self._mask_cache: np.ndarray | None = None
 
         probe = RunState.new(self.tables, seed=0)
         self.n_moves = len(MOVES)
@@ -404,6 +411,11 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         return self.n_moves + NON_MOVE_ACTIONS.index(kind)
 
     def action_mask(self) -> np.ndarray:
+        # A copy, not the cached array itself: two calls used to hand back two
+        # independent arrays and nothing should start aliasing because this is
+        # memoised. The copy is 33 bools; the scan it skips is not.
+        if self._mask_cache is not None:
+            return self._mask_cache.copy()
         mask = np.zeros(self.n_actions, dtype=bool)
         if self.state is None or self.state.finished:
             return mask
@@ -411,7 +423,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             i = self._index(action)
             if i is not None:
                 mask[i] = True
-        return mask
+        self._mask_cache = mask
+        return mask.copy()
 
     # -- gym API -----------------------------------------------------------
     def reset(self, *, seed: int | None = None, options=None):
@@ -423,6 +436,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             self.state.placement_policy = self.placement_policy
         self._seed += 1
         self.steps = 0
+        self._mask_cache = None
         return self._encode(self.state), {"action_mask": self.action_mask()}
 
     def step(self, action: int):
@@ -446,6 +460,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         squad_before = len(st.squad)
         phi_before = self.potential(st)
         result = st.apply(self._decode(action))
+        self._mask_cache = None          # the state moved; the mask is stale
         self.steps += 1
 
         if self.level_reward == "rising":

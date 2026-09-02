@@ -49,6 +49,31 @@ after = (env.state.level, env.state.room, env.state.gold)
 check("an illegal action does not change state", before == after)
 check("an illegal action is penalised, not fatal", r < 0 and not term, f"reward {r}")
 
+# `action_mask` memoises, invalidating on `reset` and on the `apply` inside
+# `step`. The window that could go stale is the one the trainer actually uses:
+# the mask carried from the previous step's info dict, after `_encode` has run
+# and called `ensure_stock`. So check it there rather than in isolation, and
+# check that a fresh scan agrees with what the cache hands back.
+_stale = _cached_checked = 0
+for _seed in range(4):
+    _e = DespotRunEnv(tables=TABLES, seed=_seed, placement_policy=POLICIES["frontline"],
+                      fast_core=True)
+    _o, _i = _e.reset(seed=_seed)
+    _m, _n = _i["action_mask"], 0
+    _rng = random.Random(_seed)
+    while _m.any() and _n < _e.max_steps:
+        _held = _e.action_mask()
+        _e._mask_cache = None
+        _cached_checked += 1
+        if not np.array_equal(_held, _e.action_mask()) or not np.array_equal(_m, _held):
+            _stale += 1
+        _o, _r, _t, _tr, _i = _e.step(_rng.choice(list(np.flatnonzero(_m))))
+        _m, _n = _i["action_mask"], _n + 1
+        if _t or _tr:
+            break
+check("the memoised mask always equals a fresh scan", _stale == 0,
+      f"{_cached_checked} masks over 4 runs")
+
 print("\n== no legal action is a no-op ==")
 # A legal action that changes nothing is free real estate for a greedy policy.
 # One trained agent looped on `feed` at hunger 0 for a whole 400-step episode

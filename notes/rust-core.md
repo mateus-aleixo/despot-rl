@@ -72,7 +72,9 @@ measurement first.
 | PPO update and bookkeeping | 14.5% | 13.2% |
 
 10,352 fights at a mean of **0.76 ms**, better than the 1.9 ms the 6v6 benchmark
-above measures, because a typical fight is smaller than that one.
+above measures, because a typical fight is smaller than that one. The table
+predates the `action_mask` memo below; with it in, that line reads 4.2% and the
+run layer 42.9%, and nothing else moves.
 
 **So batching is worth at most 1.16x.** Fights are 16.8% of the clock, and the
 benchmark's best case takes them to 0.29 ms, which is 6.5x on 16.8%, or 14% of
@@ -83,14 +85,29 @@ work lives in.
 **The Python run layer is 2.7x the core.** That is where the time is, and none of
 it needs the env contract touched:
 
-- `action_mask` is called twice per `step`, once to check the action against the
-  pre-action state and once for the info dict afterwards. The second one is what
-  the caller stores and hands back as the next step's mask, so the first is
-  recomputing a value `rollout` already holds. Memoising it against a state
-  counter is worth about half of the 7.7%.
+- **`action_mask`, done.** It was called twice per `step`, once against the
+  pre-action state to check the action and once for the info dict afterwards.
+  The second is what the caller stores and hands back as the next step's mask,
+  so the first was recomputing a value `rollout` already held. `DespotRunEnv`
+  now keeps the last mask and clears it at the two points the state moves,
+  `reset` and the `apply` inside `step`. The line fell **7.7% to 4.2%**, and end
+  to end, three interleaved 100k runs each way, 61.79/64.58/61.73s became
+  60.13/60.07/60.25s: about **1.6s, or 2.7% of the run and 3.4% of the training
+  loop**, which is what halving a 7.7% line looks like once the warm-up baseline
+  and the final evaluation are counted too.
+
+  It is provably behaviour-preserving: 200k steps at seed 0 gives **weights
+  bit-identical** to the pre-memo agent, which is a usable regression test in
+  general now that training is known to reproduce exactly. `action_mask` also
+  returns a copy rather than the cached array, so nothing starts aliasing a
+  buffer that used to be freshly allocated on every call, and
+  `tools/validate_rl.py` checks the memo against a fresh scan in the window that
+  could actually go stale: the mask carried from the previous step, after
+  `_encode` has run and called `ensure_stock`.
 - `RunState.apply` at 20.0% and `_encode` at 16.3% have not been profiled
   internally yet. `_encode` calls `squad_power`, `mutation_effect` and
   `ensure_stock` on every step, and each has a cache that may not be hitting.
+  These are now the whole of the Python run layer's cost.
 
 **And for a sweep, aggregate throughput is the number that matters, not
 single-run speed.** Six concurrent runs measured 6,206 steps/s against 2,077 for
