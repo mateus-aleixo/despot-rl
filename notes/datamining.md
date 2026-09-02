@@ -187,3 +187,17 @@ cleanly.
   block of `p` cells with corner markers `p:1`..`p:4`; enemies occupy `e1`/`e2`
   zones; `s` marks the shop/door cell. This grid is the pre-fight placement
   surface.
+
+## The dialog table is not under `DB/`
+
+`EncryptedMainGroup` holds five files outside its `DB/` subtree:
+`achievements.json`, `metadata.json`, `empty-array.json`, `empty-layouts.csv`
+and **`dialogs.json`**, the 115 KB level-entry dialog table. Every earlier
+search treated `EncryptedMainGroup/DB` as the whole group, which is why the
+table read as missing for as long as it did. When something is described as a
+table and is not under `DB/`, list the group root before concluding it ships
+somewhere else.
+
+Its strings are all localization keys, so it is only readable joined against
+`EncryptedLocalizationsGroup/Languages/en.json`. `tools/show_dialog.py` does
+that join. The decoded schema is in `notes/reference-sim.md`.

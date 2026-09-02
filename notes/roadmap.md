@@ -30,8 +30,9 @@ The remaining numbers want reading carefully too:
 
 **So the shape of the work is structural, not column-level.** The sim reads most
 of the columns of the tables it knows about. What is missing is whole
-subsystems: quests (13 of 31 columns, table never named), dialogs (table not
-even located), consumables, and the entire `Arcade/` and `Chips/Hard/` trees.
+subsystems: quests (13 of 31 columns, table never named), dialogs (table now
+located and decoded, nothing implemented), consumables, and the entire
+`Arcade/` and `Chips/Hard/` trees.
 The batches below are organised around that.
 
 ## How much to land at once
@@ -138,11 +139,16 @@ thrown away.
   and `questCount` / `extraQuestRoomCount` / `questRoomAllowedDoors` /
   `questRoomGuaranteedDoors`. Settles whether a quest room fights.
 - **Dialogs.** `C_Levels.StartDialog` fires one on every level change, drawn
-  without replacement, with `M_Dialog`'s `choices`, branching `outcomes`,
-  `M_Event[]` and `unlocks`. **The agent currently makes zero choices per level
-  transition where a player makes one.** First task is locating the table: it is
-  not in `EncryptedMainGroup/DB`, so check the Localizations, DLC and MainTasks
-  groups, plus `Game.json`'s own `Dialogs`, `WinDialog` and `LossDialog` keys.
+  without replacement, with `M_Dialog`'s `choices`, branching `outcomes` and
+  `M_Event[]`. **The agent currently makes zero choices per level transition
+  where a player makes one.** The table is **found**: it is
+  `EncryptedMainGroup/dialogs.json`, beside `DB/` rather than inside it, with a
+  46-entry Default pool and a 26-event vocabulary. `notes/reference-sim.md` has
+  the decoded schema and `tools/show_dialog.py` renders one. What remains is
+  implementation: the draw without replacement, the weighted outcomes, the 26
+  events, the gates that fill `enableds` and `hiddens`, and the choice itself as
+  an action in the observation. `unlocks` is unused in the shipped file, so skip
+  it. Note the second entry point: consumable ID 10 fires `Dialog.DejaVu`.
 - **Consumables.** `Consumables.json`, `ConsumablesByLevel.json`, and
   `Rooms.json`'s `Consumables` and `SellCost`. Unreachable in Default (all eight
   chips have `StatShops: 0`) but `TalentShop` builds the shop, and
@@ -242,11 +248,14 @@ re-trained against the new interface anyway.
 **Start with Batch 1**, and inside it start with the two things that unblock the
 rest:
 
-1. **Locate the dialog table.** It is not in `EncryptedMainGroup/DB`. Try the
-   Localizations, DLC and MainTasks groups, and `Game.json`'s own `Dialogs`,
-   `WinDialog` and `LossDialog` keys. Everything about the level-transition
-   decision depends on finding it, and it is the one Batch 1 item that could
-   turn out to be blocked.
+1. ~~Locate the dialog table.~~ **Done, 2026-09-02.** It is
+   `EncryptedMainGroup/dialogs.json`, beside `DB/` rather than inside it, which
+   is why the `EncryptedMainGroup/DB` sweep missed it. Nothing about the
+   level-transition decision is blocked: the schema, the pool and the 26-event
+   vocabulary are all decoded in `notes/reference-sim.md`, and
+   `tools/show_dialog.py` renders any of them. The dialog work is now ordinary
+   implementation, so it can be sequenced with the rest of Batch 1 rather than
+   ahead of it.
 2. **Fog, since it is the item every other observation change has to be built
    on.** `RoomState`, the reveal in `C_Rooms.SetCurrent`, then the `to_boss`
    fork, which needs measuring rather than picking.

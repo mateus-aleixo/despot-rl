@@ -1310,8 +1310,99 @@ belongs to the level change rather than to a room.
 
 Weighted choice, branching outcomes, attached events and unlocks. So **every
 level change presents a weighted choice with gameplay consequences**, and the
-sim models none of it. The dialog table is not in `EncryptedMainGroup/DB`, so
-finding it is the next datamining step.
+sim models none of it.
+
+### The dialog table, found
+
+It is `EncryptedMainGroup/dialogs.json`, 115 KB, **beside `DB/` rather than
+inside it**, which is the whole reason the earlier sweep of
+`EncryptedMainGroup/DB` came up empty. It is a flat list of 96 entries, each
+`{title, body}`, where `title` is a localization key of the form
+`Dialog.<Name>.Title`. Every string in the file is a localization key; the text
+resolves against `EncryptedLocalizationsGroup/Languages/en.json` (2,944 keys)
+and reads correctly, which is how we know it is the right table.
+
+**The pool is `Game.Dialogs`**, and it names 46 of the 96 by bare name. All 46
+resolve to an entry, with nothing missing in either direction. The remaining 50
+are menu, sign-in, win, loss, Arcade and King of the Hill dialogs. `WinDialog`
+is `"Win"` and `LossDialog` is `"Loss"` in every ruleset that sets them.
+
+Per-ruleset pools, which matter for batch 3:
+
+| ruleset | pool |
+|---|---|
+| Default and the 21 other rulesets that set it | the same 46 |
+| `Default/WithoutFood`, `ShortPvP/WithoutFood` | 31, the same 15 dropped from both |
+| `Arcade`, `KingOfTheHill` | empty, so no level-entry dialog at all |
+
+Three entries, `Chess`, `PlayersChoice` and `Supermarket`, are in no pool and
+are referenced by no other table or binary string. Treat them as dead content.
+`DejaVu` is not dead and not a level-entry dialog either: it belongs to
+consumable ID 10, `DejaVu`, so **the dialog system has a second entry point
+through consumables**, which batch 1's consumables item has to account for.
+
+The serialized grammar, counted over all 96 entries:
+
+    body     text, choices, events(22), comment(1)
+    choice   button, outcomes(179), events(80), link(30)
+    outcome  text, choices, events(123), weight(67), comment(48)
+    event    className, parameters(172)
+
+`choices` and `outcomes` alternate, and the deepest chain is five levels below
+the body. `unlocks` appears nowhere in the shipped file, so the `M_Dialog` field
+is unused in practice.
+
+**Weights are clean.** Of the 179 choices that carry outcomes, 149 have exactly
+one outcome and no weight, and the other 30 carry two or three outcomes with a
+weight on every one, never a mix. The weights sum to 100 in 23 of those and to
+150 in the other 7, so they are raw numbers normalized by their own sum, which
+is what `weightSums` and `cSums` compute at runtime. A single unweighted outcome
+is a deterministic continuation, not a coin flip.
+
+**The event vocabulary is 26 classNames** across the 46 pool dialogs (63 across
+all 96, but the other 37 are menu, cheat and platform actions). By what they
+touch:
+
+| group | classNames |
+|---|---|
+| resources | `PlusGold`, `MinusGold`, `PlusFood`, `MinusFood`, `GiveExperience` |
+| roster | `GiveUnit`, `RemoveUnit`, `CloneUnit`, `GetNames`, `RemoveHealth` |
+| inventory | `GiveItem`, `RemoveItem` |
+| mutations | `GiveMutation` |
+| variables | `DefineVariables`, `AddToVariable`, `MultiplyVariable`, `RemoveVariables`, `CompareVariable` |
+| gates | `CheckFood`, `CheckGold`, `CheckItem`, `HasClass`, `HasSlot`, `HasSlotForClones`, `Disable` |
+| fight | `Ambush` |
+
+The four heaviest are `GiveMutation` (30 uses), `PlusGold` (29), `GetNames` (23)
+and `PlusFood` (16). `GiveMutation` takes a bare `id` into `Mutations.json`, so
+a dialog can hand out a mutation outside the shop entirely, and 30 uses of it
+across a 46-dialog pool is not flavour.
+
+Gates are what make a choice conditional: `CompareVariable` carries `name`,
+`value`, `op` and `hideIfDisabled`, and `HasClass` carries `invert`, so the
+runtime evaluates them to fill the `enableds` and `hiddens` arrays before the
+choice is shown. Variables are dialog-local state, declared by
+`DefineVariables` (`robotsGold`, `numberOfUnitsToGive`, `foodToRemove` are the
+three seen) and cleared by `RemoveVariables`.
+
+**One parsing trap:** numeric parameters are inconsistently typed in the
+shipped file, so a reader has to coerce rather than assume. `PlusGold.amount` is
+an int 19 times and a string 11 times, `PlusFood.amount` a string 14 times and
+an int 3, and `MinusGold`, `MinusFood` and even `GiveMutation.id` are mixed the
+same way. Every one of those strings parses as an integer, so a plain `int()`
+covers the whole file. The single exception is `fromVariable`, which
+`PlusGold` takes instead of `amount` in `GuidingStone` and whose value
+(`"itemCost"`) is a variable name.
+
+**Dialog text interpolates the same variables.** Bodies carry `{goldLoss}`,
+`{foodGain}`, `{chance}` and `{name}` placeholders, plus a pluralizer
+(`{goldLoss:token|tokens}`) and a nested localization lookup
+(`{class:loc:Classes.{}.Title}`). Nothing in the sim needs to render text, but
+it confirms that the variables an event writes and the text a player reads share
+one namespace, so a variable is not purely internal bookkeeping.
+
+`tools/show_dialog.py` renders any dialog by name with the text resolved, which
+is the fastest way to read one.
 
 ### The generation parameters we still ignore
 
