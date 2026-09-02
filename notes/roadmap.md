@@ -7,31 +7,32 @@ and the standard for calling it done.
 ## Phase 0 — the scope, measured rather than guessed
 
 `tools/coverage.py` enumerates every shipped table against what `sim/` and `rl/`
-actually mention. Run 2026-09-02:
+actually read. Run 2026-09-02:
 
-    91 tables, 1,749 distinct column names, 850 never mentioned (49%)
+    91 tables, 1,749 distinct column names, 648 never mentioned (37%)
     28 tables this sim never names at all
-    606 C_ classes in the dump, 26 mentioned here (4%)
-    584 M_ classes in the dump, 30 mentioned here (5%)
+    606 C_ and 584 M_ classes in the dump, 26 and 30 mentioned here
 
-**That is the real scope**, and it is several times what the phase list below
-was built on. The phases were assembled from gaps found by accident or reported
-by a player: the `RoomType` column in `EnemyPacks.json` sat unused for weeks,
-`ChipChoice/Squads.json` was never loaded, `Quests.json` is still never named,
-and the starting squad was wrong three separate times. A project that discovers
-its own scope by accident cannot plan, so this report is the input to planning
-and not the closing report it was originally filed as.
+**A correction, because the first run of this tool was wrong and the wrong
+number was briefly planned against.** It did a plain substring scan and reported
+850 misses and `Skills.json` as 23 columns of which the sim reads one. Both were
+artifacts: `Param1Name` is reached through `row.get(f"Param{i}Name")`, `Q7Prob`
+through `f"Q{q}Prob"`, `DamagePerLevel` through `f"{key}PerLevel"`. The tool now
+walks the AST for f-strings, and `Skills.json` reads **21 of 23**.
 
-Worth reading the miss list rather than the total: `Skills.json` has 23 columns
-and this sim reads **one**. `Quests.json`, `Consumables.json`,
-`ConsumablesByLevel.json`, `ItemShopLevels.json`, `LayoutsByPack.json`,
-`MutationUnlockConditions.json` and the whole `Arcade/` and `Chips/Hard/` trees
-are never named. `python tools/coverage.py --missing` prints the columns.
+The remaining numbers want reading carefully too:
 
-The 49% is an over-count of what is read, not an over-count of what is missing:
-a column counts as read if its name appears anywhere in the source, including a
-comment, and reading a key is not the same as implementing what it means. So the
-true coverage is lower than 51%, and every miss is hard evidence.
+- `Meta.json` alone is 553 of the 1,749 columns and 308 of the 648 misses,
+  because its keys are class *names*. Excluding it, column coverage is about
+  **72%** and the miss list is 340 rather than 648.
+- The C_/M_ class counts flatter the gap in the other direction: much of the
+  dump is view, tooltip and audio code a headless sim should never have.
+
+**So the shape of the work is structural, not column-level.** The sim reads most
+of the columns of the tables it knows about. What is missing is whole
+subsystems: quests (13 of 31 columns, table never named), dialogs (table not
+even located), consumables, and the entire `Arcade/` and `Chips/Hard/` trees.
+The batches below are organised around that.
 
 ## How much to land at once
 
@@ -41,16 +42,16 @@ wrong about measurement, and the two need separating.
 **Implementation batches as large as it can be verified.** The constraint is not
 one feature at a time; it is that each feature ships with a check that fails when
 that feature is removed. With per-feature checks, batch size does not affect
-correctness, and the cost of a small batch is another full re-baseline for
-nothing. So: land whole subsystems, not single columns.
+correctness, and a small batch costs another full re-baseline for nothing. So:
+land whole subsystems.
 
 **Measurement cannot batch, because one number cannot attribute a regression.**
 The proof is from this project, today. Room fights alone dropped the heuristic
-from 3.946 to 1.000, and the only reason the cause was found in an hour is that
-room fights were the sole change in flight; with five subsystems in flight the
-search would have been combinatorial. Two agents differing in exactly one thing
-is also how the `shrine2m`/`shelf2m` divergence was traced to a code change
-rather than to nondeterminism.
+from 3.946 to 1.000, and the cause was found in an hour only because room fights
+were the sole change in flight. With five subsystems in flight that search is
+combinatorial. Two runs differing in exactly one thing is also how the
+`shrine2m`/`shelf2m` divergence was traced to a code change rather than to
+nondeterminism.
 
 So: implement in large batches with a check per feature, and take RL numbers
 only at batch boundaries, never inside one.
@@ -61,13 +62,13 @@ only at batch boundaries, never inside one.
 position by `1e-4` and re-running *the same engine* flips the winner in about
 one splash fight in twelve, and the cross-engine error is the same order (see
 `notes/rust-core.md`, "The residual error is chaos, not logic"). float32 against
-float64 over a 120-second fight is a far larger perturbation than that. Identical
-inputs will not give identical outcomes in anything that is not the original
-binary.
+float64 over a 120-second fight is a far larger perturbation than that.
+Identical inputs will not give identical outcomes in anything that is not the
+original binary.
 
 **Done means: every mechanism present and correct, with outcome distributions
 matching, and every constant either read from the shipped data or recorded in
-`sim/assumptions.py` as a choice.** That is checkable. `tools/diff_core.py`
+`sim/assumptions.py` as a choice.** That is checkable, and `tools/diff_core.py`
 already works to exactly this standard for the battle loop.
 
 Some constants will never be recovered: `maxDeadEnds`, `minFinishDistance`,
@@ -79,298 +80,146 @@ that eventually empties.
 
 **Every feature lands with a check that it changes something, not that it
 parses.** `vampirism` sat registered as implemented for weeks while reading
-`percent` where every shipped row says `value`, healing exactly zero. It was
+`percent` where every shipped row says `value`, healing exactly zero, and it was
 counted in the coverage number the whole time. Forty features implemented and
 none of them tested is not a complete sim, it is a larger untested surface.
 
-Concretely, for each item below: a check in `tools/validate_sim.py` or
-`tools/validate_rl.py` that fails if the mechanism is removed.
+## Measurement policy
 
-## Measurement policy while this is going on
-
-Every environment change invalidates every agent and every number, and that has
-happened four times in a day. So:
-
-1. **Freeze the interface inside a phase.** Land all of a phase's changes, then
-   re-baseline once. Do not train against an interface that is about to move.
+1. **Freeze the interface inside a batch.** Land it all, then re-baseline once.
+   Never train against an interface that is about to move.
 2. **The heuristic is the reference**, not a previous agent: it is the only
    thing that survives an interface change, because it is re-measured rather
    than loaded.
-3. **Re-baseline is random + heuristic over 240 seeds** with the squads cycled,
-   recorded in `notes/rl.md` with the date and the phase.
-4. **Agents are disposable.** `runs/` holds 681 checkpoints and 332 MB, of which
-   only the 96 files at 203x33 can be loaded at all; everything else is a
-   permanently unloadable artifact of a superseded interface. They are worth
-   keeping only for forensics (comparing two runs' weights is how the
-   `shrine2m`/`shelf2m` divergence was traced to a code change), and 332 MB is
-   not a constraint. The durable record is `notes/`, never `runs/`.
+3. **A baseline is random + heuristic over 240 seeds** with the squads cycled,
+   recorded in `notes/rl.md` with the date and the batch.
+4. **Agents are disposable.** `runs/` holds 675 checkpoints and 332 MB, of which
+   only the 96 at 203x33 load at all. They are worth keeping only for forensics
+   (comparing two runs' weights is how the `shrine2m`/`shelf2m` divergence was
+   traced to a code change), and 332 MB is not a constraint. The durable record
+   is `notes/`, never `runs/`.
 
 ---
 
-# Phase 1 — Navigation and knowledge
+# Batch 1 — the run layer, complete
 
-**Why first:** it is the only gap that makes the task *easier* than the game
-rather than cheaper to exploit, so every navigation number measured so far was
-measured by a policy playing with the lights on. Portals ride along because they
-are a navigation option and fog is what makes navigation a decision; separately
-they cost two invalidations for one result.
+Everything about what a run *is*. All of it touches `RunState`, `RoomMap` or the
+observation, so each item alone would break the interface; landing them together
+costs one break instead of a dozen.
 
-### 1.1 Room state and the reveal
+**Ordered first because it is the interface-breaking batch.** Doing it before
+Batch 2 means Batch 2's measurements survive; the other way round they would be
+thrown away.
 
-- `RoomState` is `Unknown = 0`, `Unexplored = 1`, `Explored = 2`, `Current = 4`;
-  `Rooms.json` ships `Explored: false`.
-- `C_Rooms.SetCurrent` sets the entered room's `state`, then walks
-  `M_Room.get_neighbors` reading each neighbour's `get_state`. That is the
-  reveal step.
-- Add `Room.state` and set it in `RunState.apply`'s move branch and in
-  `next_level` / `RunState.new` for the opening room.
+- **Fog of war.** `RoomState` (`Unknown/Unexplored/Explored/Current`),
+  `C_Rooms.SetCurrent`'s reveal of the entered room's neighbours, `Rooms.json`'s
+  `Explored` flag. Fog changes *information*, not legality: moves are already
+  restricted to orthogonal neighbours and a neighbour is always revealed by
+  standing next to it, so `legal_actions` is untouched and only `_encode` moves.
+- **The `to_boss` replacement**, a measured choice between three different
+  agents rather than an implementation detail. `RoomMap.to_boss` is a BFS over
+  the whole graph and four observation entries read it. Candidates: drop the
+  boss-distance features; compute over the revealed subgraph with a convention
+  for the unreached; or expose a frontier instead. Each gets the `--blind-*`
+  control.
+- **Portals.** `portalsCount` and `minPortalDistance` in `mapgen`. `RoomMap`
+  already links them and `from_table` reads the shipped three; generated levels
+  have none, so the `portal` action has never once been legal.
+- **The remaining room types.** `Secret` (with `activatesSecret`,
+  `secretIsActive`, `roomsToActivateSecret = 2`, `secretRoomCount`, and
+  `SecretRoom: true` on level 7), `TalentShop`, `PermanentShop`,
+  `ConsumableShop`, `QuestExtra`, `FinalBoss`.
+- **The shrine split.** `Shrines` is 1 at level 1 and 0 after, while
+  `RerollShrines` is 1 from level 2 on. The sim conflates them.
+- **Quests.** Eleven in `Quests.json`, each with `Doors`, `ExtraRooms`,
+  `RoomParams` (a named `Layout`, directional priorities,
+  `guaranteedPositions`) and per-quest fields. `C_Rooms.CreateQuest`, the
+  `QuestStatus` lifecycle, the per-level shortlist (levels 2, 6 and 10 only),
+  and `questCount` / `extraQuestRoomCount` / `questRoomAllowedDoors` /
+  `questRoomGuaranteedDoors`. Settles whether a quest room fights.
+- **Dialogs.** `C_Levels.StartDialog` fires one on every level change, drawn
+  without replacement, with `M_Dialog`'s `choices`, branching `outcomes`,
+  `M_Event[]` and `unlocks`. **The agent currently makes zero choices per level
+  transition where a player makes one.** First task is locating the table: it is
+  not in `EncryptedMainGroup/DB`, so check the Localizations, DLC and MainTasks
+  groups, plus `Game.json`'s own `Dialogs`, `WinDialog` and `LossDialog` keys.
+- **Consumables.** `Consumables.json`, `ConsumablesByLevel.json`, and
+  `Rooms.json`'s `Consumables` and `SellCost`. Unreachable in Default (all eight
+  chips have `StatShops: 0`) but `TalentShop` builds the shop, and
+  `KingOfTheHill`, `Arcade` and `Tasks` are unchecked. Implement the mechanism,
+  then record where it fires.
+- **Layouts.** `LayoutsByPack.json` and `SpecialRoomLayouts.csv`, neither named
+  anywhere in the sim, plus `M_EnemyPack.ChooseLayout`.
+- **`InstantTransitions`**, and one more attempt at `maxDeadEnds`,
+  `minFinishDistance` and multi-square rooms with `tools/data_xrefs.py`.
 
-**Note on legality:** fog changes *information*, not the action space. Moves are
-already restricted to orthogonal neighbours, and a neighbour is always revealed
-by standing next to it. So `legal_actions` does not change; only `_encode` does.
+**Boundary:** re-baseline random + heuristic over 240 seeds, squads cycled, then
+one sweep for the `to_boss` question, which is a genuine fork rather than a
+feature.
 
-**Check:** a fresh level has exactly the start room `Explored` and its
-neighbours `Unexplored`, everything else `Unknown`; entering a room moves it to
-`Explored` and its neighbours to at least `Unexplored`; the count of non-`Unknown`
-rooms is monotone across a run.
+# Batch 2 — the battle layer, complete
 
-### 1.2 The observation, which is a design decision and not a lookup
+Nothing here moves `obs_dim`; all of it changes how fights resolve. Measured
+against Batch 1's baseline.
 
-`RoomMap.to_boss` is a BFS over the whole graph, computed in `__init__` before a
-room is entered, and four observation entries read it: distance to the boss,
-whether each neighbour is nearer the boss, the room count, and the fraction
-cleared. `_move_targets` also picks which portal to expose by `min(to_boss)`.
+- **The `C_Fight` escalation schedule.** `_MIDDLE_FIGHT_TIME = 120` starting a
+  `M_DamageBonusOverTimeStatus`, `_LONG_FIGHT_TIME = 180` starting a
+  `M_DyingDotStatus`, `_LONG_TIME_WITHOUT_DAMAGE = 8`, the final-boss variants
+  (1200 / 1320 / 12), and `DELAY_SINGLE` / `DELAY_KOH`. Our
+  `max_fight_seconds = 120` is that number wearing the wrong meaning: 120s is
+  where the game starts pushing a stalemate, not where it gives up. Port to both
+  `sim/battle.py` and the Rust core.
+- **The 28 mutation names with no handler**, of 101 shipped. 259 of 1,094 offers
+  are implemented, which is what caps the shelf at +0.13 and therefore caps
+  every mutation result in `notes/rl.md`.
+- **An audit of the 79 that do have handlers.** Three read the wrong key and did
+  nothing while counting as implemented (`vampirism` reading `percent` where the
+  rows say `value`, then `ExplodeProjectile`, then `EventualKnockback`). There
+  is no reason to think the other 76 were ever checked.
+- **Class and unit skill coverage**, the same way: how much of `Meta.Classes`
+  the sim can actually field, and which `ClassSkills` and `Skills` rows resolve
+  to a real effect rather than a no-op.
 
-Under fog there is no whole graph. Three replacements, which are **different
-agents rather than different implementations of one agent**:
+**Boundary:** re-baseline, and re-run `tools/diff_core.py` to confirm the two
+engines still agree 60/60 with the escalation in.
 
-- **A, blind.** Drop the boss-distance features. Navigate on the local view and
-  the room-kind one-hot alone.
-- **B, revealed subgraph.** Distance over what is known, with a convention for
-  the unreached: optimistic (unknown rooms are free), pessimistic (unreachable),
-  or a separate "boss not yet found" flag.
-- **C, frontier.** How many revealed rooms are still unentered, and in which
-  directions, replacing distance entirely.
+# Batch 3 — modes and chips
 
-**Measure it, do not pick it.** This is a two-arm sweep at minimum, and
-`obs_dim` moves either way, so each candidate gets the `--blind-*` control:
-hold the replacement entries at zero and keep them in the vector.
-
-### 1.3 Portals
-
-- `RoomType.Portal = 32`; `C_Room.CanBeTeleportedTo` / `CanBeTeleportedFrom`;
-  `C_Rooms.TeleportTo`; `V_Room.ActivateTeleportCorners` called from
-  `SetCurrent`. `GenerationParams` has `portalsCount` and `minPortalDistance`.
-- `RoomMap.__init__` already links every portal to every other, and
-  `from_table` reads the shipped `Portals`. `sim/mapgen.py` places **none**, so
-  the `portal` action exists and has never once been legal.
-- Implement `portalsCount` and `minPortalDistance` in `mapgen`, and recover
-  their per-level values (they are not in `Levels.json`; try `data_xrefs.py` on
-  the key names, else record as assumptions).
-
-**Check:** a generated level contains the configured number of portals, no two
-closer than `minPortalDistance`, and the `portal` move is legal from a portal
-room and reaches another portal.
-
-### 1.4 `BossVision`
-
-Mutation ID 188. `C_BossVisionMutation.OnNewLevel` walks every room reading
-`get_type` and `get_state`, revealing the boss. It is worth nothing today
-because the agent already knows where the boss is; under fog it becomes a real
-effect, and it is the first mutation whose value depends on the fog existing.
-
-**Check:** with the mutation held, the boss room is not `Unknown` at level start;
-without it, it is.
-
-**Invalidates:** every agent (`obs_dim` moves). Re-baseline after 1.1-1.4 land
-together.
-
----
-
-# Phase 2 — Fight fidelity
-
-**Why second:** it changes how fights resolve, which is the other half of every
-number, and it does not move `obs_dim`, so it can be measured against Phase 1's
-baseline without a second interface break.
-
-### 2.1 The escalation schedule
-
-`C_Fight` carries constants the sim ignores entirely:
-
-    _MIDDLE_FIGHT_TIME = 120        _MIDDLE_FIGHT_TIME_FINAL_BOSS = 1200
-    _LONG_FIGHT_TIME = 180          _LONG_FIGHT_TIME_FINAL_BOSS = 1320
-    _LONG_TIME_WITHOUT_DAMAGE = 8   _LONG_TIME_WITHOUT_DAMAGE_FINAL_BOSS = 12
-    DELAY_SINGLE = 0.5              DELAY_KOH = 3.5
-
-with `_enhanceStatusController` over `M_DamageBonusOverTimeStatus` and
-`_exhaustStatusController` over `M_DyingDotStatus`. So a long fight is escalated,
-first by a damage bonus over time and then by a dying damage-over-time, rather
-than being cut off. `sim/assumptions.py` caps a fight at
-`max_fight_seconds = 120` and calls it a draw: **the same number wearing the
-wrong meaning.**
-
-Read `C_Fight._Fight`, `EnhanceUnit`, `ExhaustUnit`, `AreEffectsFinished` and
-`AfterOneTeamDied` for the exact application, then port to `sim/battle.py` and
-to the Rust core.
-
-**Check:** a fight still running at 121s has the enhance status applied and one
-at 181s the exhaust status; a fight that would have drawn at the cap now
-resolves; `diff_core.py` still agrees 60/60 between engines.
-
-### 2.2 Mutation coverage
-
-101 distinct `Name` values ship in `Mutations.json`; 79 have handlers; **28 do
-not**. Of 1,094 offers across twelve levels only 259 are implemented, which is
-what caps the shelf at +0.13 and therefore caps every mutation result in
-`notes/rl.md`.
-
-Work each unimplemented `Name` from `dump.cs`'s `M_<Name>Mutation` properties,
-**reading the key names the model class actually uses** — that is the
-`vampirism` lesson, and `ExplodeProjectile` and `EventualKnockback` were the same
-bug found twice more.
-
-**Check:** per mutation, a test that it changes a fight or a run, not that it
-parses. Plus a coverage number in `validate_sim.py` that fails if it regresses.
-
-### 2.3 Audit the existing 79 for the same class of bug
-
-Three of them read the wrong key and did nothing while counting as implemented.
-There is no reason to think the other 76 were audited. Cross-check every
-registered handler's parameter names against the shipped rows.
-
-**Invalidates:** fight outcomes, so every agent and the baselines, but not
-`obs_dim`.
-
----
-
-# Phase 3 — The decision layer that does not exist
-
-**Why third:** it is the largest decision-shaped hole in the sim and a bigger
-build than everything above it combined, so it should land on a sim whose
-navigation and combat are already right.
-
-### 3.1 The level-entry dialog
-
-`C_Levels.StartDialog` reads the session mode, takes `Services.Dialogs`, picks
-one and `RemoveAt`s it (used once per run), and falls back to
-`"NoDialogsPlaceholder"`. `C_ResLog.NewLevel(level, dialog, roomCount, quest)`
-logs it with a `NEW_LEVEL` event. `OnDialogsClosed` follows.
-
-`M_Dialog` is not a cutscene:
-
-    float weight       string title      string text
-    string[] choices   M_Dialog[][] outcomes
-    M_Event[] events   IList<M_UnlockEntry> unlocks
-    bool[] enableds    bool[] hiddens    float[] weightSums, float[][] cSums
-
-**The agent currently makes zero choices per level transition where a player
-makes one.**
-
-First task is finding the table: it is **not** in `EncryptedMainGroup/DB`. Check
-`EncryptedLocalizationsGroup`, `EncryptedDLCGroup` and `EncryptedMainTasksGroup`,
-and `Game.json`'s top-level `Dialogs`, `WinDialog` and `LossDialog` keys, which
-the sim also does not read.
-
-Then: the weighted draw without replacement, the choice, the branching
-`outcomes`, and `M_Event` application.
-
-**Check:** a dialog fires on exactly every level change; the pool is drawn
-without replacement across a run; a chosen outcome applies its events; the
-placeholder appears when the pool empties.
-
-### 3.2 Quests
-
-`Quests.json` ships eleven (`Sci`, `Reaper`, `Nurgle`, `Pit`, `SecretRoom`,
-`Cube`, `Spider`, `Rat`, `Flight`, `Sword`, `Bot`), each with `Doors`,
-`ExtraRooms`, `RoomParams` (a named `Layout`, directional priorities,
-`guaranteedPositions`), and per-quest fields like `class` and `haterName`.
-`C_Rooms.CreateQuest` resolves the name through `EnumUtils.ToEnum<Quest>` and
-reflection over `"M_" + Name` and `"C_" + Name + "Quest"`, reads an `"outcomes"`
-array and sets `M_Room.questType`. `QuestStatus` is
-`Uninitialized / Accepted / Declined / Acquired / Finished`.
-
-The level rows carry a per-level shortlist: levels 2, 6 and 10 only
-(`Sci,Pit,Cube,Rat`; `Reaper,SecretRoom,Spider`; `Nurgle,Flight,Sword`).
-`GenerationParams` has `questCount`, `extraQuestRoomCount`,
-`questRoomAllowedDoors`, `questRoomGuaranteedDoors`.
-
-Open question this phase settles: **whether a quest room fights.** There is no
-`Quest` row in `EnemyPacks.json`, which suggests not, but that is inference.
-
-**Check:** a level with a `Quest` shortlist generates exactly one quest room of a
-listed type with its layout and door constraints; the status lifecycle advances;
-each quest's own effect fires.
-
-**Invalidates:** the action space and the observation, so everything.
-
----
-
-# Phase 4 — The remaining room types and generation
-
-- **Secret rooms.** `RoomType.Secret = 32768`, `M_Room.activatesSecret` /
-  `secretIsActive`, `C_Rooms.MaybeActivateSecretRoom`, the constant
-  `roomsToActivateSecret = 2`, `secretRoomCount` in `GenerationParams`, and
-  `SecretRoom: true` on level 7 only. Also `C_SecretRoomQuest`.
-- **`PermanentShop = 16`, `TalentShop = 4160`, `ConsumableShop = 16384`,
-  `QuestExtra = 1024`, `FinalBoss = 2048`.** None modelled. `TalentShop` is what
-  builds `C_ConsumableShop`, so consumables hang off it.
-- **Consumables.** `StatShops` is 0 across all eight Default chips, so they
-  cannot fire there, but `KingOfTheHill`, `Arcade` and `Tasks` have not been
-  checked. Implement the mechanism, then record where it fires.
-- **`RerollShrines` against `Shrines`.** The level rows have `Shrines: 1` at
-  level 1 and 0 after, while `RerollShrines: 1` from level 2 on. The sim
-  conflates them; the shrine family after level 1 is the **reroll** shrine.
-- **The three unrecovered `GenerationParams` values.** Retry with
-  `tools/data_xrefs.py` now that data cross-references are possible; if they are
-  genuinely absent, keep them in `assumptions.py` with the evidence.
-
----
-
-# Phase 5 — Modes and chips
-
-`load_ruleset(mode, chip)` already layers `Common` then the mode then the chip,
-so the plumbing exists. What is missing is the mechanics each turns on.
+`load_ruleset(mode, chip)` already layers `Common`, then the mode, then the
+chip, so the plumbing exists; the mechanics each turns on do not.
 
 - **Modes:** `Default`, `KingOfTheHill`, `Arcade`, `Tasks`.
 - **Default's chips:** `default`, `easy`, `hard`, `hunger`, `mutagens`, `crazy`,
   `shortpvp`, `arcade`.
 
-Some are already just data: `hunger` shrinks the room counts (6-7 and 9-11
-against 7 and 10-12), `shortpvp` is seven levels of 5-6 rooms, `crazy` is **two**
-levels, one of 3 rooms and one of 100. Others will need mechanics:
-`KingOfTheHill` has its own directory and its own fight delay constant
-(`DELAY_KOH = 3.5`), and `shortpvp` implies a PvP resolution path.
+Some are already only data: `hunger` shrinks the room counts, `shortpvp` is
+seven levels of 5-6 rooms, `crazy` is **two** levels, one of 3 rooms and one of
+100. Others need mechanics: `KingOfTheHill` has its own directory and its own
+fight delay, `shortpvp` implies a PvP resolution path, and `Arcade` ships eight
+of its own tables that nothing here reads.
 
-**Check:** every mode and chip loads under `strict=True`, and each one's own
-check suite passes. A mode that loads but has no mechanics is a mode that is not
+**Boundary:** each mode loads under `strict=True`, has its own check suite, and
+gets its own baseline. A mode that loads but has no mechanics is not
 implemented, and the coverage report should say so rather than counting it.
 
----
+# Batch 4 — closing it out
 
-# Phase 6 — Closing it out
-
-- **A coverage report**, generated rather than asserted: per subsystem, what the
-  shipped data contains against what the sim implements, with the unimplemented
-  named. Mutations already have a number (259 of 1,094 offers); rooms, skills,
-  quests, dialogs, modes and consumables need the same.
+- **`tools/coverage.py` becomes a gate**, not a report: it fails when a table is
+  named nowhere, and its numbers go into `notes/` with a date.
 - **An `assumptions.py` audit**: every entry either resolved against the binary
   or restated with why it cannot be.
-- **A check per feature**, per the rule at the top. The coverage report should
-  fail if a feature is registered without one.
-
----
+- **A check per feature**, enforced. A feature registered without one is not
+  implemented, which is the whole `vampirism` lesson.
 
 ## Ordering summary
 
-| phase | what | breaks | re-baseline |
+| batch | what | breaks | boundary |
 |---|---|---|---|
-| 1 | fog, portals, `BossVision` | `obs_dim` | yes |
-| 2 | fight escalation, 28 mutations, audit the 79 | fight outcomes | yes |
-| 3 | dialogs, 11 quests | actions + obs | yes |
-| 4 | secret, remaining shop types, shrine split, generation params | maps | yes |
-| 5 | 4 modes, 8 chips | new rulesets | per mode |
-| 6 | coverage report, assumptions audit, checks | nothing | no |
+| 1 | fog, portals, all room types, quests, dialogs, consumables, layouts | obs + actions | re-baseline, plus a sweep for the `to_boss` fork |
+| 2 | fight escalation, 28 mutations, audit the 79, skill coverage | fight outcomes | re-baseline, `diff_core` 60/60 |
+| 3 | 4 modes, 8 chips | new rulesets | per-mode suite and baseline |
+| 4 | coverage as a gate, assumptions audit, check enforcement | nothing | none |
 
-RL results are worth taking only after a phase closes and the baseline is
-re-measured. Training against an interface that is about to move is the one
-thing this project has already wasted the most time on.
+RL results are worth taking only at a boundary. Training against an interface
+that is about to move is the single thing this project has wasted the most time
+on.
