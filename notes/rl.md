@@ -2240,42 +2240,69 @@ across the 24 agents of the 2M passives sweep. Two separate sets of 24 agents
 now agree that the spread at 2M is about a tenth of a level, against 0.183 at
 600k.
 
-### Training does not reproduce from `--seed` alone
+### Why two sweeps of the same command disagreed, and what it was not
 
-Found while writing the section above, and it qualifies every paired number in
-this file.
+`shrine2m_s*` and `shelf2m_described_s*` are the same command with the same
+seeds: 2M steps, `--fast-core`, `--shaping none`, the default step cost, no arm
+flags. Comparing the saved weights, seeds 0 and 1 are bit-identical at every
+checkpoint and seeds 2 to 11 differ, already at 600k, by 0.42 to 0.55, which is
+the scale of the weights themselves.
 
-`shrine2m_s0..s11` and `shelf2m_described_s0..s11` are the same command: same
-2M steps, same `--fast-core`, same `--shaping none`, same step cost, no arm
-flags on either, same init seed, same code. They were launched on different
-days. Comparing the saved weights directly:
+The first reading here was that training does not reproduce from `--seed`, with
+a concurrency-dependent nondeterminism as the suspect. **Both halves of that
+were wrong**, and the tests are worth recording because the wrong version was
+plausible.
 
-    seed  0   identical at 600k, 1.2M, 1.8M and 2M
-    seed  1   identical at 600k, 1.2M, 1.8M and 2M
-    seeds 2-11  differ, and already differ at the 600k checkpoint
+**Training is bit-reproducible.** `tools/determinism_probe.py` trains four
+copies of one seed one at a time, then four more all at once, with the workers'
+`OMP_NUM_THREADS=1`:
 
-Ten of twelve diverge, with a maximum weight difference of 0.42 to 0.55, which
-is the scale of the weights themselves rather than a rounding artifact. Two
-reproduce exactly all the way to 2M, so the code, the command and the seed do
-control the setup: this is not a configuration difference between the two
-sweeps. And the divergence is present at the **first** checkpoint, so it is not
-drift accumulating over a long run, it is an early fork.
+| condition | distinct agents | max weight delta |
+|---|---|---|
+| alone | 1 of 4 | 0 |
+| concurrent | 1 of 4 | 0 |
+| both together | 1 of 8 | 0 |
 
-**What this costs.** The pairing in every sweep in this file pairs two arms on
-the init draw, which is real and worth having, but it does **not** pair them on
-the trajectory. Two runs that share a seed can end up half a level apart on
-their own, and the twelve-seed intervals here are wide enough to have absorbed
-that without anyone noticing. It does not overturn any conclusion, because every
-headline result in this file is a null and a null does not get less null when
-the noise turns out to be larger; but it does mean the intervals are honest only
-if read as including this.
+Eight identical agents, exactly zero difference, so the seed and the command
+fully determine the result and concurrency has nothing to do with it.
 
-**Untested hypothesis, recorded so it is not re-derived.** The `shelf2m` launch
-log opens with `resuming: 4 of 24 already saved`, so four of its runs came from
-an earlier, smaller launch, and the two that reproduce are the two lowest seeds.
-That fits a nondeterminism that depends on how many runs are training at once,
-which would point at a thread-count-dependent reduction surviving the
-`OMP_NUM_THREADS=1` the workers already set, or at torch's inter-op threads. The
-cheap test is two runs of the same seed at 200k, once alone and once against
-five concurrent runs, comparing weights. Until that is run, treat the mechanism
-as unknown and the observation as the fact.
+**What actually differed was the code.** The `budget4m` sweep runs the same
+configuration on today's tree, and its 2M checkpoints settle it:
+
+| seed | vs `shrine2m` | vs `shelf2m_described` |
+|---|---|---|
+| 0 | differ | differ |
+| 1 | differ | differ |
+| 2 | differ | **identical** |
+| 3 | differ | **identical** |
+| 4 | differ | **identical** |
+| 5 | differ | **identical** |
+
+Today's code reproduces `shelf2m_described` bit-for-bit at seeds 2 to 5 and
+matches `shrine2m` nowhere. Seeds 0 and 1 match neither, and they are exactly
+the two runs `shelf2m` did not train: its log opens `resuming: 4 of 24 already
+saved`, and the four that already existed were `described_s0`, `described_s1`,
+`blind_s1` and `blind_s2`, written between 02:06 and 02:09 while the twenty
+fresh ones start at 02:43. So the environment changed in that half-hour, the
+resumed four predate the change, and `shrine2m` from the night before predates
+it too.
+
+**What the change was cannot be recovered.** It moved neither `obs_dim` nor
+`n_actions`, since every one of these agents still loads. The repository had no
+version control at the time, so there is no diff to read. This is the entire
+argument for the git history the repo now has: the question would have been a
+`git log` rather than three experiments.
+
+**What it costs the shelf sweep.** The four resumed runs are split across the
+arms, so seed 0 grades an old-code `described` against a new-code `blind`, and
+seed 2 does the reverse. Seed 1 is old against old, and seeds 3 to 11 are new
+against new. Two of the twelve pairs are therefore cross-version, and both
+happen to sit on the positive side (+0.06 and +0.05). Dropping them moves the
+paired difference from **+0.01 to 0.00**, and dropping seed 1 as well takes it
+to **-0.02**. The conclusion does not move: the shelf description is worth
+nothing, and it is worth slightly less than first reported.
+
+**How to apply.** `--resume` silently mixes code versions across a sweep, which
+is worse than the wasted compute it saves, because the mixing is invisible in
+the output. Either finish a sweep on one tree or re-run the resumed arms, and
+now that the tree is under git, record the commit a sweep was trained on.
