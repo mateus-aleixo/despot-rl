@@ -38,10 +38,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import rl.env as env_mod
 import rl.train as train_mod
 import sim.fast as fast_mod
+import sim.battle as battle_mod
 import sim.run as run_mod
 
 PER: list[dict] = []
 CUR: dict | None = None
+KEYS: list[str] = []
 
 
 def _inner(name: str, func):
@@ -73,6 +75,7 @@ def _wrap():
         global CUR
         CUR = {"env": 0.0, "core": 0.0, "fights": 0,
                "encode": 0.0, "mask": 0.0, "apply": 0.0}
+        CUR.update({k: 0.0 for k in KEYS})
         start = time.perf_counter()
         try:
             return real_rollout(*a, **kw)
@@ -103,6 +106,34 @@ def _wrap():
     train_mod.rollout = rollout
     env_mod.DespotRunEnv.step = step
     fast_mod.fast_battle = battle
+
+
+# Inclusive time per helper, for the second table. These nest (a `fight` holds a
+# `fast_battle`, an `apply` holds a `fight`), so the column does not sum to
+# anything: read each row against the top-level table, not against its siblings.
+DEEP = [
+    (run_mod.RunState, "fight", "apply: fight"),
+    (run_mod.RunState, "next_level", "apply: next_level, mapgen"),
+    (run_mod.RunState, "enemy_specs", "apply: enemy_specs"),
+    (run_mod.RunState, "roll_item", "apply: roll_item"),
+    (run_mod.RunState, "gain_experience", "apply: gain_experience"),
+    (run_mod.RunState, "legal_actions", "legal_actions (mask + apply)"),
+    (run_mod.RunState, "squad_power", "encode: squad_power"),
+    (run_mod.RunState, "mutation_effect", "encode: mutation_effect"),
+    (run_mod.RunState, "ensure_stock", "encode: ensure_stock"),
+    (run_mod.RunState, "room_power", "encode: room_power"),
+]
+
+
+def _wrap_deep():
+    for owner, attr, label in DEEP:
+        KEYS.append(label)
+        setattr(owner, attr, _inner(label, getattr(owner, attr)))
+    # The oracle path: a fight the core refuses falls back to `Battle.run`, and
+    # that time lands in `apply` rather than in the core row above.
+    KEYS.append("fight: Python oracle fallback")
+    battle_mod.Battle.run = _inner("fight: Python oracle fallback",
+                                   battle_mod.Battle.run)
 
 
 def report():
@@ -143,6 +174,13 @@ def report():
         print(f"{name:32s} {secs:9.1f} {secs / window:7.1%}"
               + (f"   {note}" if note else ""))
 
+    if KEYS:
+        print()
+        print(f"{'inclusive, nested, does not sum':32s} {'seconds':>9s} {'share':>7s}")
+        for k in KEYS:
+            v = sum(p.get(k, 0.0) for p in done)
+            print(f"{k:32s} {v:9.1f} {v / window:7.1%}")
+
     per_fight = core / fights * 1000 if fights else float("nan")
     print(f"\nmean {per_fight:.2f} ms per fight in the core")
 
@@ -159,10 +197,14 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="runs/_profile_scratch.pt")
+    ap.add_argument("--deep", action="store_true",
+                    help="also time the helpers inside _encode and apply")
     ap.add_argument("--train-args", nargs=argparse.REMAINDER, default=[],
                     help="anything else to hand rl/train.py verbatim")
     args = ap.parse_args()
 
+    if args.deep:
+        _wrap_deep()
     _wrap()
     sys.argv = ["rl/train.py", "--steps", str(args.steps), "--fast-core",
                 "--shaping", "none", "--seed", str(args.seed),
