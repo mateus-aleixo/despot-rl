@@ -2306,3 +2306,87 @@ nothing, and it is worth slightly less than first reported.
 is worse than the wasted compute it saves, because the mixing is invisible in
 the output. Either finish a sweep on one tree or re-run the resumed arms, and
 now that the tree is under git, record the commit a sweep was trained on.
+
+
+### The budget curve past 2M: it flattens
+
+Every result before this one was measured at 600k or 2M, and the single thing
+that had ever moved the agents was the budget: 600k to 2M was +0.370 levels,
+positive on 12 of 12, and it was the difference between an agent that ignored
+the mutation shop and one that used it. The obvious worry was that another
+behaviour switches on later and quietly invalidates everything again, the way
+the 600k results were invalidated.
+
+`runs/budget4m_long_s0..s11.pt`, twelve seeds at 4M with
+`--checkpoint-every 1000000`, plain live environment, unshaped, no arm flags.
+The curve comes off checkpoints of **one run per seed**, so the comparison
+carries no init, architecture or sampling difference: it is the same twelve
+trajectories, graded at four points, over 240 evaluation seeds from 30,000.
+Training took 103.9 minutes for 48M steps at six concurrent.
+
+| budget | mean level | sd across seeds | mutations held | `take_mutation` |
+|---|---|---|---|---|
+| 1M | 2.725 | 0.119 | 0.91 | 27.2% |
+| 2M | 2.915 | 0.116 | 1.86 | 25.7% |
+| 3M | 2.945 | 0.065 | 2.07 | 36.3% |
+| 4M | 2.985 | 0.107 | 2.13 | 12.0% |
+| heuristic | 2.283 | | 2.23 | 100.0% |
+
+Paired within seed, which here is paired within *run*:
+
+    1M -> 2M   +0.189 [+0.067, +0.311]   10 of 12 positive
+    2M -> 3M   +0.030 [-0.046, +0.106]    8 of 12
+    3M -> 4M   +0.040 [-0.030, +0.110]    8 of 12
+    2M -> 4M   +0.070 [-0.027, +0.168]    6 of 12
+    1M -> 4M   +0.260 [+0.176, +0.343]   11 of 12
+
+| seed | 1M | 2M | 3M | 4M | 4M minus 2M |
+|---|---|---|---|---|---|
+| 0 | 2.83 | 3.02 | 2.91 | 2.94 | -0.08 |
+| 1 | 2.63 | 3.01 | 3.02 | 3.09 | +0.08 |
+| 2 | 2.73 | 2.89 | 2.97 | 3.04 | +0.15 |
+| 3 | 2.65 | 2.95 | 2.92 | 2.90 | -0.05 |
+| 4 | 2.99 | 2.63 | 3.00 | 3.05 | +0.41 |
+| 5 | 2.64 | 2.99 | 2.98 | 2.95 | -0.04 |
+| 6 | 2.62 | 3.03 | 2.83 | 2.95 | -0.08 |
+| 7 | 2.75 | 2.89 | 2.98 | 2.72 | -0.17 |
+| 8 | 2.77 | 2.77 | 2.83 | 3.05 | +0.28 |
+| 9 | 2.60 | 2.98 | 3.01 | 2.97 | -0.00 |
+| 10 | 2.85 | 2.94 | 3.00 | 3.10 | +0.16 |
+| 11 | 2.64 | 2.88 | 2.90 | 3.07 | +0.18 |
+
+**Doubling 2M to 4M buys nothing resolvable**: +0.070 [-0.027, +0.168], and only
+six of twelve seeds improve, which is what a coin flip looks like. The budget
+lever that carried this project from 2.28 to 2.9 is spent by about 2M, and the
+last 24M steps of training bought a tenth of what the first 24M did.
+
+**Mutation holdings saturate**, which is the mechanism behind the flattening:
+0.91, 1.86, 2.07, 2.13, converging on the heuristic's 2.23 and with nowhere left
+to go. The behaviour that appeared between 600k and 1.2M is simply finished by
+about 3M, and nothing else takes its place.
+
+**Retract the uptake progression.** `take_mutation` was quoted across this file
+as 0.2% at 600k, 22.9% at 1.2M, 29.2% at 2M, read as a behaviour switching on.
+The arm means here go 27.2%, 25.7%, 36.3%, 12.0%, which is not a progression at
+all, and the per-seed distribution says why:
+
+| budget | min | median | max | seeds at exactly 0% |
+|---|---|---|---|---|
+| 1M | 0.0% | 7.2% | 93.5% | 4 of 12 |
+| 2M | 0.0% | 6.4% | 100.0% | 2 of 12 |
+| 3M | 0.0% | 17.1% | 100.0% | 4 of 12 |
+| 4M | 0.0% | 4.7% | 51.7% | 3 of 12 |
+
+The median agent takes the free shrine mutation under a fifth of the time at
+every budget, a quarter of them never take it at all, and one or two take it
+almost always. **The arm mean is a mean of a heavily skewed distribution and
+moves on which seeds happen to be extreme**, so it should not be read as a
+behavioural trend. Mutation *holdings* are well behaved and monotone; report
+those instead. The 600k figure of 0.2% is still real, because there the whole
+distribution was at zero.
+
+**How to apply.** 2M is the budget for this environment: 1M is visibly short and
+4M is not distinguishable from 2M. Twelve seeds at 2M costs about 50 minutes at
+six concurrent and resolves a tenth of a level; going to 4M doubles that for
+nothing. If a future change needs more budget than that to show itself, it is
+already smaller than the run-to-run spread.

@@ -57,25 +57,25 @@ measurement first.
 
 `tools/profile_train.py` wraps `rollout`, `DespotRunEnv.step`, `_encode`,
 `action_mask`, `RunState.apply` and `fast_battle`, then runs the real
-`rl.train.main`. 100k steps, 195 update cycles, twice, agreeing to a tenth of a
-percent:
+`rl.train.main`. 100k steps, 195 update cycles, on an idle machine, twice:
 
-| part | share of wall clock |
-|---|---|
-| rollout | 86.2% |
-| &nbsp;&nbsp;policy forward and buffer writes | 25.2% |
-| &nbsp;&nbsp;`env.step`, Python run layer | **44.4%** |
-| &nbsp;&nbsp;&nbsp;&nbsp;`_encode`, building the 195 floats | 16.0% |
-| &nbsp;&nbsp;&nbsp;&nbsp;`action_mask`, called twice a step | 7.5% |
-| &nbsp;&nbsp;&nbsp;&nbsp;`RunState.apply`, less the fight | 20.5% |
-| &nbsp;&nbsp;`env.step`, Rust battle core | **16.6%** |
-| PPO update and bookkeeping | 13.8% |
+| part | run 1 | run 2 |
+|---|---|---|
+| rollout | 85.5% | 86.8% |
+| &nbsp;&nbsp;policy forward and buffer writes | 24.4% | 24.9% |
+| &nbsp;&nbsp;`env.step`, Python run layer | **44.3%** | **45.1%** |
+| &nbsp;&nbsp;&nbsp;&nbsp;`RunState.apply`, less the fight | 19.9% | 20.2% |
+| &nbsp;&nbsp;&nbsp;&nbsp;`_encode`, building the 195 floats | 16.2% | 16.5% |
+| &nbsp;&nbsp;&nbsp;&nbsp;`action_mask`, called twice a step | 7.6% | 7.8% |
+| &nbsp;&nbsp;&nbsp;&nbsp;everything else in `step` | 0.6% | 0.6% |
+| &nbsp;&nbsp;`env.step`, Rust battle core | **16.7%** | **16.9%** |
+| PPO update and bookkeeping | 14.5% | 13.2% |
 
-10,352 fights at a mean of **1.00 ms**, already better than the 1.9 ms the 6v6
-benchmark above measures, because a typical fight is smaller than that one.
+10,352 fights at a mean of **0.76 ms**, better than the 1.9 ms the 6v6 benchmark
+above measures, because a typical fight is smaller than that one.
 
-**So batching is worth at most 1.16x.** Fights are 16.6% of the clock, and the
-benchmark's best case takes them to 0.29 ms, which is 6.5x on 16.6%, or 14% of
+**So batching is worth at most 1.16x.** Fights are 16.8% of the clock, and the
+benchmark's best case takes them to 0.29 ms, which is 6.5x on 16.8%, or 14% of
 the loop. That is a poor trade for making `env.step` re-entrant, and it would put
 a deferred-fight state machine underneath the part of the codebase the fidelity
 work lives in.
@@ -87,8 +87,8 @@ it needs the env contract touched:
   pre-action state and once for the info dict afterwards. The second one is what
   the caller stores and hands back as the next step's mask, so the first is
   recomputing a value `rollout` already holds. Memoising it against a state
-  counter is worth about half of the 7.5%.
-- `RunState.apply` at 20.5% and `_encode` at 16.0% have not been profiled
+  counter is worth about half of the 7.7%.
+- `RunState.apply` at 20.0% and `_encode` at 16.3% have not been profiled
   internally yet. `_encode` calls `squad_power`, `mutation_effect` and
   `ensure_stock` on every step, and each has a cache that may not be hitting.
 
@@ -98,11 +98,13 @@ one, which is 3x for 6x the processes, so something is already saturating before
 the cores are. Finding where that ceiling is may beat any of the above for the
 wall clock of a twelve-seed arm.
 
-One caveat on the table: it was measured while a twelve-seed 4M sweep held six
-cores, at 1,606 steps/s against the 2,077 a lone run gets. Every part of the loop
-is single-threaded CPU work, so contention should scale them together, and the
-two runs agreed, but the shares are worth re-taking on an idle machine before
-anything is optimised against them.
+**Contention scales the whole loop uniformly**, which is worth knowing before
+trusting any future profile taken on a busy machine. The same measurement while a
+twelve-seed 4M sweep held six cores ran at 1,606 steps/s against 2,120 idle, a
+third slower in absolute terms and 1.00 ms a fight rather than 0.76, and every
+share landed within a percentage point of the table above: core 16.6%, run layer
+44.4%, update 13.8%. Every part of the loop is single-threaded CPU work, so they
+all slow together and the ratios survive.
 
 ## Differential testing, and what it caught
 
