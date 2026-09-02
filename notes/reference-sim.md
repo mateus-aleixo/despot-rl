@@ -1380,3 +1380,67 @@ food is in every room, and `Game.Food.foodPerSacrifice` is **4**, which is what
 `RunState.sacrifice` already pays: that mechanic is right. And `Game.json`
 carries `Dialogs`, `WinDialog`, `LossDialog`, `FixedLevel` and `GenerateRooms`
 at the top level, none of which this sim reads.
+
+## Fog of war, teleports, and what the observation is quietly leaking
+
+Three player reports, all three checked against the binary. Two are real and
+unmodelled, and the third is real but not quite what was remembered.
+
+### The map is discovered, not given
+
+`RoomState` is `Unknown = 0`, `Unexplored = 1`, `Explored = 2`, `Current = 4`,
+and `Rooms.json` ships `Explored: false`. `C_Rooms.SetCurrent` is where it
+happens: it sets the entered room's `state`, then walks `M_Room.get_neighbors`
+reading each neighbour's `get_state`, which is the reveal step. So a level is
+uncovered a room at a time, exactly as reported.
+
+**This sim does not model it, and the observation actively hands the policy the
+whole map.** `rl/env.py:_encode` carries:
+
+    d_here / far          distance to the boss, from `RoomMap.to_boss`
+    len(rooms) / 20       the level's room count
+    cleared / len(rooms)  the fraction of the level cleared
+    around[base + 2]      whether a neighbour is nearer the boss
+
+`to_boss` is a BFS over the **entire** graph, computed in `RoomMap.__init__`
+before a single room is entered, so the agent knows from its first step how far
+the boss is from anywhere, how big the level is, and which direction closes the
+distance. A player knows none of that. `_move_targets` leans on it too, picking
+which portal to expose by `min(..., key=to_boss)`.
+
+This is the first fidelity gap found here that makes the task **easier** than the
+game rather than cheaper to exploit, and it is on the agent's side of the line:
+every navigation number in `notes/rl.md` was measured by a policy playing with
+the lights on. Modelling it means a per-room `state`, an observation restricted
+to what has been revealed, and `to_boss` computed over the known subgraph with
+some convention for the unknown, which is a design decision rather than a
+lookup.
+
+### Teleport rooms exist and no generated level has one
+
+`RoomType.Portal = 32`, `C_Room.CanBeTeleportedTo` / `CanBeTeleportedFrom`,
+`C_Rooms.TeleportTo`, and `V_Room.ActivateTeleportCorners` called from
+`SetCurrent`. `GenerationParams` carries `portalsCount` and `minPortalDistance`.
+
+`RoomMap` already supports them: `__init__` links every portal room to every
+other, and `from_table` reads the shipped `Portals` list. But `sim/mapgen.py`
+sets `portalsCount` to 0 and places none, so **the fixed map has three portals
+and every level a run actually plays has zero**. The `portal` move exists in the
+action space and is never legal.
+
+### The vision mutation is `BossVision`, and it reveals the boss
+
+`Mutations.json` has one map-related entry, ID 188 `BossVision`
+(`Quest: 1`, comment `RedStringsBar`), and `C_BossVisionMutation.OnNewLevel`
+walks every room reading `get_type` and `get_state`. So it fires on each new
+level and reveals a room by type: the **boss**, not a random one. The other
+room-ish mutation is ID 673 `RoomCount` (`SubType: EmptyRooms`, `rooms: 1`),
+which adds an empty room rather than revealing anything.
+
+A mutation that reveals the boss is worth nothing to an agent that already knows
+where the boss is, which is another reason the fog matters: it is not only a
+difficulty question, it decides whether a whole mutation has any value.
+
+**Not acted on yet.** A twelve-seed reward sweep is training against the current
+observation as this is written, and changing `obs_dim` under it would throw the
+comparison away.
