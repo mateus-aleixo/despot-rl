@@ -1165,6 +1165,7 @@ _shop = next((r for r in _stm.rooms.rooms.values() if r.kind == "mutation_shop")
 check("a level past the first has a mutation shop", _shop is not None)
 if _shop is not None:
     _stm.room = _shop.id
+    _shop.cleared = True          # `AfterFight` is what opens a shop
     _stm.ensure_stock(_shop)
     check("the shop shows ShowCount mutations",
           len(_shop.offer_mutations) == _MS["ShowCount"], f"{len(_shop.offer_mutations)}")
@@ -1216,11 +1217,20 @@ check("a stat bonus moves no Power at all",
       sum(s.power for s in _after) == sum(s.power for s in _stmm.specs_cached()),
       f"{sum(s.power for s in _after):.0f}")
 # a mutation aimed at classes the squad does not field touches nobody
+# `Class` is a comma-separated list and the starting squad now fields seven of
+# them off `ChipChoice/Squads.json`, where five bare Novices fielded almost
+# none, so no shelf mutation misses the whole squad any more. The claim under
+# test is unchanged: a mutation aimed at classes nobody in the room belongs to
+# touches nobody. So pick the mutation first and test it against the units it
+# does not name.
 _narrow = next(m for m in _offered(_STRICT, 5)
-               if m["Name"] == "StatBonus" and m.get("Class") != "Random")
+               if m["Name"] == "StatBonus" and m.get("Class") not in ("Random", None))
+_named = set(str(_narrow["Class"]).split(","))
+_outsiders = [s for s in _stmm.specs_cached() if s.cls not in _named]
 check("a mutation for a class the squad lacks touches nobody",
-      _effect_on(_stmm.specs_cached(), _narrow, random.Random(0))["fraction"] == 0.0,
-      f"{_narrow.get('Class')}")
+      not _outsiders
+      or _effect_on(_outsiders, _narrow, random.Random(0))["fraction"] == 0.0,
+      f"{len(_outsiders)} units outside {_narrow.get('Class')}")
 
 # an unimplemented mutation reports as such rather than as a zero effect
 _unimpl = next(m for m in _offered(_STRICT, 3)
@@ -1398,6 +1408,7 @@ _st2 = RunState.new(_STRICT, seed=3)
 _shop = next((r for r in _st2.rooms.rooms.values() if r.kind == "item_shop"), None)
 if _shop is not None:
     _st2.room = _shop.id
+    _shop.cleared = True          # `AfterFight` is what opens a shop
     _st2.gold = 9999
     _bought = 0
     while any(a[0] == "buy_item" for a in _st2.legal_actions()) and _bought < 50:
@@ -1443,6 +1454,7 @@ _st10 = RunState.new(_STRICT, seed=5)
 _st10.level = 5
 _fs = next(r for r in _st10.rooms.rooms.values() if r.kind == "food_shop")
 _st10.room, _st10.gold = _fs.id, 9999.0
+_fs.cleared = True                # `AfterFight` is what opens a shop
 _st10.food.amount = 0.0
 _st10.ensure_stock(_fs)
 _stocked = list(_fs.food_stock)
@@ -1556,6 +1568,7 @@ _st7 = RunState.new(_STRICT, seed=14)
 _shop7 = next(r for r in _st7.rooms.rooms.values() if r.kind == "item_shop")
 _st7.room, _st7.gold = _shop7.id, 5.0
 _st7.squad = [_Human(item="broadsword") for _ in range(5)]
+_shop7.cleared = True             # `AfterFight` is what opens a shop
 check("buying experience is a legal shop action",
       ("buy_exp", None) in _st7.legal_actions())
 _st7.apply(("buy_exp", None))

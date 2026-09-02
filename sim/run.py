@@ -359,30 +359,50 @@ class Human:
     experience: float = 0.0
 
 
-def starting_squad(team: dict) -> list[Human]:
-    """The squad a run opens with, from `Game.Team.Packs`.
+def squad_names(tables: dict) -> list[str]:
+    """Every startable squad, the default first.
 
-    `C_Session.LoadPlayerTeam` reads `Game.Team.Packs` and creates each entry's
-    `Number` units of its `Class`, with the entry's optional `Item` and
-    `Level`. In the Default ruleset that is five `Novice` rows with no `Item`
-    at all: **the run starts with five bare humans and no weapons**, which is
-    why the first item shop matters.
-
-    `Game.Team.Items` and `Game.Team.Classes` are inventory maps, every value
-    0. This used to read `Items`' keys as a pool and hand each human a random
-    weapon out of it, which started the squad at ~20,000 Power against a
-    800-Power first room -- twenty-five times over-equipped, and the reason
-    squad Power looked flat for four levels. It was already at the ceiling.
-
-    Only Novice-plus-item humans are modelled here, so a pack naming another
-    class contributes an unarmed human; no Default-mode pack does.
+    `ChipChoice/Squads.json` ships eight. Only `Squad1` has no
+    `unlockCondition`, so it is what a fresh save starts with; the rest are
+    behind Cultist, Scientist, Mage and so on, which an account that has played
+    a while will have. Which one is best is not written down anywhere and is
+    worth finding out rather than assuming.
     """
+    squads = tables.get("Squads") or []
+    free = [s["name"] for s in squads if not s.get("unlockCondition")]
+    rest = [s["name"] for s in squads if s.get("unlockCondition")]
+    return free + rest
+
+
+def starting_squad(tables: dict, name: str | None = None) -> tuple[list[Human], list]:
+    """The squad a run opens with, and the cells it opens in.
+
+    **Not `Game.Team.Packs`.** That reads as five bare `Novice` rows with every
+    entry of `Team.Items` at 0, and this sim opened on it for a long time, but a
+    run starts from a squad chosen out of `ChipChoice/Squads.json`. The default
+    `Squad1` is four units, three of them armed: a `stone-sword`, a `crossbow`,
+    one bare and a `shield`, each with its own cell. A player reported exactly
+    that roster, which is what sent us looking.
+
+    The composition is the part that matters. Five identical unarmed bodies have
+    no frontline and no ranged unit, so every early-fight number this project
+    measured was measured on a squad the game never hands anyone.
+
+    `Game.Team.Packs` stays as the fallback for a ruleset with no squad table.
+    """
+    squads = {s["name"]: s for s in (tables.get("Squads") or [])}
+    if squads:
+        chosen = squads.get(name) or squads[squad_names(tables)[0]]
+        units = chosen.get("units") or []
+        return ([Human(item=u.get("item")) for u in units],
+                [u.get("cells") for u in units])
+    team = (tables.get("Game") or {}).get("Team") or {}
     packs = team.get("Packs") or []
     squad = [Human(item=p.get("Item"), level=int(p.get("Level") or 1))
              for p in packs for _ in range(int(p.get("Number") or 1))]
-    if squad:
-        return squad
-    return [Human(item=None) for _ in range(int(team.get("Humans") or 5))]
+    if not squad:
+        squad = [Human(item=None) for _ in range(int(team.get("Humans") or 5))]
+    return squad, []
 
 
 @dataclass
@@ -425,20 +445,27 @@ class RunState:
     # (key, specs) for `specs_cached`, and (key, mutation id) -> effect
     _specs_cache: tuple | None = None
     _mutation_cache: dict = field(default_factory=dict)
+    # (level, room type) -> the eligible packs and their Power bands
+    _pack_cache: dict = field(default_factory=dict)
+    # The cells the chosen squad opens in, one list per unit.
+    start_cells: list = field(default_factory=list)
 
     # -- setup -------------------------------------------------------------
     @classmethod
-    def new(cls, tables: dict, seed: int = 0) -> "RunState":
+    def new(cls, tables: dict, seed: int = 0,
+            squad_name: str | None = None) -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
-        team = game.get("Team") or {}
-        squad = starting_squad(team)
+        squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
                  food=Food.from_game(game), squad=squad, rng=rng)
         st.rooms = RoomMap.generate(st.level_row, rng)
         st.room = st.rooms.start
+        # Level 1 opens the same way every later level does: see `next_level`.
+        st.rooms.rooms[st.room].cleared = True
         # `C_ItemShop..ctor` fills the shop the moment the run starts, at level
         # 1, so the first shop room already has stock waiting.
+        st.start_cells = cells
         st.offer = [st.roll_item() for _ in range(st.shop_quantity())]
         return st
 
@@ -541,6 +568,16 @@ class RunState:
                  "food_shop": "FoodMult", "mutation": "TreasureMult",
                  "mutation_shop": "TreasureMult", "talent_shop": "TreasureMult"}
 
+    # Which `EnemyPacks.RoomType` a room draws its enemies from. `M_EnemyPacks`
+    # indexes packs as `Dictionary<string, Dictionary<RoomType, List<M_EnemyPack>>>`
+    # and `RoomType` is a flags enum in which `Shrine = 192`, `MutationShop =
+    # 320` and `TalentShop = 4160` all carry the `Treasure = 64` bit, so the
+    # three treasure rooms share one pack list. The start room has no row and
+    # never fights.
+    PACK_ROOM_TYPE = {"boss": "Boss", "item_shop": "ItemShop",
+                      "food_shop": "FoodShop", "mutation": "Treasure",
+                      "mutation_shop": "Treasure", "talent_shop": "Treasure"}
+
     def room_mult(self, kind: str) -> float:
         """The weight a room of `kind` carries, `DefaultMult` for a plain room.
 
@@ -575,18 +612,26 @@ class RunState:
     def room_power(self, room_kind_: str = "fight") -> float:
         """The Power budget a room of this kind is filled to.
 
-        Still the flat `PowerPerRoom * mult` the sim has always used, **not**
-        `expected_power`. `M_Room.expectedPower` is the game's own per-room
-        number and `CalculatePower` sets it by the same weights as the gold, but
-        what reads it was not found, and reading it as the enemy budget makes
-        level 1 unplayable: the first food shop would hold 1,389 Power of
-        enemies against a starting squad of 750. Shops are peaceful here, which
-        is the reading the shipped `EnemyPacks.RoomType` column supports -- it
-        has `Default` and `Boss` and no shop row. See `sim/assumptions.py`.
+        This is `M_Room.expectedPower`, the level's Power split by the same
+        weights as the gold. It used to be a flat `PowerPerRoom * mult` over
+        `BossMult` or `DefaultMult` only, on the reading that shops are peaceful
+        and `expectedPower` had no consumer.
+
+        Both halves of that were wrong, and the binary says so plainly:
+        `M_EnemyPacks.packsByType` is keyed by `RoomType` and `M_EnemyPack`
+        carries `minPower`/`maxPower`, so a room's `expectedPower` is what picks
+        its pack. `EnemyPacks.json` ships 47 ItemShop, 32 FoodShop and 53
+        Treasure rows that this sim never touched. See
+        `notes/reference-sim.md`, "Every room has a fight".
+
+        The old objection, that a 1,389-Power food shop against a 750-Power
+        squad makes level 1 unplayable, compared a shop's fight against a
+        baseline of no fight at all. Against the level's own budget it is one
+        room's share among several: at level 1 a plain room is ~700 where the
+        flat reading gave 800, so the ordinary fight is *easier* and only the
+        shops are harder.
         """
-        lvl = self.level_row
-        mult = float(lvl["BossMult"] if room_kind_ == "boss" else lvl["DefaultMult"])
-        return float(lvl["PowerPerRoom"]) * mult
+        return self.expected_power(room_kind_)
 
     def expected_power(self, kind: str) -> float:
         """`M_Room.expectedPower`: this room's share of the level's Power.
@@ -804,44 +849,125 @@ class RunState:
         return max(range(len(gains)), key=lambda i: (gains[i], -i))
 
     # -- enemies -----------------------------------------------------------
-    def enemy_specs(self, room_kind_: str) -> list[UnitSpec]:
-        """Fill a room to its Power budget from the level's eligible packs."""
+    def _eligible_packs(self, want: str) -> list[list[dict]]:
+        """The level's packs for one room type, each grouped into its rows.
+
+        A pack is several `EnemyPacks.json` rows sharing an `ID`, one per zone:
+        `M_EnemyPack` holds `enemiesByZone`, and pack 4 is `Mancrack e1 1-20`
+        with `RangeBlinker e2 1-1`. `Min` and `Max` are that row's unit count,
+        which `M_EnemyPack.Create` draws between while it places units of
+        `Class` at `Level` with `Item` into the layout's zone.
+        """
         lvl = self.level_row
-        mult = float(lvl["BossMult"] if room_kind_ == "boss" else lvl["DefaultMult"])
-        budget = float(lvl["PowerPerRoom"]) * mult
+        allowed = {r["Pack"] for r in self.tables["PacksByStyle"]
+                   if lvl["MinStyleID"] <= r["Style"] <= lvl["MaxStyleID"]}
+        groups: dict = {}
+        for row in self.tables["EnemyPacks"]:
+            if row.get("RoomType") in (want, None) and row.get("ID") in allowed:
+                groups.setdefault(row["ID"], []).append(row)
+        if not groups:
+            for row in self.tables["EnemyPacks"]:
+                if row.get("RoomType") == want:
+                    groups.setdefault(row["ID"], []).append(row)
+        return list(groups.values())
 
-        styles = {r["Style"] for r in self.tables["PacksByStyle"]
-                  if lvl["MinStyleID"] <= r["Style"] <= lvl["MaxStyleID"]}
-        allowed = {r["Pack"] for r in self.tables["PacksByStyle"] if r["Style"] in styles}
-        want = "Boss" if room_kind_ == "boss" else "Default"
-        packs = [p for p in self.tables["EnemyPacks"]
-                 if p.get("RoomType") in (want, None) and p.get("ID") in allowed]
-        if not packs:
-            packs = [p for p in self.tables["EnemyPacks"] if p.get("RoomType") == want]
-        if not packs:
-            return []
-
+    def _pack_units(self, rows: list[dict]) -> list[tuple[UnitSpec, int, int]]:
+        """One pack as (unit, min count, max count) per row."""
         ubc = units_by_class(self.tables)
         meta = self.tables["Meta"]["Classes"]
-        out: list[UnitSpec] = []
-        spent = 0.0
-        guard = 0
-        while spent < budget and guard < 40:
-            guard += 1
-            p = self.rng.choice(packs)
-            cls = p["Class"]
+        out = []
+        for row in rows:
+            cls = row["Class"]
             if cls not in ubc:
                 continue
             size = int((meta.get(cls) or {}).get("Size") or 1)
-            lo, hi = int(p.get("Min") or 1), int(p.get("Max") or 1)
-            count = self.rng.randint(min(lo, hi), max(lo, hi))
-            unit = build_unit(ubc, cls, int(p.get("Level") or 1), name=cls, size=size)
-            power = max(1.0, unit.power)
-            for _ in range(count):
-                if spent >= budget:
-                    break
-                out.append(unit)
-                spent += power
+            unit = build_unit(ubc, cls, int(row.get("Level") or 1), name=cls,
+                              size=size)
+            lo, hi = int(row.get("Min") or 1), int(row.get("Max") or 1)
+            out.append((unit, min(lo, hi), max(lo, hi)))
+        return out
+
+    def _pack_table(self, want: str) -> list[tuple[list, float, float]]:
+        """Every eligible pack with the Power band it can come out at.
+
+        `M_EnemyPack` carries `minPower` and `maxPower`, which are not columns in
+        the JSON, so they are the band the pack's own counts span. Cached per
+        (level, room type): building the units costs more than the fight does.
+        """
+        key = (self.level, want)
+        cached = self._pack_cache.get(key)
+        if cached is not None:
+            return cached
+        table = []
+        for rows in self._eligible_packs(want):
+            units = self._pack_units(rows)
+            if not units:
+                continue
+            lo = sum(u.power * a for u, a, _ in units)
+            hi = sum(u.power * b for u, _, b in units)
+            table.append((units, lo, hi))
+        self._pack_cache[key] = table
+        return table
+
+    def enemy_specs(self, room_kind_: str) -> list[UnitSpec]:
+        """The pack this room draws, instantiated.
+
+        **`expectedPower` picks a pack; it is not a budget to fill.**
+        `M_EnemyPacks` indexes packs by room type, `M_EnemyPack` carries a
+        `minPower`/`maxPower` band, and neither `C_Rooms.ChoosePacks` nor
+        `M_EnemyPack.Create` compares a running total against the room: `Create`
+        reads `Class`, `Level`, `Item`, `Size`, `Min` and `Max` and places that
+        many units, and errors with "There are no places of size {0} in layout
+        ID={1}" when the layout cannot hold them.
+
+        This used to draw packs repeatedly until their summed Power reached the
+        room's budget, which is a different game: with the corrected budgets a
+        level-1 item shop came out at 1,682 Power against a 750-Power starting
+        squad and no run got past level 1.
+        """
+        table = self._pack_table(self.PACK_ROOM_TYPE.get(room_kind_, "Default"))
+        if not table:
+            return []
+        budget = self.room_power(room_kind_)
+        # The pack whose band the room's Power falls in, else the nearest band.
+        inside = [t for t in table if t[1] <= budget <= t[2]]
+        if inside:
+            units, _, _ = self.rng.choice(inside)
+        else:
+            units, _, _ = min(table, key=lambda t: min(abs(budget - t[1]),
+                                                       abs(budget - t[2])))
+        # Counts start at each row's `Min` and are raised toward the room's
+        # Power, never past that row's `Max`. That the count is bounded by the
+        # row rather than free is the part the data shows; the exact rule for
+        # picking inside the bounds is not recovered, so this fills the cheapest
+        # way that respects both ends. Drawing uniformly in [Min, Max] instead
+        # puts 14 units and 23,000 Power in a level-1 item shop, because `Max`
+        # runs to 20 and 40 on some rows.
+        counts = [lo for _, lo, _ in units]
+        power = sum(u.power * c for (u, _, _), c in zip(units, counts))
+        room = [i for i, (_, lo, hi) in enumerate(units) if hi > lo]
+        while room:
+            # Add the unit that lands the room closest to its Power, and stop
+            # when no addition gets closer. Filling while `power < budget`
+            # instead overshoots by a whole unit, which on a level-1 item shop
+            # is 2x the room: one Mancrack is 1,642 Power against a budget of
+            # 1,682, and the second takes it to 3,284.
+            here = abs(budget - power)
+            best, gain = None, here
+            for i in room:
+                d = abs(budget - (power + units[i][0].power))
+                if d < gain:
+                    best, gain = i, d
+            if best is None:
+                break
+            unit, _, hi = units[best]
+            counts[best] += 1
+            power += unit.power
+            if counts[best] >= hi:
+                room.remove(best)
+        out: list[UnitSpec] = []
+        for (unit, _, _), c in zip(units, counts):
+            out += [unit] * c
         return out
 
     # -- actions -----------------------------------------------------------
@@ -854,7 +980,14 @@ class RunState:
             acts += [("move", rid) for rid in self.rooms.neighbours(self.room)]
         shop = self._shop_config
         self.ensure_stock(here)
-        if here.kind == "item_shop":
+        # Nothing in a room is usable until its fight is won: `C_Room.AfterFight`
+        # is what calls `M_Shop.set_open` and `V_Shrine.Open`, and `InitShop`
+        # decides the shop's opening state from `M_Room.fightResult`. `RoomType`
+        # even carries an inactive variant of every shop for this state
+        # (`InactiveItemShop = 8196` is `Inactive | ItemShop`). A room the squad
+        # walked into and did not win therefore offers nothing but a way out.
+        open_ = here.cleared
+        if open_ and here.kind == "item_shop":
             # One action per slot, so the slot index is stable and the policy
             # can learn "the expensive one" rather than "an item".
             for i, name in enumerate(self.offer):
@@ -871,7 +1004,7 @@ class RunState:
             if (self.gold >= self.exp_cost
                     and any(h.level < MAX_UNIT_LEVEL for h in self.squad)):
                 acts.append(("buy_exp", None))
-        if here.kind == "food_shop":
+        if open_ and here.kind == "food_shop":
             # One action per pack, the same reason the item shop is one action
             # per slot: pack 4 is always the 250-food one, so "the big pack" is
             # learnable where a single `buy_food` could only mean "some food".
@@ -879,9 +1012,9 @@ class RunState:
             for i, held in enumerate(here.food_stock or []):
                 if held > 0 and self.gold >= costs[i]:
                     acts.append(("buy_food", i))
-        if here.kind == "mutation" and here.stock > 0:
+        if open_ and here.kind == "mutation" and here.stock > 0:
             acts.append(("take_mutation", None))
-        if here.kind == "mutation_shop" and here.takes_left > 0:
+        if open_ and here.kind == "mutation_shop" and here.takes_left > 0:
             # One action per slot, like the item shop: which mutation is on
             # offer is the whole decision, so the slot index has to be stable.
             for i, m in enumerate(here.offer_mutations or []):
@@ -892,7 +1025,7 @@ class RunState:
         # against `M_ItemShop.humanCost` (a flat 2, never raised after a sale).
         # This was unrestricted here, and a trained agent found it: 73% of its
         # actions were `buy_human` and one run ended with 277 humans.
-        if here.kind == "item_shop" and self.gold >= float(shop.get("HumanCost") or 2):
+        if open_ and here.kind == "item_shop" and self.gold >= float(shop.get("HumanCost") or 2):
             acts.append(("buy_human", None))
         if len(self.squad) > 1 and self.food.per_sacrifice:
             acts.append(("sacrifice", None))
@@ -912,20 +1045,32 @@ class RunState:
             self.room = arg
             room = self.rooms.rooms[arg]
             first_visit = not room.cleared
-            if first_visit and room.kind in ("fight", "boss", "start"):
+            if first_visit:
+                # **Every room fights.** `C_Rooms.ChoosePacks` walks every room
+                # in the level, looks it up in the pack dictionary and logs
+                # "No enemy pack is set for room " on a miss, so a room without
+                # enemies is a bug in the game's own view. This used to fight
+                # only in `fight`, `boss` and `start` rooms and to treat every
+                # shop as peaceful, which left 132 of the 212 rows in
+                # `EnemyPacks.json` unused: the ItemShop, FoodShop and Treasure
+                # ones. See `notes/reference-sim.md`.
                 result.update(self.fight(room))
-            room.cleared = True
+            # `C_Room.AfterFight(win)` is what opens the doors, opens the
+            # shrine, opens the shop and pays `goldReward`, so none of that
+            # happens on a room that was not won.
+            if first_visit and result.get("won", True):
+                room.cleared = True
             # A room pays `GoldPerRoom` once. `C_Room.AfterFight` reads
             # `M_Room.goldReward`, skips the whole block when it is already 0,
             # and sets it to 0 after paying -- so walking back through a cleared
             # room pays nothing. This was paid on every move, which is an
             # unbounded gold fountain: a trained agent walked two rooms back and
             # forth for 400 steps and finished holding 1,115 gold.
-            if first_visit:
+            if first_visit and room.cleared:
                 # `GoldPerRoom` is a level total too, `(num - 1)` of them shared
                 # out by the same weights, so a shop pays more than a corridor.
                 self.gold += self.room_gold(room.kind)
-            if room.kind == "boss" and result.get("won", True):
+            if first_visit and room.cleared and room.kind == "boss":
                 self.next_level()
         elif kind == "buy_item":
             # arg is (slot, target). A target of None means "whoever the game's
@@ -1151,6 +1296,14 @@ class RunState:
         self.level += 1
         self.rooms = RoomMap.generate(self.level_row, self.rng)
         self.room = self.rooms.start
+        # `FightInFirst`. `C_Rooms.Init` looks the key up in the level data and,
+        # when it is missing or false, calls `C_Room.AfterFight(win: true)` on
+        # the room the level opens in, which resolves it as won without a fight
+        # and so opens its doors and anything in it. Only the shipped fixed map
+        # sets the key; no generated level row carries it, so a generated
+        # level's first room is free. The start room has no pack and no gold
+        # share either (`room_mult` is 0 for it), so this only marks it clear.
+        self.rooms.rooms[self.room].cleared = True
         # No free larder on arrival. This used to add the level row's
         # `TotalFood`, on the reading that the column was the food a level hands
         # out; it is not. `C_FoodShop..ctor` is the only thing that reads
