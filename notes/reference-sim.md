@@ -1332,3 +1332,51 @@ whose values we could not recover, and lists a lot we never implemented:
 | no fight in the first room of a level | **confirmed and data-driven**, `FightInFirst` |
 | that first room is a shop | not shown either way |
 | quest rooms have no fight | **likely**: there is no Quest pack in `EnemyPacks.json`, but not proven |
+
+## The run does not start from `Game.Team.Packs`
+
+A player reported starting a run with **four** humans, one with a crossbow, one
+with a shield, one with a sword and one bare. The sim starts five bare Novices
+at 750 Power, on `Game.Team.Packs`, which really does read as five `Novice` rows
+with `Number: 1` and every entry of `Team.Items` at 0.
+
+The starting squad is chosen, and the choices are in a file this project never
+loaded: `ChipChoice/Squads.json`.
+
+| squad | units | unlock |
+|---|---|---|
+| **Squad1** | `stone-sword@4,2`, `crossbow@3,4`, unarmed`@2,3`, `shield@5,3` | **none** |
+| Squad2 | `hood-dark`, unarmed, `stone-sword`, unarmed, `shaman-mask` | Cultist |
+| Squad3 | `football`, `paddle-ball`, `gloves` | Scientist |
+| Squad4 | `ring-green`, `lance`, `shield` | Mage |
+| Squad5 | `plague-mask`, `chainsaw` | Squad5 |
+| Squad6 | `burning-ring`, three unarmed | Squad6 |
+| Squad7 | `pretzel`, `bed`, unarmed | Squad7 |
+| Squad8 | `gun`, `mad-claws`, `gloves`, unarmed | Squad8 |
+
+`Squad1` is the only one with no `unlockCondition`, so it is the default start,
+and it is exactly what the player described. Every unit also carries its own
+`cells`, so the game ships the starting **placement** as well as the roster.
+
+**Why this matters more than four against five.** The composition is the point:
+`Squad1` has a shield in front, a crossbow behind and a sword, where the sim
+fields five identical unarmed bodies. Any early-fight result measured against
+five bare Novices is measuring a squad the game never gives anyone, and this is
+the third different answer this project has had for the opening roster. It first
+read `Team.Items`' keys as a draw pool and opened at ~20,000 Power, then was
+corrected to five bare Novices at 750, and both were wrong.
+
+It also bears directly on the room-fight work on the `room-fights` branch, where
+every baseline finished at level 1.000: a squad with no frontline and no ranged
+unit is the worst possible test of whether a room's fight is survivable.
+
+**How to apply.** `load_ruleset` already takes a `chip` argument and the modes
+carry `Chips` (`Crazy`, `Default`, `Easy`, `Hard`, `Hunger`, `Mutagens`,
+`ShortPvP`), so the loader has the shape for this; what is missing is reading
+`ChipChoice/Squads.json` and starting from `Squad1` with its cells.
+
+Two smaller confirmations from the same report. The pit that takes a human for
+food is in every room, and `Game.Food.foodPerSacrifice` is **4**, which is what
+`RunState.sacrifice` already pays: that mechanic is right. And `Game.json`
+carries `Dialogs`, `WinDialog`, `LossDialog`, `FixedLevel` and `GenerateRooms`
+at the top level, none of which this sim reads.
