@@ -231,6 +231,10 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
                "moves": st.food.moves_left, "hunger": st.food.hunger_level,
                "squad": len(st.squad), "muts": len(st.mutations),
                "power": st.squad_power(), "step": n + 1,
+               # Which of the eight `ChipChoice/Squads.json` rosters this run
+               # drew. The env cycles them by episode seed, so a run is not
+               # playing "the" squad any more.
+               "squad_name": env.squad_name or "?",
                "squad_lines": squad_line(st)}
         ctx = context_lines(st, room, label)
 
@@ -336,7 +340,7 @@ def draw_map(d, sc: Scene):
 
 
 def draw_hud(d, sc: Scene):
-    panel(d, HUD_BOX, "SQUAD")
+    panel(d, HUD_BOX, f"SQUAD  {sc.hud.get('squad_name', '')}")
     x, y = HUD_BOX[0] + 16, HUD_BOX[1] + 38
     h = sc.hud
     stats = [("gold", f"{h['gold']:.0f}", GOLD),

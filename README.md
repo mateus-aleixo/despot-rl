@@ -5,11 +5,12 @@ Dystopian Battle Simulator*, built from the shipped game's own balance tables.
 
 ![The trained agent playing a run](docs/run.gif)
 
-*A trained agent buying food, walking a generated level, and taking a fight.
-The full 70-second run is [`docs/run.mp4`](docs/run.mp4), rendered by
-[`tools/render_run.py`](tools/render_run.py). Recorded on the environment as it
-stood before the 2026-09-02 room and squad corrections, so it shows a run in
-which only some rooms fight.*
+*A 4M agent playing `Squad2` on the corrected environment, where every room has
+a fight and its shop opens only once that fight is won. The full 100-second run
+is [`docs/run.mp4`](docs/run.mp4), rendered by
+[`tools/render_run.py`](tools/render_run.py): 194 decisions, 30 fights, reaching
+level 6 against the arm's mean of 3.918, so it is a good run rather than a
+typical one.*
 
 ## What this is
 
