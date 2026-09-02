@@ -1492,9 +1492,49 @@ everything above it put together.
 could not be recovered. Low decision impact, worth doing when the tiers above
 are done.
 
-**Explicitly not:** consumables and the consumable shop, while `StatShops` stays
-0 in Default. Record the reason rather than the omission, so nobody re-derives
-it a third time.
+**Consumables, corrected.** An earlier version of this list said not to
+implement them because `StatShops` is 0 and they cannot fire. That was a
+decision-impact judgment smuggled into a fidelity backlog: the question for a
+faithful sim is whether the game has the feature, not whether the mode we happen
+to train on reaches it. `StatShops` is 0 across all eight Default chips
+(default, easy, hard, hunger, mutagens, crazy, shortpvp, arcade), but
+`KingOfTheHill`, `Arcade` and `Tasks` are separate modes that have not been
+checked, and a `TalentShop` room in any of them makes consumables live.
+Implement the mechanism, then record where it fires.
+
+### The project goal is completeness, and what that can and cannot mean
+
+The target is every mode and every feature: `Common`, `Default`,
+`KingOfTheHill`, `Arcade` and `Tasks`, with Default's eight chips underneath it.
+`load_ruleset(mode, chip)` already layers them, so the plumbing exists; what is
+missing is the mechanics each one turns on. `crazy` alone is two levels, one of
+3 rooms and one of 100.
+
+Two precisions, so "done" is a thing that can actually be reached.
+
+**Bit-exact behavioural equality is out of reach, and this repository already
+measured why.** Nudging every start position by `1e-4` and re-running the *same*
+engine flips the winner in about 1 fight in 12 with splash, and the cross-engine
+error is the same order (see "The residual error is chaos, not logic" in
+`notes/rust-core.md`). float32 against float64 over a 120-second fight is a far
+larger perturbation than `1e-4`. So identical inputs will not give identical
+outcomes, ever, in any implementation that is not the original binary. The
+reachable target is **every mechanism present and correct, with outcome
+distributions matching** -- which is a real, checkable standard, and the one the
+differential testing already works to.
+
+**Some constants are unrecoverable.** `maxDeadEnds`, `minFinishDistance`,
+whether a room may cover several squares, the anti-repeat weighting inside a
+quality. The mechanism can be exact while the number is a choice. A complete sim
+still has `sim/assumptions.py` in it; that file is the honest boundary of the
+work, not a to-do list that ever empties.
+
+**The real risk is unverifiable work, not wasted work.** With completeness as
+the goal the failure mode is forty features implemented and none of them tested,
+which is exactly how `vampirism` sat reading `percent` where every row says
+`value`, healing nothing, while being counted as implemented. Every feature
+needs a check that it *changes something*, not that it parses. Completeness
+without that is completeness on paper.
 
 ### The design decision fog forces
 
