@@ -55,6 +55,20 @@ SWEEPS = {
         "flags": {"described": [], "blind": ["--blind-shelf"]},
         "env": {"described": {}, "blind": {"blind_shelf": True}},
     },
+    # Level `n` worth `10n` rather than a flat 10. Rooms get exponentially
+    # harder while a flat bonus under a 0.99 discount makes deep levels worth
+    # *less*, not more, which is the argument for trying it. It was measured
+    # once before, in the four-reward table above the progression work, where
+    # every variant landed on 3.7 -- but that was a different environment (no
+    # progression, no food fix, no generated maps, no room fights) at a budget
+    # this project has since learned was far too small to show a behaviour.
+    # Level reached is the score either way, so both arms are graded identically
+    # and neither is scored on its own bonus.
+    "reward": {
+        "arms": ("flat", "rising"),
+        "flags": {"flat": [], "rising": ["--level-reward", "rising"]},
+        "env": {"flat": {}, "rising": {}},
+    },
     # One arm, because the question is the budget rather than a difference
     # between two environments: twelve seeds of the plain live environment,
     # scored at each `--checkpoint-every` mark with `score --at`. Nothing in
