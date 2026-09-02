@@ -35,7 +35,8 @@ except ImportError:  # the env is usable without gymnasium installed
     spaces = None
 
 from sim.data import load_ruleset
-from sim.run import MAX_UNIT_LEVEL, RunState, squad_names
+from sim.run import (EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
+                     squad_names)
 
 # The widest shop is `max(ItemShopData.Quantity)` = 7 slots, at shop level 5.
 # Checked against the table in `__init__` rather than trusted.
@@ -84,7 +85,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  blind_shrine: bool = False,
                  blind_shelf: bool = False,
                  squad: str | None = None,
-                 blind_squad: bool = False):
+                 blind_squad: bool = False,
+                 lights_on: bool = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -127,6 +129,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # at zero and keep it in the vector, so `obs_dim` and the first layer do
         # not move and the comparison is information-only.
         self.blind_squad = blind_squad
+        # The fog ablation, and the same shape as the `blind_*` controls above:
+        # information only, `obs_dim` unmoved, so an arm differs from the
+        # default in what it knows and in nothing else. It reveals the whole
+        # level after every step, which reproduces the observation this env had
+        # before the fog landed. `notes/roadmap.md` defers the three-way
+        # `to_boss` fork to the batch-1 boundary; this is the control that lets
+        # it be run as arms rather than as a code change.
+        self.lights_on = lights_on
         # "flat": +10 a level. "rising": +10 x the level reached, so the fifth
         # level is worth five times the first. Levels get exponentially harder
         # (a room is 800 Power at level 1 and 24,600 by level 6) while a flat
@@ -184,7 +194,18 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         levels = [h.level for h in st.squad] or [1]
         toward = [min(1.0, h.experience / st.max_experience(h.level))
                   for h in st.squad if h.level < MAX_UNIT_LEVEL]
-        room = st.room_power("boss" if st.rooms.rooms[st.room].kind == "boss" else "fight")
+        # How strong the squad is for this level and this kind of room. Not
+        # `st.room_power`, which is the faithful thing for the sim and the wrong
+        # thing here: `CalculatePower` shares the level's Power out by
+        # `level_weight`, a sum over **every** room's multiplier, and divides a
+        # total scaled by `len(rooms)`. Reading it in the observation hands the
+        # policy the size and the shop density of a level it has not walked, by
+        # the back door, which is the same leak `len(rooms) / 20` was. The level
+        # row's own `PowerPerRoom` against this room's multiplier says the same
+        # thing about difficulty and says nothing about the unseen map.
+        here_now = st.rooms.rooms[st.room].kind
+        room = (float(st.level_row.get("PowerPerRoom") or 0.0)
+                * st.room_mult("boss" if here_now == "boss" else "fight"))
         scalars = [
             st.level / 12.0,
             np.log1p(max(0.0, st.gold)) / 6.0,
@@ -295,13 +316,28 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             here_kind[ROOM_KINDS.index(st.rooms.rooms[st.room].kind)] = 1.0
 
         # What lies one step away, per direction: whether there is a room there,
-        # whether it is cleared, whether it is nearer the boss, and what kind it
-        # is. This replaced the four per-room vectors, and it is the whole local
-        # view the policy gets of a map it has not seen before.
-        per = 3 + len(ROOM_KINDS)
+        # whether it is cleared, whether it has been walked into at all, whether
+        # it is nearer the boss, and what kind it is. This replaced the four
+        # per-room vectors, and it is the whole local view the policy gets of a
+        # map it has not seen before.
+        #
+        # The kind of a neighbour is fair to show and this was checked rather
+        # than assumed: `V_MinimapRoom.iconsByState` is keyed by state and then
+        # by type, and its static constructor builds an `unexplored-` icon for
+        # every type it builds an `explored-` one for, nine of each
+        # (`unexplored-shop`, `unexplored-food-shop`, `unexplored-altar`,
+        # `unexplored-boss`, and so on). A revealed room shows what it is. There
+        # is no `unknown-` icon at all, which is the other half of the same
+        # statement: an unrevealed room is not drawn.
+        #
+        # Every door neighbour of the room the squad stands in was revealed by
+        # `set_current` on entry, so these are always at least `UNEXPLORED` and
+        # reading them leaks nothing.
+        per = 4 + len(ROOM_KINDS)
         around = np.zeros(self.n_moves * per, dtype=np.float32)
-        far = max(1, max(st.rooms.to_boss.values(), default=1))
-        d_here = st.rooms.to_boss.get(st.room, far)
+        known = st.rooms.known_to_boss
+        far = max(1, max(known.values(), default=1))
+        d_here = known.get(st.room, far)
         for i, rid in enumerate(self._move_targets(st)):
             if rid is None:
                 continue
@@ -309,20 +345,43 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             base = i * per
             around[base] = 1.0
             around[base + 1] = 1.0 if room.cleared else 0.0
-            around[base + 2] = 1.0 if st.rooms.to_boss.get(rid, far) < d_here else 0.0
+            # Unexplored means never entered, which is what the minimap shows
+            # and what `cleared` cannot say on its own: a room walked into and
+            # lost in is explored and uncleared both.
+            around[base + 2] = 1.0 if room.state == UNEXPLORED else 0.0
+            around[base + 3] = (1.0 if known and known.get(rid, far) < d_here
+                                else 0.0)
             if room.kind in ROOM_KINDS:
-                around[base + 3 + ROOM_KINDS.index(room.kind)] = 1.0
+                around[base + 4 + ROOM_KINDS.index(room.kind)] = 1.0
 
-        # and where this room sits in the level as a whole
-        rooms = list(st.rooms.rooms.values())
-        pantries = [r for r in rooms if r.kind == "food_shop"]
+        # and where this room sits in the level **as far as it has been seen**.
+        # Every one of these used to be computed over `st.rooms.rooms`, the
+        # whole generated level, off a BFS built before a single room was
+        # entered. That handed the policy the distance to the boss from
+        # anywhere, the size of the level and the fraction of it cleared, none
+        # of which a player has any way to know. It is the one fidelity gap
+        # found here that made the task easier than the game rather than
+        # cheaper to exploit, so the whole block is now over the revealed
+        # subgraph.
+        seen = [st.rooms.rooms[rid] for rid in st.rooms.known()]
+        pantries = [r for r in seen if r.kind == "food_shop"]
+        boss_found = 1.0 if st.rooms.boss_found() else 0.0
         level_view = [
-            d_here / far,
-            sum(1 for r in rooms if r.cleared) / max(1, len(rooms)),
-            len(rooms) / 20.0,
+            # Without the flag a distance of 0 means "standing on the boss" and
+            # "no idea where the boss is" at once, and the two want opposite
+            # moves.
+            boss_found,
+            (d_here / far) if boss_found else 0.0,
+            sum(1 for r in seen if r.cleared) / max(1, len(seen)),
+            len(seen) / 20.0,
             sum(1 for r in pantries
                 if r.food_stock is None or any(q > 0 for q in r.food_stock))
             / max(1, len(pantries)),
+            # How much of what is on the map is still unentered. This is the
+            # frontier the exploration decision is actually made against, and
+            # with the level size hidden it is the only sense of "how much is
+            # left" the policy has.
+            sum(1 for r in seen if r.state == UNEXPLORED) / max(1, len(seen)),
         ]
 
         # Which squad this run is playing. The policy has to know: the eight
@@ -349,11 +408,17 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         here = st.rooms.rooms[st.room]
         by_pos = {(r.row, r.col): rid for rid, r in st.rooms.rooms.items()}
         near = set(st.rooms.neighbours(st.room))
+        known = st.rooms.known_to_boss
         out = []
         for _, delta in MOVES:
             if delta is None:
+                # Nearest the boss among the linked portals, over the revealed
+                # subgraph rather than the whole map. Before the boss is found
+                # every link scores the same and the tie breaks on room id,
+                # which is stable and is the point: the action still means one
+                # thing when a room links to more than one.
                 links = [p for p in st.rooms.portals if p != st.room and p in near]
-                out.append(min(links, key=lambda p: st.rooms.to_boss.get(p, 99))
+                out.append(min(links, key=lambda p: known.get(p, 99))
                            if links else None)
                 continue
             rid = by_pos.get((here.row + delta[0], here.col + delta[1]))
@@ -460,10 +525,27 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.state.use_fast_core = self.fast_core
         if self.placement_policy is not None:
             self.state.placement_policy = self.placement_policy
+        self._light_up()
         self._seed += 1
         self.steps = 0
         self._mask_cache = None
         return self._encode(self.state), {"action_mask": self.action_mask()}
+
+    def _light_up(self) -> None:
+        """Reveal the level, for the `lights_on` ablation arm.
+
+        `EXPLORED` rather than `UNEXPLORED` so the frontier fraction reads zero
+        and the arm sees the level the way the pre-fog env did: entirely known.
+        The current room keeps its own state, which `set_current` has already
+        written.
+        """
+        if not self.lights_on or self.state is None:
+            return
+        rooms = self.state.rooms
+        for room in rooms.rooms.values():
+            if room.state == UNKNOWN:
+                room.state = EXPLORED
+        rooms._refresh_known()
 
     def step(self, action: int):
         st = self.state
@@ -486,6 +568,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         squad_before = len(st.squad)
         phi_before = self.potential(st)
         result = st.apply(self._decode(action))
+        self._light_up()                 # after `apply`, which is what moves rooms
         self._mask_cache = None          # the state moved; the mask is stale
         self.steps += 1
 

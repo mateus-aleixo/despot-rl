@@ -112,9 +112,17 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
         # Hops over the room graph, not Manhattan distance on the grid: the map
         # is generated per level now and a straight line across it can cross
         # cells that hold no room.
-        far = max(st.rooms.to_boss.values(), default=1)
+        #
+        # Over the **revealed** subgraph, not the whole map. The baseline plays
+        # under the same fog the policy does, because a heuristic that can see
+        # the boss from the start room is not a baseline for a policy that
+        # cannot. Until the boss is found `known_to_boss` is empty, every room
+        # ties, and the first key carries the decision: walk into the room that
+        # has not been cleared.
+        known = st.rooms.known_to_boss
+        far = max(known.values(), default=1)
         return min(kinds["move"], key=lambda a: (
-            st.rooms.rooms[a[1]].cleared, st.rooms.to_boss.get(a[1], far)))
+            st.rooms.rooms[a[1]].cleared, known.get(a[1], far)))
 
     return rng.choice(legal) if rng is not None else legal[0]
 

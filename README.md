@@ -26,8 +26,10 @@ code as a magic constant.
 
 **A hierarchical agent.** The high level plays the run (where to move, what to
 buy, when to upgrade the shop, which mutation to take, and which of the eight
-starting squads it is playing) as a 203-dimensional observation with 33 masked
-actions; the low level places the squad on the grid
+starting squads it is playing) as a 210-dimensional observation with 33 masked
+actions, **under the same fog of war the game gives a player**: the map is
+uncovered a room at a time and nothing the policy sees is computed over rooms it
+has not walked past. The low level places the squad on the grid
 before each fight. Both are PPO. Fights resolve inside the environment, so a
 run-level decision is graded by a fight that actually happened.
 
@@ -49,6 +51,13 @@ A run is twelve levels. Nothing here finishes one.
 Graded over 240 fixed evaluation seeds, with the eight starting squads cycled.
 No trained agent has been measured on this environment yet: it was corrected on
 2026-09-02 and every agent before that no longer loads.
+
+**Both numbers were taken before the fog of war landed**, later the same day.
+The map is now uncovered a room at a time, as the game does it, and nothing the
+policy sees is computed over rooms it has not walked past. Over 60 seeds the
+same heuristic scores 3.433 under the fog against 3.983 with the reveal turned
+back on, so half a level of the 3.946 was free sight of the map. The re-baseline
+comes once the rest of the run layer lands; see `notes/roadmap.md`.
 
 **Why there are no PPO numbers here right now.** A player pointed out that the
 sim did not match the game, and they were right twice over. Every room in the

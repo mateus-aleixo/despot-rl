@@ -2459,6 +2459,14 @@ methodology survives; the levels do not.
     random     1.429       heuristic  3.946      240 seeds, squads cycled
     obs_dim    203         actions    33
 
+**Both of those baselines were measured with the lights on, and the environment
+now has a fog of war.** `C_Rooms.SetCurrent` landed later the same day, the map
+is uncovered a room at a time, and `obs_dim` is 210. Over 60 seeds the same
+heuristic scores 3.433 under the fog against 3.983 with `--lights-on`, a paired
++0.550, so read 3.946 as the lights-on number it is. See
+`notes/reference-sim.md`, "Fog of war", and `tools/fog_cost.py`. The re-baseline
+comes at the Batch 1 boundary.
+
 What changed: every room fights and its shop opens only on the win
 (`notes/reference-sim.md`), and a run starts from one of eight squads rather
 than from five bare Novices. The second is why the first looked broken: with

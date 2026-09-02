@@ -184,6 +184,10 @@ def main():
     ap.add_argument("--squad", default=None,
                     help="pin the starting squad; the default cycles all eight "
                          "by episode seed")
+    ap.add_argument("--lights-on", action="store_true",
+                    help="reveal the whole level instead of playing under the "
+                         "fog, at the same obs_dim, which is the pre-fog "
+                         "observation and the control arm for what the fog costs")
     ap.add_argument("--blind-shelf", action="store_true",
                     help="hold the five description floats and the passive bit "
                          "at zero for every mutation slot, leaving `present`, "
@@ -223,7 +227,8 @@ def main():
                          blind_shrine=args.blind_shrine,
                          blind_shelf=args.blind_shelf,
                          squad=args.squad,
-                         blind_squad=args.blind_squad)
+                         blind_squad=args.blind_squad,
+                         lights_on=args.lights_on)
             for i in range(args.envs)]
 
     states = np.zeros((args.envs, envs[0].obs_dim), dtype=np.float32)

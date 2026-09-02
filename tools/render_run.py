@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import sim.run as sim_run
 from rl.env import MOVES, NON_MOVE_ACTIONS, DespotRunEnv
+from sim.run import UNKNOWN
 from rl.heuristic import heuristic as policy_heuristic
 from rl.placement import POLICIES
 from sim.battle import Battle
@@ -100,7 +101,7 @@ class Scene:
     step: int
     action: str
     hud: dict
-    rooms: list           # (id, row, col, kind, cleared, current)
+    rooms: list           # (id, row, col, kind, cleared, current, state)
     edges: list           # ((row, col), (row, col))
     context: list         # pre-rendered lines for the decision card
     fight: Fight | None = None
@@ -217,13 +218,17 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
         else:
             label = NON_MOVE_ACTIONS[action_i - env.n_moves].replace("_", " ")
 
-        rooms = [(r.id, r.row, r.col, r.kind, r.cleared, r.id == st.room)
+        # The room state rides along so the map can be drawn as the agent sees
+        # it. Drawing the whole level was fine while the sim handed the whole
+        # level over; with fog it would show the viewer a map the policy is not
+        # playing with.
+        rooms = [(r.id, r.row, r.col, r.kind, r.cleared, r.id == st.room, r.state)
                  for r in st.rooms.rooms.values()]
         edges = []
         for rid, r in st.rooms.rooms.items():
             for other in st.rooms.neighbours(rid):
                 o = st.rooms.rooms[other]
-                if (r.row, r.col) < (o.row, o.col):
+                if (r.row, r.col) < (o.row, o.col) and UNKNOWN not in (r.state, o.state):
                     edges.append(((r.row, r.col), (o.row, o.col)))
 
         hud = {"level": st.level, "room": st.room, "kind": room.kind,
@@ -322,7 +327,13 @@ def draw_map(d, sc: Scene):
 
     for a, b in sc.edges:
         d.line([centre(*a), centre(*b)], fill=LINE, width=3)
-    for rid, r, c, kind, cleared, cur in sc.rooms:
+    for rid, r, c, kind, cleared, cur, state in sc.rooms:
+        # An unknown room is not on the player's minimap: `V_MinimapRoom` builds
+        # an icon for `unexplored` and `explored` and none at all for `Unknown`.
+        # It still counts towards the bounds above, so the drawing does not jump
+        # about as the level is uncovered.
+        if state == UNKNOWN:
+            continue
         cx, cy = centre(r, c)
         col = KIND_COLOR.get(kind, KIND_COLOR["empty"])
         if cleared and not cur:

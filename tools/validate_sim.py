@@ -1332,6 +1332,127 @@ check("the start is the furthest room from the boss",
 check("generated adjacency is symmetric",
       all(a in _m.neighbours(b) for a in _m.rooms for b in _m.neighbours(a)))
 
+# -- fog of war ------------------------------------------------------------
+# `C_Rooms.SetCurrent` sets the room being left to `EXPLORED`, the room being
+# entered to `CURRENT`, and every door neighbour still at `UNKNOWN` to
+# `UNEXPLORED`. These check that it does, and that the observation is built on
+# it rather than on the whole map.
+from sim.run import CURRENT, EXPLORED, UNEXPLORED, UNKNOWN
+
+_fs = RunState.new(_STRICT, seed=7)
+_fm = _fs.rooms
+check("a level starts mostly hidden",
+      len(_fm.known()) < len(_fm.rooms),
+      f"{len(_fm.known())} of {len(_fm.rooms)} rooms on the map")
+check("the start room is the only CURRENT room",
+      [r for r in _fm.rooms.values() if r.state == CURRENT]
+      == [_fm.rooms[_fm.start]])
+check("the reveal is exactly the start room's door neighbours",
+      {rid for rid in _fm.known() if rid != _fm.start}
+      == set(_fm._ortho[_fm.start]),
+      f"revealed {sorted(set(_fm.known()) - {_fm.start})}, "
+      f"doors {sorted(_fm._ortho[_fm.start])}")
+
+# walking uncovers more of the level, and never uncovers less
+_seen_counts, _regressed = [len(_fm.known())], []
+_before = {rid: r.state for rid, r in _fm.rooms.items()}
+for _ in range(40):
+    _moves = [a for a in _fs.legal_actions() if a[0] == "move"]
+    if not _moves or _fs.finished:
+        break
+    _lvl = _fs.level
+    _fs.apply(min(_moves, key=lambda a: not _fs.rooms.rooms[a[1]].cleared))
+    if _fs.level != _lvl:            # a new level starts its own fog
+        break
+    for _rid, _st in _before.items():
+        if _fs.rooms.rooms[_rid].state == UNKNOWN and _st != UNKNOWN:
+            _regressed.append(_rid)
+    _before = {rid: r.state for rid, r in _fs.rooms.rooms.items()}
+    _seen_counts.append(len(_fs.rooms.known()))
+check("walking uncovers more of the level",
+      _seen_counts[-1] > _seen_counts[0],
+      f"{_seen_counts[0]} -> {_seen_counts[-1]} rooms")
+check("a revealed room is never hidden again", not _regressed, f"{_regressed[:4]}")
+
+# the reveal follows doors, not portals. The shipped fixed map is the only map
+# with portals in it, so it is the only place this can be checked at all.
+_pm = RoomMap.from_table(_STRICT["Rooms"])
+_p0 = _pm.portals[0]
+_pm.set_current(_p0)
+check("standing on a portal does not reveal the portals it links to",
+      all(_pm.rooms[_p].state == UNKNOWN
+          for _p in _pm.portals if _p != _p0 and _p not in _pm._ortho[_p0]),
+      f"portals {_pm.portals}, "
+      f"states {[_pm.rooms[_p].state for _p in _pm.portals]}")
+check("but a portal room is still reachable in one move",
+      set(_pm.portals) - {_p0} <= set(_pm.neighbours(_p0)))
+
+# `known_to_boss` is the fair distance, and it is empty until the boss is found
+_fb = RunState.new(_STRICT, seed=3).rooms
+check("the distance to the boss is unavailable until the boss is found",
+      not _fb.boss_found() and _fb.known_to_boss == {},
+      f"boss_found={_fb.boss_found()}, {len(_fb.known_to_boss)} distances")
+for _r in _fb.rooms.values():         # reveal the whole level by hand
+    _r.state = EXPLORED
+_fb._refresh_known()
+check("with the whole level revealed it agrees with the true distance",
+      _fb.known_to_boss == _fb.to_boss,
+      f"{len(_fb.known_to_boss)} of {len(_fb.to_boss)}")
+
+# `C_BossVisionMutation.OnNewLevel`, mutation 188
+_bv = RunState.new(_STRICT, seed=5).rooms
+check("BossVision puts the boss on the map", _bv.reveal_boss() and _bv.boss_found())
+check("BossVision is worth nothing once the boss is already found",
+      not _bv.reveal_boss())
+
+# and the observation is built on what has been revealed. Rewriting every room
+# the squad cannot see must not move a single number in the encoding: that is
+# the whole claim, and it is what the old `to_boss` and `len(rooms)` features
+# failed. The second half gives the check teeth by showing a *visible* room
+# still moves it.
+from rl.env import DespotRunEnv
+
+_leaks, _blind, _rewritten, _tested = [], [], 0, 0
+for _seed in range(12):
+    _env = DespotRunEnv(tables=_STRICT, seed=_seed)
+    _env.reset(seed=_seed)
+    # a few points along a run, not only the first room of the first level
+    for _hop in range(6):
+        _hidden = [r for r in _env.state.rooms.rooms.values() if r.state == UNKNOWN]
+        if _hidden:
+            _tested += 1
+            _rewritten += len(_hidden)
+            _o1 = _env._encode(_env.state).copy()
+            _was = [(r.kind, r.cleared) for r in _hidden]
+            for _r in _hidden:
+                _r.kind = "boss" if _r.kind != "boss" else "fight"
+                _r.cleared = not _r.cleared
+            if (_o1 != _env._encode(_env.state)).any():
+                _leaks.append((_seed, _hop))
+            for _r, (_k, _c) in zip(_hidden, _was):
+                _r.kind, _r.cleared = _k, _c
+        _moves = [a for a in _env.state.legal_actions() if a[0] == "move"]
+        if not _moves or _env.state.finished:
+            break
+        _env.state.apply(_moves[0])
+check("the observation ignores rooms the squad has not seen", not _leaks,
+      f"{_tested} states, {_rewritten} hidden rooms rewritten, leaked at {_leaks[:4]}")
+
+# and the same rewrite on a room the squad *can* see does move it, which is what
+# gives the check above its teeth
+_env = DespotRunEnv(tables=_STRICT, seed=0)
+_env.reset(seed=0)
+_o2 = _env._encode(_env.state).copy()
+_visible = [r for r in _env.state.rooms.rooms.values()
+            if r.state == UNEXPLORED and r.id in _env.state.rooms._ortho[_env.state.room]]
+for _r in _visible:
+    _r.kind = "food_shop" if _r.kind != "food_shop" else "item_shop"
+_o3 = _env._encode(_env.state)
+check("the observation does follow a room the squad can see",
+      bool(_visible) and (_o2 != _o3).any(),
+      f"{len(_visible)} visible neighbours rewritten, "
+      f"{int((_o2 != _o3).sum())} features moved")
+
 # and the level's food supply is now the row's own expression, because the map
 # really does hold `FoodShops` food shops
 _stf = RunState.new(_STRICT, seed=11)

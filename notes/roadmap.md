@@ -112,17 +112,27 @@ costs one break instead of a dozen.
 Batch 2 means Batch 2's measurements survive; the other way round they would be
 thrown away.
 
-- **Fog of war.** `RoomState` (`Unknown/Unexplored/Explored/Current`),
-  `C_Rooms.SetCurrent`'s reveal of the entered room's neighbours, `Rooms.json`'s
-  `Explored` flag. Fog changes *information*, not legality: moves are already
-  restricted to orthogonal neighbours and a neighbour is always revealed by
-  standing next to it, so `legal_actions` is untouched and only `_encode` moves.
-- **The `to_boss` replacement**, a measured choice between three different
-  agents rather than an implementation detail. `RoomMap.to_boss` is a BFS over
-  the whole graph and four observation entries read it. Candidates: drop the
-  boss-distance features; compute over the revealed subgraph with a convention
-  for the unreached; or expose a frontier instead. Each gets the `--blind-*`
-  control.
+- ~~**Fog of war.**~~ **Done, 2026-09-02.** `RoomState`, the reveal in
+  `C_Rooms.SetCurrent`, `known_to_boss`, an observation built on the revealed
+  subgraph, `BossVision`, and a fog-aware `render_run`. It held that fog changes
+  *information* and not legality: `legal_actions` is untouched, because a door
+  neighbour is always revealed by standing next to it. `obs_dim` went 203 to
+  210. Details and the second leak the check caught are in
+  `notes/reference-sim.md`.
+- **The `to_boss` replacement was picked, not measured, and that is a deviation
+  worth naming.** The plan called for three arms. What shipped is the middle
+  candidate: distances over the revealed subgraph, empty until the boss is
+  found, with a `boss_found` flag and a frontier fraction beside it. The reason
+  for not measuring now is the measurement rule itself. Portals, the remaining
+  room types, quests, dialogs and consumables are all still to land in Batch 1
+  and every one of them moves the observation, so a three-arm sweep taken today
+  would be scored against an interface that is about to move, which is the
+  single thing this project has wasted the most time on. **The fork moves to the
+  Batch 1 boundary**, where it costs one sweep against a stable interface.
+  `--lights-on` is the control it needs and it exists now: it reveals the whole
+  level at an unchanged `obs_dim`, so the pre-fog observation is an arm rather
+  than a code change. The other two candidates are a few lines from here, one
+  dropping the two boss features and one dropping the frontier.
 - **Portals.** `portalsCount` and `minPortalDistance` in `mapgen`. `RoomMap`
   already links them and `from_table` reads the shipped three; generated levels
   have none, so the `portal` action has never once been legal.
@@ -256,9 +266,16 @@ rest:
    `tools/show_dialog.py` renders any of them. The dialog work is now ordinary
    implementation, so it can be sequenced with the rest of Batch 1 rather than
    ahead of it.
-2. **Fog, since it is the item every other observation change has to be built
-   on.** `RoomState`, the reveal in `C_Rooms.SetCurrent`, then the `to_boss`
-   fork, which needs measuring rather than picking.
+2. ~~Fog.~~ **Done, 2026-09-02**, along with `BossVision` and a fog-aware
+   `render_run`. The `to_boss` fork was **picked rather than measured**, and the
+   three-arm sweep it was meant to get moves to the Batch 1 boundary for the
+   reason given above; `--lights-on` is the control arm and is in place.
+
+   So Batch 1 now picks up at the rest of the run layer: **portals**
+   (`portalsCount` is 0 in `sim/mapgen.py`, so the portal action has never once
+   been legal), the remaining room types, the shrine and reroll split, the 11
+   quests, the dialog system now that the table is decoded, consumables,
+   layouts, and `InstantTransitions`.
 
 Tools that did not exist before this session and are worth knowing about:
 `tools/coverage.py` (what the game ships against what the sim reads),

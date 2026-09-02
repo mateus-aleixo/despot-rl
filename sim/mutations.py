@@ -65,7 +65,10 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "ManaBreak": Handler(PASSIVE, note="mana burn on hit"),
     "RailProjectile": Handler(UNIMPLEMENTED, note="piercing projectile"),
     "RubberProjectile": Handler(UNIMPLEMENTED, note="bouncing projectile"),
-    "BossVision": Handler(NOOP, note="UI only"),
+    # Not a fight effect, so it is still NOOP to the battle layer, but it is not
+    # nothing: `C_BossVisionMutation.OnNewLevel` reveals the boss room, and the
+    # run layer applies it in `RunState.next_level` via `RoomMap.reveal_boss`.
+    "BossVision": Handler(NOOP, note="run layer: reveals the boss room on a new level"),
     "Afk": Handler(NOOP, note="idle-progress meta, outside a fight"),
     "SuperPunch": Handler(UNIMPLEMENTED, note="bespoke attack replacement"),
     "CooldownReduction": Handler(PASSIVE, note="scales every action's cooldown"),

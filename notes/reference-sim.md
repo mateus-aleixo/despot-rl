@@ -1532,9 +1532,99 @@ A mutation that reveals the boss is worth nothing to an agent that already knows
 where the boss is, which is another reason the fog matters: it is not only a
 difficulty question, it decides whether a whole mutation has any value.
 
-**Not acted on yet.** A twelve-seed reward sweep is training against the current
-observation as this is written, and changing `obs_dim` under it would throw the
-comparison away.
+### Implemented, 2026-09-02
+
+The reveal rule is `C_Rooms.SetCurrent` read instruction by instruction, and it
+is smaller than it sounds:
+
+    previous current -> EXPLORED
+    entered room     -> CURRENT
+    for each door neighbour:
+        if type carries QuestExtra: skip        # bt eax, 0xa
+        if state is not UNKNOWN:    skip        # test eax, eax
+        state -> UNEXPLORED
+
+Two details are worth keeping. The neighbour walk is over
+`Dictionary<Direction, M_Room>`, so it follows **doors only** and a portal link
+reveals nothing, which is why `RoomMap` now keeps `_ortho` beside `_adj`. And
+the `QuestExtra` skip means an extra quest room is never revealed by walking
+past it, so those have to be found some other way.
+
+**A revealed room shows what it is, and that was checked rather than assumed.**
+`V_MinimapRoom` holds `iconsByState`, a `Dictionary<RoomState,
+Dictionary<RoomType, string>>`, and its static constructor builds nine icons
+under `unexplored` for the nine it builds under `explored`:
+`unexplored-shop`, `unexplored-food-shop`, `unexplored-static-shop`,
+`unexplored-altar`, `unexplored-inactive-altar`, `unexplored-quest`,
+`unexplored-boss`, `unexplored-final-boss`, and the plain `unexplored`
+background. There is no `unknown-` icon of any kind. So the fog hides a room's
+**existence**, not its type: once a door reveals a room the player can see it is
+a shop, and the observation is allowed to say so. That settles what would
+otherwise have been a guess about how much the neighbour vector may carry.
+
+The design decision the earlier note left open, what `to_boss` becomes, resolved
+this way. `RoomMap.to_boss` stays exactly as it was, a BFS over the whole map,
+because the checks and the map generator want ground truth. Beside it is
+`known_to_boss`, the same BFS restricted to revealed rooms, **empty until the
+boss is found**, recomputed in `set_current` rather than on demand. The
+observation reads only the second, and carries a `boss_found` flag next to the
+distance, because without it a distance of 0 means "standing on the boss" and
+"no idea where the boss is" at once and the two want opposite moves. The
+level-wide features became level-so-far features: rooms seen instead of rooms,
+cleared over seen instead of cleared over all, pantries among the seen ones, and
+a new frontier fraction, which is the only sense of "how much is left" that
+survives hiding the level size. `_move_targets` picks its portal by
+`known_to_boss` too.
+
+`rl/heuristic.py` navigates on `known_to_boss` as well. A baseline that can see
+the boss from the start room is not a baseline for a policy that cannot, and the
+heuristic is what every trained agent is scored against.
+
+**The check found a second leak, which is the point of writing checks that way.**
+The test rewrites the kind and cleared flag of every room the squad has not seen
+and asserts the encoding does not move; it moved by one feature. That feature was
+the squad-power-against-this-room scalar, which read `st.room_power()`, and
+`room_power` is `CalculatePower`'s share: a total scaled by `len(rooms)` divided
+by `level_weight`, a sum over **every** room's multiplier. Faithful for the sim,
+and a back door into the size and the shop density of an unwalked level for the
+observation. The sim keeps `room_power`; the observation now scales by the level
+row's own `PowerPerRoom` against this room's multiplier, which says the same
+thing about difficulty and nothing about the unseen map. The check sweeps twelve
+seeds and six hops each, 69 states and 217 hidden rooms rewritten, and the
+paired check in the other direction confirms a *visible* neighbour still moves
+the encoding.
+
+`BossVision`, mutation 188, is now real: `RoomMap.reveal_boss` puts the boss on
+the map and `RunState.next_level` calls it when the run holds the mutation. Its
+registry note said "UI only", which was true only while this sim handed the
+whole map over for free.
+
+`tools/render_run.py` draws the map the agent is actually playing with: unknown
+rooms are not drawn and edges into them are not drawn, while the bounds still
+come from the whole level so the picture does not jump about as it is uncovered.
+
+**What the fog is worth, measured.** `tools/fog_cost.py` plays the heuristic
+over the same 60 seeds twice, once under the fog and once with `--lights-on`,
+which reveals the level at an unchanged `obs_dim`:
+
+    fog        3.433  (sd 1.101)
+    lights on  3.983  (sd 0.922)
+    paired    +0.550, lights on better on 24 of 60, worse on 12
+
+So free sight of the map is worth **half a level** to a policy that navigates on
+it. Two things follow. The lights-on arm at 3.983 sits on top of the 3.946
+recorded for this heuristic over 240 seeds, which is the cross-check that
+`lights_on` really does reproduce the environment as it was, and it means
+**every baseline in this repo was measured with the lights on**. And the fog
+widens the spread as well as lowering the mean, 0.922 to 1.101, which is what a
+harder navigation problem should do.
+
+**Not re-baselined here.** Batch 1 is the interface-breaking batch and the
+measurement rule holds: RL numbers are taken at a batch boundary, not per
+feature. The above is a heuristic check that the feature changes something, and
+it costs minutes rather than hours. `obs_dim` moved from 203 to 210, so every
+existing checkpoint is against a different observation and the `roomfight*`
+numbers do not carry over.
 
 ## What is left, and in what order
 

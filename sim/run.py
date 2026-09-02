@@ -88,6 +88,21 @@ ROOM_KIND = {"i": "item_shop", "f": "food_shop", "m": "mutation", "e": "fight", 
 # action here: the shop shows its shelf once. See `sim/assumptions.py`.
 MUTATION_SHOP = {"ShowCount": 10, "BuyCount": 2, "RollCost": 0.0, "RollCount": 0}
 
+# `RoomState`, straight from the enum. `C_Rooms.SetCurrent` is the only thing
+# that writes it, and the disassembly says exactly what it writes: the room being
+# left is set to `EXPLORED`, the room being entered to `CURRENT`, and then the
+# `M_Room.neighbors` walk sets every neighbour still at `UNKNOWN` to
+# `UNEXPLORED`. So a level is uncovered a room at a time and the map is
+# discovered, not given.
+UNKNOWN, UNEXPLORED, EXPLORED, CURRENT = 0, 1, 2, 4
+
+# What the reveal skips. The neighbour walk tests `bt eax, 0xa` on the type and
+# jumps past the room when the bit is set: bit 10 is `RoomType.QuestExtra =
+# 1024`, so an extra quest room is never revealed by walking next to it. No kind
+# here is generated yet, and the entry is what makes the rule right when they
+# are.
+NEVER_REVEALED = frozenset({"quest_extra"})
+
 
 def room_kind(code: str) -> str:
     code = (code or " ").strip()
@@ -101,6 +116,10 @@ class Room:
     col: int
     kind: str
     cleared: bool = False
+    # `M_Room.state`, one of the four `RoomState` values above. Everything the
+    # policy is allowed to see is gated on this: a room at `UNKNOWN` is not on
+    # the player's minimap at all.
+    state: int = UNKNOWN
     # A shrine is one-use. Item shops do not use this: their stock is
     # `RunState.offer`, one shared shop for the whole run. Food shops do not
     # either -- they stock packs, and their stock is `food_stock`.
@@ -145,14 +164,26 @@ class RoomMap:
         # it on every step, so it is built once rather than scanned per call.
         by_pos = {(r.row, r.col): rid for rid, r in self.rooms.items()}
         self._adj: dict[str, list[str]] = {}
+        # Doors only, which is what the reveal follows: `M_Room.neighbors` is a
+        # `Dictionary<Direction, M_Room>`, so a portal link reveals nothing and
+        # teleporting is `C_Rooms.TeleportTo`, a separate path. `_adj` is doors
+        # plus portal links, which is what movement follows.
+        self._ortho: dict[str, list[str]] = {}
         for rid, room in self.rooms.items():
             near = [by_pos[p] for p in ((room.row - 1, room.col), (room.row + 1, room.col),
                                         (room.row, room.col - 1), (room.row, room.col + 1))
                     if p in by_pos]
+            self._ortho[rid] = sorted(set(near))
             if rid in self.portals:
                 near += [p for p in self.portals if p != rid and p in self.rooms]
             self._adj[rid] = sorted(set(near))
+        # The whole-map distance. This is ground truth for the tools and the
+        # checks; **nothing the policy sees may read it**, because a player has
+        # no way to know it before walking the level. `known_to_boss` is the
+        # version that is fair to show, and it is empty until the boss is found.
         self.to_boss = self._distances(self.boss)
+        self.current: str | None = None
+        self.known_to_boss: dict[str, int] = {}
 
     @classmethod
     def from_table(cls, rooms_table: dict) -> "RoomMap":
@@ -180,21 +211,77 @@ class RoomMap:
                  for rid, (r, c, kind) in spec["rooms"].items()}
         return cls(rooms, spec["start"], spec["boss"])
 
-    def _distances(self, source: str) -> dict[str, int]:
+    def _distances(self, source: str, known_only: bool = False) -> dict[str, int]:
         import collections
+        if source not in self.rooms:
+            return {}
+        if known_only and self.rooms[source].state == UNKNOWN:
+            return {}
         out = {source: 0}
         q = collections.deque([source])
         while q:
             cur = q.popleft()
             for n in self._adj[cur]:
-                if n not in out:
-                    out[n] = out[cur] + 1
-                    q.append(n)
+                if n in out or (known_only and self.rooms[n].state == UNKNOWN):
+                    continue
+                out[n] = out[cur] + 1
+                q.append(n)
         return out
 
     def neighbours(self, rid: str) -> list[str]:
         """Orthogonally adjacent rooms, plus portal-to-portal links."""
         return self._adj[rid]
+
+    # -- fog of war --------------------------------------------------------
+    def set_current(self, rid: str) -> None:
+        """`C_Rooms.SetCurrent`: enter a room and reveal what it touches.
+
+        The order is the game's. It sets the room it is leaving to `EXPLORED`,
+        the room it is entering to `CURRENT`, then walks that room's doors and
+        promotes each neighbour that is still `UNKNOWN` to `UNEXPLORED`. Two
+        conditions guard the promotion and both are in the disassembly: the
+        neighbour's type must not carry the `QuestExtra` bit, and its state must
+        be exactly `UNKNOWN`, so nothing already seen is rewritten.
+        """
+        if self.current is not None and self.current in self.rooms:
+            self.rooms[self.current].state = EXPLORED
+        self.current = rid
+        self.rooms[rid].state = CURRENT
+        for n in self._ortho[rid]:
+            room = self.rooms[n]
+            if room.kind not in NEVER_REVEALED and room.state == UNKNOWN:
+                room.state = UNEXPLORED
+        self._refresh_known()
+
+    def reveal_boss(self) -> bool:
+        """`C_BossVisionMutation.OnNewLevel`, mutation 188 `BossVision`.
+
+        It walks every room reading `get_type` and `get_state`, so it reveals a
+        room **by type**: the boss, not a random one. Returns whether anything
+        changed, which is False when the boss is already on the map.
+        """
+        room = self.rooms.get(self.boss)
+        if room is None or room.state != UNKNOWN:
+            return False
+        room.state = UNEXPLORED
+        self._refresh_known()
+        return True
+
+    def _refresh_known(self) -> None:
+        """Recompute the distances the policy is allowed to see.
+
+        Done here rather than on demand because state changes only in the two
+        methods above, and `_encode` asks for these several times a step.
+        """
+        self.known_to_boss = self._distances(self.boss, known_only=True)
+
+    def known(self) -> list[str]:
+        """The rooms that are on the player's map, in any state but `UNKNOWN`."""
+        return [rid for rid, r in self.rooms.items() if r.state != UNKNOWN]
+
+    def boss_found(self) -> bool:
+        return (self.boss in self.rooms
+                and self.rooms[self.boss].state != UNKNOWN)
 
 
 @dataclass
@@ -460,6 +547,7 @@ class RunState:
                  food=Food.from_game(game), squad=squad, rng=rng)
         st.rooms = RoomMap.generate(st.level_row, rng)
         st.room = st.rooms.start
+        st.rooms.set_current(st.room)
         # Level 1 opens the same way every later level does: see `next_level`.
         st.rooms.rooms[st.room].cleared = True
         # `C_ItemShop..ctor` fills the shop the moment the run starts, at level
@@ -1042,6 +1130,9 @@ class RunState:
         if kind == "move":
             result["food"] = self.food.spend_move(self.feed_cost)
             self.room = arg
+            # The reveal happens on entry, before the fight, so the neighbours
+            # of a room the squad dies in are still uncovered.
+            self.rooms.set_current(arg)
             room = self.rooms.rooms[arg]
             first_visit = not room.cleared
             if first_visit:
@@ -1295,6 +1386,13 @@ class RunState:
         self.level += 1
         self.rooms = RoomMap.generate(self.level_row, self.rng)
         self.room = self.rooms.start
+        self.rooms.set_current(self.room)
+        # `C_BossVisionMutation.OnNewLevel` fires here, on the new level, and
+        # puts the boss on the map without walking to it. It was registered as
+        # "UI only", which was true only while this sim handed the whole map
+        # over for free.
+        if any(m.get("Name") == "BossVision" for m in self.mutations):
+            self.rooms.reveal_boss()
         # `FightInFirst`. `C_Rooms.Init` looks the key up in the level data and,
         # when it is missing or false, calls `C_Room.AfterFight(win: true)` on
         # the room the level opens in, which resolves it as won without a fight
