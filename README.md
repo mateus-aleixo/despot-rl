@@ -165,8 +165,11 @@ against its own size. Winner agreement inside the envelope went from 24/60 to
     tools/    datamining, validation, evaluation, rendering
     notes/    the running record: datamining, reference sim, Rust core, RL
 
-The four files in `notes/` carry the numbers and the mechanics, including what
-has been retracted. Read those before re-deriving anything.
+The files in `notes/` carry the numbers and the mechanics, including what has
+been retracted. Read those before re-deriving anything.
+[`notes/roadmap.md`](notes/roadmap.md) is the plan for the rest: the goal is
+every mode and every feature, and it defines what "done" can mean given that
+bit-exact behaviour is provably out of reach.
 
 ## Running it
 
