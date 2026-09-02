@@ -1230,3 +1230,105 @@ Quest pack in `EnemyPacks.json`, which suggests not.
   and `MaybeActivateSecretRoom`.
 - `C_RoomCleanerConsumable.Use` calls `AfterFight` directly, i.e. it clears a
   room without fighting it.
+
+## Phase 2: the level rows, the first room, and the level-entry dialog
+
+### The multipliers say the shops fight, independently of Phase 1
+
+| level | rooms | item | food | shrines | reroll | gold | power | I / F / T / D / B | quest | secret |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 7 | 2 | 1 | 1 | 0 | 10 | 1,600 | 1.2 / 0.75 / 1.2 / 0.5 / 2 | | |
+| 2 | 10-12 | 3 | 2 | 0 | 1 | 11 | 3,500 | 1.3 / 0.8 / 1.2 / 0.7 / 2 | Sci, Pit, Cube, Rat | |
+| 5 | 10-15 | 3 | 2 | 0 | 1 | 12 | 14,000 | 1.1 / 0.9 / 1.2 / 0.8 / 1.6 | | |
+| 6 | 10-15 | 3 | 2 | 0 | 1 | 13 | 28,000 | 1.1 / 0.9 / 1.2 / 0.8 / 1.6 | Reaper, SecretRoom, Spider | |
+| 7 | 10-14 | 3 | 2 | 0 | 1 | 13 | 50,000 | 1.1 / 0.9 / 1.2 / 0.8 / 1.6 | | **true** |
+| 10 | 10-14 | 3 | 2 | 0 | 1 | 15 | 85,000 | 1.1 / 0.9 / 1.2 / 0.8 / 1.6 | Nurgle, Flight, Sword | |
+| 12 | 14-18 | 6 | 4 | 0 | 1 | 18 | 140,000 | 1.1 / 0.9 / 1.2 / 0.8 / 3 | | |
+
+**`ItemsMult` is 1.1 to 1.3 and `TreasureMult` is 1.2, against a `DefaultMult`
+of 0.5 to 0.8.** A shop or treasure room is a *harder* fight than a plain room,
+by a factor of about two at level 1. We have been reading those columns as gold
+weights only. They are the room's share of the level's Power as well, which is
+what `PowerPerRoom` is for, and no reading of them makes sense if those rooms are
+peaceful.
+
+Also in the rows and not modelled: `Quest` is a shortlist per level and only
+levels 2, 6 and 10 have one; `SecretRoom` is true only on level 7; `Shrines` is 1
+at level 1 and 0 after, while `RerollShrines` is 1 from level 2 on, so the shrine
+family after level 1 is the **reroll** shrine, which we conflate with the plain
+one. `StatShops` is 0 on all twelve, which is the earlier finding that
+consumables are unreachable in Default play.
+
+### `FightInFirst`, and the first room of a level
+
+`Rooms.json` carries a key we never read: **`FightInFirst: true`**, alongside
+`Explored: false` and `InstantTransitions: false`. It is not in
+`GenerationParams` and neither `FromFixedData` nor `FromGeneratedData` mentions
+it, so it took a data xref to find. `tools/data_xrefs.py` is new for this: it
+finds rip-relative references to a string literal, which `tools/xrefs.py` cannot
+do because it only follows `call rel32`.
+
+Both references are in `C_Rooms.<Init>d__21.MoveNext`, and the code reads:
+
+    mov  rdx, [rip + ...]      ; "FightInFirst"
+    call ...                   ; look it up in the level data
+    test al, al
+    je   0x180a62c94           ; not set -> the no-fight path
+    ...                        ; set -> "HideLayout", V_Room.ShowLayout
+  0x180a62c94:
+    mov  dl, 1                 ; win = true
+    call C_Room.AfterFight     ; resolve the room as already won
+    call C_Rooms.SetCurrent
+
+So when `FightInFirst` is absent or false, **the level's first room is marked won
+without a fight**, which by Phase 1 opens its doors, its shrine and its shop and
+pays its gold. When it is set, the room is shown and fought normally.
+
+The shipped fixed map sets it true. No generated level row carries the key at
+all, so a generated level falls down the no-fight path and opens its first room
+for free. That is a per-level data switch, not a universal rule, and it matches
+the player report that the first room of a level is not a fight, with level 1 on
+the fixed map as the exception.
+
+### The level-entry dialog is real, and it is not flavour
+
+`C_Levels` owns the transition: `ChangeLevel`, `WinLevel`, `IsLastLevel`,
+`LoadLevelRooms`, `DetermineLevelStyles`, and **`StartDialog(bool externalCall)`**
+with an `OnDialogsClosed` beside it. `StartDialog` reads the session mode, builds
+an `RND`, takes `Services.Dialogs`, picks one and **`RemoveAt`s it**, so a dialog
+is used once per run, and falls back to a `"NoDialogsPlaceholder"` when the pool
+runs out. `C_ResLog.NewLevel(level, dialog, roomCount, quest)` logs the chosen
+dialog by name as part of a `NEW_LEVEL` event, which is how we know the dialog
+belongs to the level change rather than to a room.
+
+`M_Dialog` is not a cutscene:
+
+    float weight       string title      string text
+    string[] choices   M_Dialog[][] outcomes
+    M_Event[] events   IList<M_UnlockEntry> unlocks
+    bool[] enableds    bool[] hiddens    float[] weightSums, float[][] cSums
+
+Weighted choice, branching outcomes, attached events and unlocks. So **every
+level change presents a weighted choice with gameplay consequences**, and the
+sim models none of it. The dialog table is not in `EncryptedMainGroup/DB`, so
+finding it is the next datamining step.
+
+### The generation parameters we still ignore
+
+`GenerationParams` confirms `maxDeadEnds` and `minFinishDistance` are real fields
+whose values we could not recover, and lists a lot we never implemented:
+`portalsCount`, `minPortalDistance`, `rerollShrinesCount`, `questCount`,
+`extraQuestRoomCount`, `secretRoomCount`, `questRoomAllowedDoors`,
+`questRoomGuaranteedDoors`, `finalLevel`, `mode`, `chip`, `quest`,
+`longRunReward`.
+
+### Scorecard against the player report
+
+| claim | verdict |
+|---|---|
+| a fight in every room, whatever its type | **confirmed**, `ChoosePacks` errors on a room without a pack |
+| the shop or shrine appears only after the fight is won | **confirmed**, `AfterFight` calls `M_Shop.set_open` |
+| an event on entering every level | **confirmed**, `C_Levels.StartDialog` on the level change |
+| no fight in the first room of a level | **confirmed and data-driven**, `FightInFirst` |
+| that first room is a shop | not shown either way |
+| quest rooms have no fight | **likely**: there is no Quest pack in `EnemyPacks.json`, but not proven |
