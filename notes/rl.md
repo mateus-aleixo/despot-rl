@@ -2535,3 +2535,55 @@ Also worth keeping: the spread across twelve identically configured agents is
 harder environment with a cycled squad does to run-to-run variance. A single
 agent means less here than it used to; the best of these twelve scores 4.308 and
 the worst 3.458.
+
+
+### 4M on the corrected environment: the agent draws with the heuristic
+
+`runs/roomfight4m_long_s0..s11.pt`, twelve seeds at 4M, `--checkpoint-every
+1000000`, squads cycled, 240 evaluation seeds, 147.1 minutes for 48M steps.
+
+The curve comes off one run per seed, and this time that is verified rather than
+assumed: **all twelve 2M checkpoints are bit-identical to the `roomfight2m`
+finals**, so nothing moved in the environment between the two sweeps.
+
+| budget | mean | sd | mutations held | against the heuristic's 3.946 | beats it |
+|---|---|---|---|---|---|
+| 1M | 3.451 | 0.115 | 1.06 | -0.495 [-0.560, -0.430] | 0 of 12 |
+| 2M | 3.797 | 0.229 | 2.21 | -0.149 [-0.279, -0.020] | 3 of 12 |
+| 3M | 3.895 | 0.278 | 2.64 | -0.051 [-0.208, +0.106] | 3 of 12 |
+| 4M | 3.918 | 0.374 | 2.68 | **-0.028 [-0.239, +0.184]** | 3 of 12 |
+
+    1M -> 2M  +0.346 [+0.205, +0.486]  12/12
+    2M -> 3M  +0.098 [+0.025, +0.172]   8/12
+    3M -> 4M  +0.024 [-0.084, +0.131]   7/12
+    2M -> 4M  +0.122 [-0.015, +0.258]   9/12
+
+**The agent catches the heuristic and does not pass it.** At 4M the interval
+covers zero, so this is a draw rather than the loss it was at 2M, but it is not
+a win: the mean is still below, and **only 3 of 12 agents individually beat the
+baseline at any budget from 2M on**. Doubling from 2M bought +0.122 with an
+interval crossing zero, and 3M to 4M is flat, so the budget lever is spent again
+by about 3M. Twice now this project has answered "is it undertrained" with more
+steps and got most of the gain in the first doubling.
+
+**The number that actually changed is the spread, and it went the wrong way.**
+
+    1M 0.115    2M 0.229    3M 0.278    4M 0.374
+
+The standard deviation across twelve identically configured agents **more than
+triples** from 1M to 4M. On the superseded environment it did the opposite,
+tightening from 0.183 at 600k to 0.098 at 2M, and that was written up here as
+"the budget that makes the behaviour exist also halves the spread". That does
+not hold on the corrected environment: more training makes these agents *more*
+different from each other, not less. It is also why "beats it 3 of 12" is stuck
+while the mean climbs, and why the best agent at 4M scores 4.6 against a worst of
+3.346.
+
+**How to apply.** Budget is no longer the lever, and an arm of twelve is no
+longer enough: at sd 0.374 the standard error on a twelve-seed mean is 0.11, so
+a change worth a tenth of a level cannot be resolved by this arm at all. Size
+future arms off the 4M spread, not the old one. And the remaining gap is
+behavioural rather than a training-length problem: the agent saturates at 2.68
+mutations held against the heuristic's 4.23 and still cannot clear a greedy
+baseline, so the next thing to try is the reward or the low level, not more
+steps.
