@@ -38,19 +38,40 @@ retracted.
 
 A run is twelve levels. Nothing here finishes one.
 
-| | mean level reached | sd across seeds |
-|---|---|---|
-| Random policy | 1.108 | |
-| Hand-written heuristic | 2.283 | |
-| PPO, 600k steps (12 seeds) | 2.561 | 0.183 |
-| PPO, 2M steps (12 seeds) | **2.932** | 0.098 |
+| | mean level reached |
+|---|---|
+| Random policy | 1.429 |
+| Hand-written heuristic | **3.946** |
 
-Graded over 240 fixed evaluation seeds per agent, twelve training seeds an arm.
+Graded over 240 fixed evaluation seeds, with the eight starting squads cycled.
+No trained agent has been measured on this environment yet: it was corrected on
+2026-09-02 and every agent before that no longer loads.
 
-**The single largest effect in this project is training budget**, which is
-embarrassing but worth stating plainly, because four separate environment
-features were designed, built and measured before that was clear. Off one run
-per seed with checkpoints, so no init or architecture difference is in it:
+**Why there are no PPO numbers here right now.** A player pointed out that the
+sim did not match the game, and they were right twice over. Every room in the
+game has a fight, and its shop, shrine, doors and gold only open once that fight
+is won; and a run does not start from `Game.Team.Packs` but from one of eight
+squads in `ChipChoice/Squads.json`. The sim was fighting in about a third of its
+rooms and opening with five bare Novices at 750 Power against squads the game
+never hands anyone, which are 3,783 to 7,176. Both are fixed, and the numbers
+that follow from them have to be re-measured rather than carried over.
+
+For the record, on the superseded environment: heuristic 2.283, PPO 2.561 at
+600k and 2.932 at 2M over twelve seeds, with a standard deviation of 0.098
+across identically configured 2M agents. The methodology below survives the
+change; those particular levels do not.
+
+**The largest effect ever measured here is which squad you start with**: a whole
+level of spread between the eight, 3.467 to 4.492 under the heuristic, against
+the tenth of a level that separates identically configured 2M agents. It is now
+part of the observation, cycled across episodes, so the agent plays all eight
+rather than being handed one.
+
+The largest effect before that was **training budget**, which was embarrassing
+enough to state plainly, because four separate environment features were
+designed, built and measured before it was clear. Off one run per seed with
+checkpoints, so no init or architecture difference is in it (measured on the
+superseded environment):
 
 | budget | mean level | mutations held | free mutation taken |
 |---|---|---|---|
@@ -85,6 +106,11 @@ The findings that generalise past this game:
   and each time it looked like a strategy rather than a bug: a squad that
   started fully armed, a room that paid gold on every visit, free food, and a
   stranded run that scored better than a wipe.
+- **The fifth and largest was found by a player, not by an agent.** Reading the
+  binary is not the same as playing the game: two of its load-bearing facts, that
+  every room fights and that a run starts from a chosen squad, sat in files this
+  project had read past for weeks. The report that "this doesn't match the game"
+  was worth more than any amount of further inference from the same data.
 
 ## The simulator
 
