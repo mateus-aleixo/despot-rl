@@ -2448,3 +2448,44 @@ the roster it actually has, where an outer bandit over eight arms would learn a
 ranking for whatever average policy it happened to be paired with. It costs
 `obs_dim + 8`, so it needs the blind-control protocol like any other observation
 change.
+
+
+### Where this stands, 2026-09-02
+
+The environment changed twice today and **every number in this file above these
+last sections was measured on a sim that is now known to be wrong**. The
+methodology survives; the levels do not.
+
+    random     1.429       heuristic  3.946      240 seeds, squads cycled
+    obs_dim    203         actions    33
+
+What changed: every room fights and its shop opens only on the win
+(`notes/reference-sim.md`), and a run starts from one of eight squads rather
+than from five bare Novices. The second is why the first looked broken: with
+room fights and the old squad both baselines finished at 1.000 on a 17% win
+rate, and with `Squad1` the same code gives 4.267 at 96% over 23 fights a run.
+
+Left running: a twelve-seed 2M sweep, tag `roomfight2m`, `--checkpoint-every
+1000000`. Score with
+
+    python tools/sweep_arms.py score --sweep budget --tag roomfight2m --runs 240
+    python tools/sweep_arms.py score --sweep budget --tag roomfight2m --at 1000000
+
+and read it against the 3.946 heuristic. Then the questions worth asking:
+
+- **Does a trained agent rank the squads the way the heuristic does?** Pin one
+  with `--squad` and score all eight. The heuristic's order is Squad2, Squad1,
+  Squad5, Squad4, Squad3, Squad8, Squad7, Squad6, and it plays them all the
+  same way, which is exactly the confound a conditioned policy removes.
+- **Is the squad one-hot load-bearing?** `--blind-squad` holds it at zero at
+  fixed `obs_dim`. Five features in a row here have measured null against that
+  control; this is the first one with a mechanism large enough to expect
+  otherwise.
+- **The 96% fight win rate.** Runs now end at level 4-5 with almost every fight
+  won, so something other than losing a fight is ending them. Find out what:
+  food, the step cap, or the boss.
+- **Quest rooms and the level-entry dialog.** `M_Dialog` carries choices,
+  branching outcomes, events and unlocks, and `Quests.json` ships eleven
+  quests. None of it is modelled, and a dialog fires on every level change.
+- **`C_Fight`'s escalation.** 120s starts a damage bonus over time and 180s a
+  dying DoT; `max_fight_seconds = 120` is that number with the wrong meaning.
