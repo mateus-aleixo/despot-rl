@@ -7,8 +7,9 @@ Dystopian Battle Simulator*, built from the shipped game's own balance tables.
 
 *A trained agent buying food, walking a generated level, and taking a fight.
 The full 70-second run is [`docs/run.mp4`](docs/run.mp4), rendered by
-[`tools/render_run.py`](tools/render_run.py). That run reaches level 5 against
-the arm's mean of 2.9, so it is a good run rather than a typical one.*
+[`tools/render_run.py`](tools/render_run.py). Recorded on the environment as it
+stood before the 2026-09-02 room and squad corrections, so it shows a run in
+which only some rooms fight.*
 
 ## What this is
 
@@ -23,8 +24,9 @@ lives in one file, `sim/assumptions.py`, rather than being spread through the
 code as a magic constant.
 
 **A hierarchical agent.** The high level plays the run (where to move, what to
-buy, when to upgrade the shop, which mutation to take) as a 195-dimensional
-observation with 33 masked actions; the low level places the squad on the grid
+buy, when to upgrade the shop, which mutation to take, and which of the eight
+starting squads it is playing) as a 203-dimensional observation with 33 masked
+actions; the low level places the squad on the grid
 before each fight. Both are PPO. Fights resolve inside the environment, so a
 run-level decision is graded by a fight that actually happened.
 
