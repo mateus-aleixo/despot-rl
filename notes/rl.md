@@ -2489,3 +2489,49 @@ and read it against the 3.946 heuristic. Then the questions worth asking:
   quests. None of it is modelled, and a dialog fires on every level change.
 - **`C_Fight`'s escalation.** 120s starts a damage bonus over time and 180s a
   dying DoT; `max_fight_seconds = 120` is that number with the wrong meaning.
+
+
+### The first agent on the corrected environment loses to the heuristic
+
+`runs/roomfight2m_long_s0..s11.pt`, twelve seeds at 2M with
+`--checkpoint-every 1000000`, squads cycled, 240 evaluation seeds. Training took
+71.5 minutes for 24M steps at six concurrent, about 35 minutes a run against the
+50 the old environment took, so the extra fights cost less than expected.
+
+| budget | mean level | sd | against the heuristic's 3.946 | beats it |
+|---|---|---|---|---|
+| 1M | 3.451 | 0.115 | **-0.495** [-0.560, -0.430] | 0 of 12 |
+| 2M | 3.797 | 0.229 | **-0.149** [-0.279, -0.020] | 3 of 12 |
+
+**The agent is behind the hand-written baseline**, and the interval excludes
+zero, so the gap is real even if it is narrow. On the superseded environment a
+2M agent beat the heuristic by about +0.6; that margin is gone and has changed
+sign. The honest reading is that the old margin was partly a fact about a sim in
+which two thirds of the rooms were peaceful and every squad was identical: an
+environment with more to exploit, and a baseline with less to do.
+
+**Budget has not saturated here, and the earlier guidance does not transfer.**
+1M to 2M is **+0.346 [+0.205, +0.486], positive on 12 of 12**, against a
+2M-to-4M of +0.070 on the old environment. The note above this one concluding
+"2M is the budget for this environment" was about the old one; on the corrected
+environment 2M is visibly short, and 4M is the obvious next run rather than a
+waste.
+
+| arm | mutations held | `take_mutation` |
+|---|---|---|
+| trained, 2M | 2.21 | 2.5% |
+| heuristic | 4.23 | 100.0% |
+
+The mutation gap is wider than it ever was before: the heuristic holds nearly
+twice what the agent does, and the agent takes the free shrine mutation 2.5% of
+the time where a 2M agent on the old environment reached 29.2%. Given that
+budget is still buying levels here, the most likely explanation is simply that
+2M steps no longer covers the same ground: episodes are longer, the observation
+is wider, and the policy is now learning eight rosters rather than one. Report
+holdings rather than uptake, for the reason recorded earlier in this file.
+
+Also worth keeping: the spread across twelve identically configured agents is
+**0.229**, more than double the 0.098 of the old 2M sweep, which is what a
+harder environment with a cycled squad does to run-to-run variance. A single
+agent means less here than it used to; the best of these twelve scores 4.308 and
+the worst 3.458.
