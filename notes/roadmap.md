@@ -4,6 +4,57 @@ The goal is every mode and every feature of *Despot's Game*, not a subset chosen
 for what an RL agent happens to need. This file is the plan for getting there
 and the standard for calling it done.
 
+## Phase 0 — the scope, measured rather than guessed
+
+`tools/coverage.py` enumerates every shipped table against what `sim/` and `rl/`
+actually mention. Run 2026-09-02:
+
+    91 tables, 1,749 distinct column names, 850 never mentioned (49%)
+    28 tables this sim never names at all
+    606 C_ classes in the dump, 26 mentioned here (4%)
+    584 M_ classes in the dump, 30 mentioned here (5%)
+
+**That is the real scope**, and it is several times what the phase list below
+was built on. The phases were assembled from gaps found by accident or reported
+by a player: the `RoomType` column in `EnemyPacks.json` sat unused for weeks,
+`ChipChoice/Squads.json` was never loaded, `Quests.json` is still never named,
+and the starting squad was wrong three separate times. A project that discovers
+its own scope by accident cannot plan, so this report is the input to planning
+and not the closing report it was originally filed as.
+
+Worth reading the miss list rather than the total: `Skills.json` has 23 columns
+and this sim reads **one**. `Quests.json`, `Consumables.json`,
+`ConsumablesByLevel.json`, `ItemShopLevels.json`, `LayoutsByPack.json`,
+`MutationUnlockConditions.json` and the whole `Arcade/` and `Chips/Hard/` trees
+are never named. `python tools/coverage.py --missing` prints the columns.
+
+The 49% is an over-count of what is read, not an over-count of what is missing:
+a column counts as read if its name appears anywhere in the source, including a
+comment, and reading a key is not the same as implementing what it means. So the
+true coverage is lower than 51%, and every miss is hard evidence.
+
+## How much to land at once
+
+The instinct to implement everything together is right about implementation and
+wrong about measurement, and the two need separating.
+
+**Implementation batches as large as it can be verified.** The constraint is not
+one feature at a time; it is that each feature ships with a check that fails when
+that feature is removed. With per-feature checks, batch size does not affect
+correctness, and the cost of a small batch is another full re-baseline for
+nothing. So: land whole subsystems, not single columns.
+
+**Measurement cannot batch, because one number cannot attribute a regression.**
+The proof is from this project, today. Room fights alone dropped the heuristic
+from 3.946 to 1.000, and the only reason the cause was found in an hour is that
+room fights were the sole change in flight; with five subsystems in flight the
+search would have been combinatorial. Two agents differing in exactly one thing
+is also how the `shrine2m`/`shelf2m` divergence was traced to a code change
+rather than to nondeterminism.
+
+So: implement in large batches with a check per feature, and take RL numbers
+only at batch boundaries, never inside one.
+
 ## What "done" can mean
 
 **Not bit-exact behaviour.** This repository measured why: nudging every start
