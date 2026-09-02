@@ -359,30 +359,50 @@ class Human:
     experience: float = 0.0
 
 
-def starting_squad(team: dict) -> list[Human]:
-    """The squad a run opens with, from `Game.Team.Packs`.
+def squad_names(tables: dict) -> list[str]:
+    """Every startable squad, the default first.
 
-    `C_Session.LoadPlayerTeam` reads `Game.Team.Packs` and creates each entry's
-    `Number` units of its `Class`, with the entry's optional `Item` and
-    `Level`. In the Default ruleset that is five `Novice` rows with no `Item`
-    at all: **the run starts with five bare humans and no weapons**, which is
-    why the first item shop matters.
-
-    `Game.Team.Items` and `Game.Team.Classes` are inventory maps, every value
-    0. This used to read `Items`' keys as a pool and hand each human a random
-    weapon out of it, which started the squad at ~20,000 Power against a
-    800-Power first room -- twenty-five times over-equipped, and the reason
-    squad Power looked flat for four levels. It was already at the ceiling.
-
-    Only Novice-plus-item humans are modelled here, so a pack naming another
-    class contributes an unarmed human; no Default-mode pack does.
+    `ChipChoice/Squads.json` ships eight. Only `Squad1` has no
+    `unlockCondition`, so it is what a fresh save starts with; the rest are
+    behind Cultist, Scientist, Mage and so on, which an account that has played
+    a while will have. Which one is best is not written down anywhere and is
+    worth finding out rather than assuming.
     """
+    squads = tables.get("Squads") or []
+    free = [s["name"] for s in squads if not s.get("unlockCondition")]
+    rest = [s["name"] for s in squads if s.get("unlockCondition")]
+    return free + rest
+
+
+def starting_squad(tables: dict, name: str | None = None) -> tuple[list[Human], list]:
+    """The squad a run opens with, and the cells it opens in.
+
+    **Not `Game.Team.Packs`.** That reads as five bare `Novice` rows with every
+    entry of `Team.Items` at 0, and this sim opened on it for a long time, but a
+    run starts from a squad chosen out of `ChipChoice/Squads.json`. The default
+    `Squad1` is four units, three of them armed: a `stone-sword`, a `crossbow`,
+    one bare and a `shield`, each with its own cell. A player reported exactly
+    that roster, which is what sent us looking.
+
+    The composition is the part that matters. Five identical unarmed bodies have
+    no frontline and no ranged unit, so every early-fight number this project
+    measured was measured on a squad the game never hands anyone.
+
+    `Game.Team.Packs` stays as the fallback for a ruleset with no squad table.
+    """
+    squads = {s["name"]: s for s in (tables.get("Squads") or [])}
+    if squads:
+        chosen = squads.get(name) or squads[squad_names(tables)[0]]
+        units = chosen.get("units") or []
+        return ([Human(item=u.get("item")) for u in units],
+                [u.get("cells") for u in units])
+    team = (tables.get("Game") or {}).get("Team") or {}
     packs = team.get("Packs") or []
     squad = [Human(item=p.get("Item"), level=int(p.get("Level") or 1))
              for p in packs for _ in range(int(p.get("Number") or 1))]
-    if squad:
-        return squad
-    return [Human(item=None) for _ in range(int(team.get("Humans") or 5))]
+    if not squad:
+        squad = [Human(item=None) for _ in range(int(team.get("Humans") or 5))]
+    return squad, []
 
 
 @dataclass
@@ -427,14 +447,16 @@ class RunState:
     _mutation_cache: dict = field(default_factory=dict)
     # (level, room type) -> the eligible packs and their Power bands
     _pack_cache: dict = field(default_factory=dict)
+    # The cells the chosen squad opens in, one list per unit.
+    start_cells: list = field(default_factory=list)
 
     # -- setup -------------------------------------------------------------
     @classmethod
-    def new(cls, tables: dict, seed: int = 0) -> "RunState":
+    def new(cls, tables: dict, seed: int = 0,
+            squad_name: str | None = None) -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
-        team = game.get("Team") or {}
-        squad = starting_squad(team)
+        squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
                  food=Food.from_game(game), squad=squad, rng=rng)
         st.rooms = RoomMap.generate(st.level_row, rng)
@@ -443,6 +465,7 @@ class RunState:
         st.rooms.rooms[st.room].cleared = True
         # `C_ItemShop..ctor` fills the shop the moment the run starts, at level
         # 1, so the first shop room already has stock waiting.
+        st.start_cells = cells
         st.offer = [st.roll_item() for _ in range(st.shop_quantity())]
         return st
 

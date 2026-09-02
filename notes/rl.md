@@ -2390,3 +2390,61 @@ distribution was at zero.
 six concurrent and resolves a tenth of a level; going to 4M doubles that for
 nothing. If a future change needs more budget than that to show itself, it is
 already smaller than the run-to-run spread.
+
+
+### The starting squad, and what it is worth
+
+`ChipChoice/Squads.json` ships eight startable squads and the sim used none of
+them, opening instead on `Game.Team.Packs`: five bare Novices at **750 Power**.
+The real squads are **3,783 to 7,176 Power**, five to ten times that, and they
+have compositions rather than five copies of one body.
+
+That single correction is what made the room-fight model playable. On the
+`room-fights` branch, 60 seeds, `frontline` placement:
+
+| | before, five bare Novices | after, `Squad1` |
+|---|---|---|
+| heuristic | 1.000 | **4.267** |
+| random | 1.000 | 1.817 |
+| fights a run | 1.2 | 23.1 |
+| fight win rate | 17% | 96% |
+
+So "every room fights" was never the problem. The sim was fielding a squad the
+game does not hand anyone, against rooms that now fight back, and dying in the
+first one.
+
+### Which squad is best is not written down
+
+120 seeds each under the heuristic, same placement, same environment:
+
+| squad | mean level | max | fights a run | roster |
+|---|---|---|---|---|
+| Squad2 | **4.492** | 6 | 24.7 | hood-dark, stone-sword, shaman-mask, 2 bare |
+| Squad1 | 4.217 | 5 | 22.9 | stone-sword, crossbow, shield, 1 bare |
+| Squad5 | 4.050 | 5 | 22.6 | plague-mask, chainsaw |
+| Squad4 | 3.967 | 5 | 21.6 | ring-green, lance, shield |
+| Squad3 | 3.900 | 5 | 21.1 | football, paddle-ball, gloves |
+| Squad8 | 3.825 | 5 | 20.9 | gun, mad-claws, gloves, 1 bare |
+| Squad7 | 3.633 | 5 | 19.3 | pretzel, bed, 1 bare |
+| Squad6 | 3.467 | 5 | 17.6 | burning-ring, 3 bare |
+
+**The spread is a whole level**, 3.467 to 4.492, against a run-to-run spread of
+about a tenth of a level between identically configured 2M agents. Squad choice
+is worth more than any environment feature this project has measured, and more
+than the entire 600k-to-2M budget gain.
+
+Two things worth noting before this is read as a ranking. It is the heuristic's
+ranking, and a trained policy may prefer a different squad, because the squads
+are not scaled versions of each other: `Squad5` is two units, which is half the
+food per move, and it places third on raw survival despite fielding the fewest
+bodies. And `Squad2` is behind a Cultist unlock, so a fresh save cannot choose
+it; only `Squad1` is unconditional.
+
+**How to apply.** The choice belongs in the agent, not in a constant. The
+cleanest shape is a one-hot of the squad in the observation with the squad
+sampled uniformly during training, so one policy learns to play all eight and
+the ranking is read off by evaluating it per squad. That conditions the policy on
+the roster it actually has, where an outer bandit over eight arms would learn a
+ranking for whatever average policy it happened to be paired with. It costs
+`obs_dim + 8`, so it needs the blind-control protocol like any other observation
+change.
