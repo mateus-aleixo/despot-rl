@@ -308,11 +308,3 @@ def skills_by_id(tables: dict[str, Any]) -> dict[int, dict]:
     return {row["ID"]: row for row in tables["Skills"]}
 
 
-def skill_params(skill: dict) -> dict[str, Any]:
-    """Collapse the Param1Name/Param1Value pairs into a plain dict."""
-    out = {}
-    for i in range(1, 11):
-        name = skill.get(f"Param{i}Name")
-        if name:
-            out[name] = skill.get(f"Param{i}Value")
-    return out

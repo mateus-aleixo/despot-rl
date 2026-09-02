@@ -147,14 +147,6 @@ def handler_for(cs_class: str) -> Handler:
     return h
 
 
-def unit_skill_rows(tables: dict, unit_row: dict) -> list[dict]:
-    """The Skills.json rows a unit references through Skill1..Skill8."""
-    from .data import skills_by_id
-    by_id = skills_by_id(tables)
-    ids = [int(unit_row[f"Skill{i}"]) for i in range(1, 9) if unit_row.get(f"Skill{i}")]
-    return [by_id[i] for i in ids if i in by_id]
-
-
 def param(params: dict, *names, default=0.0) -> float:
     """Skills.json is inconsistent about capitalisation (damage vs Damage)."""
     for n in names:

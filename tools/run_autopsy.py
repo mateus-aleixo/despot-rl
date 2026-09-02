@@ -15,7 +15,6 @@ import sys
 sys.path.insert(0, ".")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import numpy as np
 import torch
 
 from rl.env import NON_MOVE_ACTIONS, DespotRunEnv

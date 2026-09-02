@@ -519,7 +519,3 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         info = {"action_mask": self.action_mask(), "level": st.level,
                 "squad": len(st.squad), "result": result}
         return self._encode(st), reward, bool(terminated), bool(truncated), info
-
-
-def make_env(**kwargs) -> DespotRunEnv:
-    return DespotRunEnv(**kwargs)
