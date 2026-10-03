@@ -31,7 +31,11 @@ for c in range(16):
 
 NB = 8          # 256-bit block
 SHIFTS = (0, 1, 3, 4)   # Rijndael row shifts for Nb=8
-RCON = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36, 0x6C, 0xD8, 0xAB, 0x4D, 0x9A]
+# Rcon[i] = x^(i-1) in GF(2^8). A 128-bit key at Nb=8 reaches Rcon[29], past
+# the 16 entries a 256-bit key needs, so the table is generated.
+RCON = [0x00, 0x01]
+while len(RCON) < 30:
+    RCON.append(xtime(RCON[-1]))
 
 def expand_key(key):
     nk = len(key) // 4
