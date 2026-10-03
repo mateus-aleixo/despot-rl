@@ -33,8 +33,14 @@ datamining = [
     "pefile>=2023.2.7",
 ]
 
+# `tests/`. Most of it runs without game data; see the README.
+test = ["pytest>=8.0"]
+
 [project.urls]
 Repository = "https://github.com/mateus-aleixo/despot-rl"
 
 [tool.setuptools]
 packages = ["sim", "rl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

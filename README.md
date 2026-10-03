@@ -1,5 +1,7 @@
 # despot-rl
 
+[![ci](https://github.com/mateus-aleixo/despot-rl/actions/workflows/ci.yml/badge.svg)](https://github.com/mateus-aleixo/despot-rl/actions/workflows/ci.yml)
+
 Reinforcement learning against a faithful headless simulator of *Despot's Game:
 Dystopian Battle Simulator*, built from the shipped game's own balance tables.
 
@@ -172,6 +174,7 @@ against its own size. Winner agreement inside the envelope went from 24/60 to
     core/     the Rust battle core
     rl/       Gymnasium env, placement policies, the heuristic baseline, PPO
     tools/    datamining, validation, evaluation, rendering
+    tests/    the pytest suite; most of it runs without game data
     notes/    the running record: datamining, reference sim, Rust core, RL
 
 The files in `notes/` carry the numbers and the mechanics, including what has
@@ -196,11 +199,26 @@ Python 3.12 or newer.
     python tools/render_run.py --agent runs/<checkpoint>.pt --seed 30039
 
 Everything past the installs reads the extracted balance tables, so it needs the
-data step in the next section first.
+data step (see Data, below) first.
 
 Build the Rust core with `cargo build --release` in `core/`. Without it
 everything still runs, roughly 140x slower per fight. Training defaults to CPU;
 the net is a two-layer MLP and a GPU buys it nothing.
+
+## Tests
+
+    pip install -e ".[test]"
+    pytest                         # everything; about two minutes with data/
+    pytest -m "not needs_data"     # only what needs no game data, in seconds
+
+`tests/` checks what can be checked without the game's tables: A* against a
+reference Dijkstra on random grids, ORCA's no-collision guarantee on random
+encounters, the behaviour-tree node semantics, the override layering on a
+synthetic ruleset, the shape rules of generated levels, Rijndael against the
+FIPS-197 vectors at the AES block size, and the Rust core's RNG against
+CPython's, bit for bit. CI runs that part on every push, with the core built.
+With `data/` present, `pytest` also runs `tools/validate_sim.py` and
+`tools/validate_rl.py`, the full suites against the real tables.
 
 ## Data
 
