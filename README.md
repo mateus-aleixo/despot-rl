@@ -66,8 +66,8 @@ in two places. Every room in the
 game has a fight, and its shop, shrine, doors and gold only open once that fight
 is won; and a run does not start from `Game.Team.Packs` but from one of eight
 squads in `ChipChoice/Squads.json`. The sim was fighting in about a third of its
-rooms and opening with five bare Novices at 750 Power against squads the game
-never hands anyone, which are 3,783 to 7,176. Both are fixed, and the numbers
+rooms, and it opened with five bare Novices at 750 Power, a squad the game never
+hands anyone; the game's eight squads are 3,783 to 7,176. Both are fixed, and the numbers
 that follow from them have to be re-measured rather than carried over.
 
 For the record, on the superseded environment: heuristic 2.283, PPO 2.561 at
