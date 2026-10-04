@@ -282,3 +282,34 @@ Tools that did not exist before this session and are worth knowing about:
 `tools/data_xrefs.py` (rip-relative references to a string literal, which is how
 `FightInFirst` was found), `tools/determinism_probe.py`, and
 `tools/profile_train.py --deep`.
+
+## Tests and CI
+
+Done 2026-10-04 (commits `2423de8`, `0a51096`). `tests/` holds 160 tests that need no
+game data, and GitHub Actions builds the Rust core and runs them on every push:
+pathfinding against a reference Dijkstra, ORCA's no-collision guarantee, the
+behaviour-tree node semantics, the ruleset layering on a synthetic metadata tree,
+level-generation invariants, Rijndael at Nb=4 against the FIPS-197 vectors, and the
+core's RNG against CPython's bit for bit. With `data/` present, `pytest` also runs
+`tools/validate_sim.py` and `tools/validate_rl.py`. The round-trip test found a real
+bug on the way in: `tools/rijndael256.py` could not expand 128- or 192-bit keys at
+Nb=8.
+
+Still open from the plan agreed on 2026-09-04:
+
+1. **Characterisation tests over the shipped tables.** Assert what the game's own
+   data says, so a change to the extraction pipeline that silently alters a unit
+   stat fails loudly instead of quietly retraining the agent against a different
+   game. They need `data/`, so they run locally, beside the two validate suites.
+2. **Invariants around `sim/assumptions.py`.** Each assumption gets a test that
+   states what it implies about the simulation, so an assumption that is later
+   corrected fails the tests that depended on the old value rather than being
+   forgotten.
+3. **Seeded golden runs.** A fixed seed, a fixed squad, a fixed number of
+   decisions, and an asserted trajectory digest. This is what catches an
+   environment change disguised as a policy change, which is the failure mode the
+   `notes/` retractions are all about.
+4. **A CPU-only training smoke.** A handful of PPO updates on a tiny budget, to
+   prove `rl/train.py` still runs end to end without needing a GPU or minutes.
+5. **ruff in CI.** The workflow runs the tests and builds the core; there is no
+   lint step yet.
