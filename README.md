@@ -120,11 +120,6 @@ The findings that generalise past this game:
   and each time it looked like a strategy rather than a bug: a squad that
   started fully armed, a room that paid gold on every visit, free food, and a
   stranded run that scored better than a wipe.
-- **The fifth and largest was found by a player, not by an agent.** Reading the
-  binary is not the same as playing the game: two of its load-bearing facts, that
-  every room fights and that a run starts from a chosen squad, sat in files this
-  project had read past for weeks. The report that "this doesn't match the game"
-  was worth more than any amount of further inference from the same data.
 
 ## The simulator
 
