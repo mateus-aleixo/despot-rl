@@ -61,8 +61,8 @@ same heuristic scores 3.433 under the fog against 3.983 with the reveal turned
 back on, so half a level of the 3.946 was free sight of the map. The re-baseline
 comes once the rest of the run layer lands; see `notes/roadmap.md`.
 
-**Why there are no PPO numbers here right now.** A player pointed out that the
-sim did not match the game, and they were right twice over. Every room in the
+**Why there are no PPO numbers here right now.** The sim did not match the game
+in two places. Every room in the
 game has a fight, and its shop, shrine, doors and gold only open once that fight
 is won; and a run does not start from `Game.Team.Packs` but from one of eight
 squads in `ChipChoice/Squads.json`. The sim was fighting in about a third of its
