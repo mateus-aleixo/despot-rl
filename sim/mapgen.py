@@ -16,9 +16,18 @@ shape, and the placement predicates, read out of `GameAssembly.dll`.
     maxSquaresAtOnce    1 + (num >= 15)
     foodShopCount       the row's `FoodShops`, and likewise `ItemShops`,
                         `Shrines`, `RerollShrines`, `StatShops`, `SecretRoom`
-    minFinishDistance   a game-mode call, not a column -- see the assumptions
+    minFinishDistance   `IC_GameMode.GetRoomsMinFinishDistance(num)`, which
+                        `C_DefaultMode` implements as num / 6 + 2
     maxDeadEnds         never written in the Default path, so 0
-    portalsCount        likewise 0, which is why no portals are placed
+    portalsCount        num / 7 + 1
+    minPortalDistance   3, a literal
+
+The last three were read as unrecoverable for a while. `C_Rooms.Generate`
+keeps the struct at `rsp + 0x30`, so `portalsCount` (offset 0x24) is the store
+to `rsp + 0x54` and `minPortalDistance` (0x40) the store of 3 to `rsp + 0x70`;
+both come after `OnBeforeGeneration` has run, so the `RoomCount` mutation's
+extra rooms feed into them. The divisions are the compiler's: `0x92492493`
+with an add is a signed divide by 7, `0x2aaaaaab` a divide by 6.
 
 ## The growth
 
@@ -60,23 +69,39 @@ count exact and lets the growth rule decide how many dead ends are left. See
 
 ## The placement
 
-`PositionRooms` picks the finish first. `CouldBeFinishRoom` wants a room that is
-untyped, **not an articulation point**, either a dead end or with exactly two
-neighbours, and whose `maxDistance` clears `minFinishDistance`; `ChooseFinishRoom`
-takes the best of those by average distance. `ChooseStartRoom` then wants an
-untyped non-articulation room far from the finish, and `ChooseDiversePositions`
-places each shop type at least a threshold apart, lowering the threshold when
-nothing qualifies.
+`PositionRooms` runs five steps in order, and every one of them draws
+**uniformly** from the rooms that qualify (`RND.Element`, inlined as
+`list[rnd.Next(list.Count)]`). The port used to maximise instead: the boss by
+average distance and the start as the room furthest from it, which made every
+level as long as its shape allowed.
+
+  * `ChooseFinishRoom`: untyped, not an articulation point, a dead end or
+    exactly two neighbours, and `maxDistance >= minFinishDistance`.
+  * `ChooseStartRoom`: untyped, not an articulation point, at least `d` from
+    the finish, with `d` counting down from `minFinishDistance` until something
+    qualifies. On every level after the first the start room is also an item
+    shop: the type is or-ed with 5, `Start | ItemShop`.
+  * `ChooseDiversePositions`, once per shop type: the type with more rooms goes
+    first, item shops on a tie. See `choose_diverse_positions`.
+  * `ChoosePortals`, when `portalsCount > 1`. See `choose_portals`.
+  * `ChooseTreasureRooms`: the rooms typed exactly `Default` or `Portal`, drawn
+    without replacement for talent shops, then mutation shops, then shrines.
+
+A step that finds nothing fails the whole generation, and `C_Rooms.Generate`
+builds a new `LevelGenerator` with the same parameters and tries again, for as
+long as it takes. `generate` does the same.
 
 ## What is still not ported
 
 `MaybeMakeSecretRoom`, quests (`ChooseQuestRoom`, `ChooseQuestExtraRoom`,
-`CountValidPaths`), treasure rooms (`ChooseTreasureRooms`), portals (`portalsCount`
-is 0 in this path anyway), `MaybeFlip` (a mirror, which changes nothing about the
+`CountValidPaths`), `MaybeFlip` (a mirror, which changes nothing about the
 graph) and multi-square rooms: a room here covers exactly one square, so
 `maxSquares` and `maxSquaresAtOnce` are read as constraints on the layout rather
-than as a budget for large rooms. `RerollShrines` and `StatShops` are counted and
-left as fight rooms, because the sim models neither shop.
+than as a budget for large rooms. `StatShops` is counted and left as a fight
+room, because the sim does not model the talent shop. Two more room bits are
+read and not modelled: `ChooseFinishRoom` makes the boss `Boss | ConsumableShop`
+on every level but the last (`or edx, 0x4002`), and the final boss
+`Boss | FinalBoss`, plus an item shop unless the chip is `hard`.
 """
 from __future__ import annotations
 
@@ -99,6 +124,19 @@ TYPED_ROOMS = (("ItemShops", "item_shop"),
 TREASURE_ROOMS = (("StatShops", "talent_shop"),
                   ("RerollShrines", "mutation_shop"),
                   ("Shrines", "mutation"))
+
+# `LevelGenerator.roomTypesWithNoPortal = 34307`, which is
+# `Start | Boss | Quest | QuestExtra | Secret`. Shops are not in it, so a shop can
+# carry a portal. Of the five, only the start and the boss are generated here.
+NO_PORTAL = frozenset({"start", "boss"})
+
+# `C_Rooms.Generate` writes the literal 3 into `minPortalDistance`.
+MIN_PORTAL_DISTANCE = 3
+
+# How many times `generate` rebuilds a level whose placement failed before it
+# gives up. The game has no cap; this is only so a bad row raises instead of
+# hanging.
+MAX_ATTEMPTS = 200
 
 # `LevelGenerator.MakeRoom`
 MAYBE, NO, YES, NEVER = 0, 1, 2, 3
@@ -351,6 +389,130 @@ class Generator:
         return out
 
 
+def portals_count(num: int) -> int:
+    """`portalsCount`, which `C_Rooms.Generate` sets to `num / 7 + 1`."""
+    return num // 7 + 1
+
+
+def min_finish_distance(num: int) -> int:
+    """`C_DefaultMode.GetRoomsMinFinishDistance(roomsCount)`: `num / 6 + 2`.
+
+    `C_Rooms.Generate` calls it through `IC_GameMode` slot 4 with the room count.
+    Arcade overrides it as `roomsCount - 1`; Arcade is not modelled.
+    """
+    return num // 6 + 2
+
+
+def shop_spread(kind: str, num: int) -> int:
+    """The `distanceThreshold` `PositionRooms` hands `ChooseDiversePositions`.
+
+    Item shops `num >= 18 ? num / 6 : 2`, food shops `num >= 16 ? num / 4 : 3`.
+    """
+    if kind == "item_shop":
+        return num // 6 if num >= 18 else 2
+    return num // 4 if num >= 16 else 3
+
+
+def start_is_portal(level: int, chip: str = "default") -> bool:
+    """Whether `ChoosePortals` makes the start room a portal before it picks any.
+
+    It does in Default mode on levels 5 and 9, and on levels 3, 5 and 9 when the
+    chip name starts with `shortpvp`. The start room is then the first entry of
+    the chosen list, so it takes one of the `portalsCount` places.
+    """
+    if chip.startswith("shortpvp"):
+        return level in (3, 5, 9)
+    return level in (5, 9)
+
+
+def choose_diverse_positions(cells: list, kinds: dict, dist: dict, count: int,
+                             threshold: int, rng: random.Random) -> list:
+    """`LevelGenerator.ChooseDiversePositions(type, count, distanceThreshold, null)`.
+
+    Draws `count` untyped rooms one at a time, each uniformly from the rooms at
+    least `threshold` from the ones **this call** has already drawn. Rooms of
+    other types, the start and the boss included, do not count. A draw that
+    finds nothing throws the partial set away and starts again; ten of those and
+    the threshold comes down by one.
+
+    The game loops forever when there are fewer untyped rooms than `count`, so
+    `count` is capped at that here. No shipped row reaches the cap.
+    """
+    free = [p for p in cells if p not in kinds]
+    count = min(count, len(free))
+    chosen: list = []
+    while len(chosen) < count:
+        for _ in range(10):
+            for _k in range(count):
+                pool = [p for p in free if p not in chosen
+                        and all(dist[p][c] >= threshold for c in chosen)]
+                if not pool:
+                    chosen = []
+                    break
+                chosen.append(rng.choice(pool))
+            if len(chosen) == count:
+                break
+        threshold -= 1
+    return chosen
+
+
+def choose_portals(cells: list, kinds: dict, dist: dict, avg_distance: dict,
+                   dead_end: dict, boss, start, count: int, threshold: int,
+                   forced_start: bool) -> list:
+    """`LevelGenerator.ChoosePortals(portalsCount, distanceThreshold)`.
+
+    Read off the binary step by step:
+
+      1. With `forced_start`, the start room becomes a portal and is the first
+         room chosen.
+      2. The candidates are the dead ends that may carry a portal (anything but
+         the start and the boss here) at least one room from the finish.
+      3. Too few of them, and the room list is sorted by average distance,
+         largest first; either way it is walked to top the candidates up to
+         `2 * count` with rooms that may carry a portal.
+      4. Each candidate scores its mean distance to the candidates, itself
+         included, and they are sorted by that, largest first: the most
+         spread-out first.
+      5. Walking that order, a candidate at least `threshold` from every room
+         chosen so far is chosen, until `count` are.
+      6. Then **one more**: the most central room (smallest average distance)
+         that may carry a portal, is not chosen and clears `threshold` from all
+         of them, so a level asking for two portals can get three.
+      7. Fewer than two portals in all and the whole step is undone.
+
+    `List.Sort` is an introsort, so the order among equal keys is not
+    recoverable; a stable sort stands in for it.
+    """
+    chosen = [start] if forced_start else []
+    candidates = [p for p in cells if kinds.get(p) not in NO_PORTAL
+                  and dist[p][boss] >= 1 and dead_end[p]]
+    order = list(cells)
+    if len(candidates) < count:
+        order.sort(key=lambda p: -avg_distance[p])
+    for p in order:
+        if len(candidates) >= 2 * count:
+            break
+        if kinds.get(p) in NO_PORTAL or p in candidates or dist[p][boss] < 1:
+            continue
+        candidates.append(p)
+    spread = {b: sum(dist[b][c] for c in candidates) / len(candidates)
+              for b in candidates}
+    candidates.sort(key=lambda b: -spread[b])
+    for b in candidates:
+        if all(dist[b][a] >= threshold for a in chosen):
+            chosen.append(b)
+        if len(chosen) == count:
+            break
+    portals = chosen[:count]
+    for p in sorted(cells, key=lambda p: avg_distance[p]):
+        if kinds.get(p) in NO_PORTAL or p in chosen or dist[p][boss] < 1:
+            continue
+        if all(dist[p][a] >= threshold for a in chosen):
+            portals.append(p)
+            break
+    return portals if len(portals) >= 2 else []
+
+
 def room_count(level_row: dict, rng: random.Random) -> int:
     """`num`, drawn inside the row's `MinRooms`..`MaxRooms`.
 
@@ -363,70 +525,79 @@ def room_count(level_row: dict, rng: random.Random) -> int:
     return rng.randint(min(lo, hi), max(lo, hi))
 
 
-def generate(level_row: dict, rng: random.Random) -> dict:
-    """One level: `{name: (row, col, kind)}` plus the start and boss names."""
-    num = room_count(level_row, rng)
-    for _ in range(20):
-        gen = Generator(num, rng)
-        gen.build()
-        if len(gen.rooms()) >= 3:
-            break
+def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
+                   chip: str = "default") -> dict | None:
+    """`LevelGenerator.PositionRooms`, or None where the game's would fail.
 
+    See the module docstring for the order. Quests are not generated, so the
+    two quest choosers between the start and the shops are skipped.
+    """
     cells = gen.rooms()
     adj = gen.adjacency()
     arts = gen.articulation_points(adj)
     dist = {p: gen.distances_from(p, adj) for p in cells}
     max_distance = {p: max(dist[p].values()) for p in cells}
-    avg_distance = {p: sum(dist[p].values()) / max(1, len(cells) - 1) for p in cells}
+    # `RoomNode.InitRoom`: the mean over `distances`, which holds the room
+    # itself at 0, and `deadEnd = neighbors.Count == 1`.
+    avg_distance = {p: sum(dist[p].values()) / len(dist[p]) for p in cells}
+    dead_end = {p: gen.n_count(p) == 1 for p in cells}
+    level = int(level_row.get("ID") or 1)
+    num = gen.num
     kinds: dict[tuple[int, int], str] = {}
+    extras: dict[tuple[int, int], tuple[str, ...]] = {}
 
-    def untyped():
-        return [p for p in cells if p not in kinds]
-
-    # `ChooseFinishRoom` over `CouldBeFinishRoom`: untyped, not an articulation
-    # point, a dead end or with exactly two neighbours, far enough away -- best
-    # by average distance. The predicate is relaxed rather than failed if
-    # nothing qualifies, where the game would fail the whole generation and let
-    # `C_Rooms` try again.
-    finish_pool = [p for p in untyped()
-                   if p not in arts
-                   and (gen.n_count(p) == 1 or gen.n_count(p) == 2)
+    # `ChooseFinishRoom` over its inline predicate: untyped, not an
+    # articulation point, a dead end or exactly two neighbours, and far enough
+    # from somewhere. Uniform over what qualifies.
+    finish_pool = [p for p in cells if p not in arts
+                   and gen.n_count(p) in (1, 2)
                    and max_distance[p] >= gen.min_finish_distance]
-    finish_pool = finish_pool or [p for p in untyped() if p not in arts] or untyped()
-    boss = max(finish_pool, key=lambda p: (avg_distance[p], rng.random()))
+    if not finish_pool:
+        return None
+    boss = rng.choice(finish_pool)
     kinds[boss] = "boss"
 
-    # `ChooseStartRoom(finish)`: untyped, not an articulation point, as far from
-    # the finish as the threshold demands.
-    start_pool = [p for p in untyped() if p not in arts] or untyped()
-    start = max(start_pool, key=lambda p: (dist[boss].get(p, 0), rng.random()))
+    # `ChooseStartRoom(finish)` over `CouldBeStartRoom(room, d)`: untyped, not
+    # an articulation point, at least `d` from the finish, `d` counting down
+    # from `minFinishDistance`.
+    start = None
+    for d in range(gen.min_finish_distance, 0, -1):
+        pool = [p for p in cells if p not in kinds and p not in arts
+                and dist[p][boss] >= d]
+        if pool:
+            start = rng.choice(pool)
+            break
+    if start is None:
+        return None
     kinds[start] = "start"
+    # `or eax, 5` on any level but the first: the run opens every later level
+    # standing in an item shop.
+    if level >= 2:
+        extras[start] = ("item_shop",)
 
-    # `ChooseDiversePositions(type, count, distanceThreshold, excludes)`: each
-    # room of a type at least `distanceThreshold` from the ones already placed,
-    # the threshold coming down until something qualifies.
-    for column, kind in TYPED_ROOMS:
-        for _ in range(int(level_row.get(column) or 0)):
-            free = untyped()
-            if not free:
-                break
-            placed = list(kinds)
-            for threshold in range(max(max_distance.values(), default=1), 0, -1):
-                pool = [p for p in free
-                        if min((dist[p][q] for q in placed if q in dist[p]),
-                               default=99) >= threshold]
-                if pool:
-                    kinds[rng.choice(pool)] = kind
-                    break
-            else:
-                kinds[rng.choice(free)] = kind
+    # The shop type with more rooms is spread first; item shops on a tie.
+    shops = [(kind, int(level_row.get(column) or 0)) for column, kind in TYPED_ROOMS]
+    if shops[0][1] < shops[1][1]:
+        shops.reverse()
+    for kind, count in shops:
+        for p in choose_diverse_positions(cells, kinds, dist, count,
+                                          shop_spread(kind, num), rng):
+            kinds[p] = kind
 
-    # `ChooseTreasureRooms` is not `ChooseDiversePositions`: it collects every
-    # room still untyped (or a portal) and takes `RND.Element` of them, so the
-    # shrines land uniformly at random rather than spread apart.
+    # `ChoosePortals`, only when more than one is asked for. With a secret room
+    # the game retries at shrinking distances and fails the level unless
+    # `secretRoomCount + 2` portals land; secret rooms are not generated here.
+    portals: list = []
+    if portals_count(num) > 1:
+        portals = choose_portals(cells, kinds, dist, avg_distance, dead_end,
+                                 boss, start, portals_count(num),
+                                 MIN_PORTAL_DISTANCE, start_is_portal(level, chip))
+
+    # `ChooseTreasureRooms`: the rooms typed exactly `Default` or `Portal`,
+    # which here is every room without a kind yet, drawn without replacement.
     for column, kind in TREASURE_ROOMS:
         for _ in range(int(level_row.get(column) or 0)):
-            free = untyped()
+            free = [p for p in cells if p not in kinds]
             if not free:
                 break
             kinds[rng.choice(free)] = kind
@@ -436,8 +607,32 @@ def generate(level_row: dict, rng: random.Random) -> dict:
 
     lo_r = min(r for r, _ in cells)
     lo_c = min(c for _, c in cells)
-    rooms = {room_name(r - lo_r, c - lo_c): (r - lo_r, c - lo_c, kinds[(r, c)])
-             for (r, c) in cells}
-    return {"rooms": rooms,
-            "start": room_name(start[0] - lo_r, start[1] - lo_c),
-            "boss": room_name(boss[0] - lo_r, boss[1] - lo_c)}
+
+    def name(p):
+        return room_name(p[0] - lo_r, p[1] - lo_c)
+
+    return {"rooms": {name(p): (p[0] - lo_r, p[1] - lo_c, kinds[p]) for p in cells},
+            "start": name(start),
+            "boss": name(boss),
+            "portals": [name(p) for p in portals],
+            "extras": {name(p): e for p, e in extras.items()}}
+
+
+def generate(level_row: dict, rng: random.Random, chip: str = "default") -> dict:
+    """One level, as `position_rooms` returns it.
+
+    The room count is drawn once and kept across attempts: `C_Rooms.Generate`
+    reads it from the run's precomputed list and retries with the same
+    parameters, so only the shape and the placement are drawn again.
+    """
+    num = room_count(level_row, rng)
+    for _ in range(MAX_ATTEMPTS):
+        gen = Generator(num, rng, min_finish_distance=min_finish_distance(num))
+        gen.build()
+        if len(gen.rooms()) < 3:
+            continue
+        level = position_rooms(gen, level_row, rng, chip)
+        if level is not None:
+            return level
+    raise RuntimeError(f"no level placed for row {level_row.get('ID')} "
+                       f"after {MAX_ATTEMPTS} attempts")

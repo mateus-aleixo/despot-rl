@@ -131,13 +131,17 @@ class Assumptions:
     # as zero, and zero cannot be right: a map with no dead ends is a union of
     # cycles, and an exhaustive search over 7-cell shapes finds none that also
     # satisfies the neighbour ceiling of 3 and `maxSquares = 1` -- while level 1
-    # is exactly 7 rooms. So something outside `C_Rooms.Generate` sets it.
-    # `sim/mapgen.py` prunes only while the map is over its room count instead,
-    # which keeps the count exact and leaves the growth rule to decide how many
-    # dead ends survive (about 2.8 a map).
-    # Settle by: finding the writer -- the `BeforeGenerationDelegate` hook
-    # (`C_RoomCountMutation.OnBeforeGeneration` is one subscriber) or whatever
-    # initialises the struct before `C_Rooms.Generate` fills it.
+    # is exactly 7 rooms. `sim/mapgen.py` prunes only while the map is over its
+    # room count instead, which keeps the count exact and leaves the growth
+    # rule to decide how many dead ends survive (about 2.8 a map).
+    #
+    # The obvious writers are ruled out. The struct is zeroed with a `movups`
+    # over `rsp + 0x40`, which covers the field, and the one subscriber to
+    # `BeforeGenerationDelegate` is `C_RoomCountMutation.OnBeforeGeneration`,
+    # which adds to `num` and the shop counts and to nothing else. So the field
+    # really is 0, and what has to give is this port's reading of `Adjust`.
+    # Settle by: reading `LevelGenerator.Adjust` (off 0x674460) for whatever
+    # stops it short of zero dead ends.
     map_max_dead_ends: int | None = None
 
     # Rooms covering more than one grid square. `maxSquares = num / 10 + 1` and
@@ -167,22 +171,21 @@ class Assumptions:
     # Settle by: reading `M_MutationShop`'s defaults out of `C_MutationShop..ctor`.
     mutation_shop_from_m1: bool = True
 
-    # Portals, secret rooms and quests are not placed at all. `portalsCount` and
-    # `minPortalDistance` are `GenerationParams` fields with no `Levels.json`
-    # column behind them, so there is no number to place them from; the shipped
-    # fixed map has three portals. (Treasure rooms *are* placed now -- they are
-    # the shrine, the mutation shop and the talent shop.)
-    # Settle by: finding what writes portalsCount in `C_Rooms.Generate`.
-    map_has_portals: bool = False
+    # The order among equal keys in `LevelGenerator`'s sorts. `ChoosePortals`
+    # sorts the room list by average distance twice and its candidates by
+    # spread once, and `List.Sort` is an introsort, which does not keep equal
+    # elements in order; which of two equally spread dead ends gets the portal
+    # is therefore not recoverable. `sim/mapgen.py` uses a stable sort.
+    # Settle by: nothing short of running the game's sort on the same list.
+    map_sort_ties_stable: bool = True
 
-    # `minFinishDistance`, which `CouldBeFinishRoom` tests the boss room's
-    # `maxDistance` against. `C_Rooms.Generate` fills it from a game-mode call
-    # (`IC_GameMode`, argument 4 and the room count) rather than from a column,
-    # so the number is not recoverable from the data. Read as 0 here, which
-    # makes the predicate vacuous; the boss still lands at the far end of the
-    # map because `ChooseFinishRoom` maximises average distance.
-    # Settle by: resolving the IC_GameMode vtable slot for the Default mode.
-    map_min_finish_distance: int = 0
+    # The order of `LevelGenerator.rooms` when `ChoosePortals` walks it unsorted,
+    # which it does to top its candidates up whenever there were already enough
+    # dead ends. The game's list is in the order `CreateRooms` made the rooms;
+    # the port walks `Generator.rooms()`, the order positions were first
+    # touched, which is close to that but not shown to be the same.
+    # Settle by: reading `LevelGenerator.CreateRooms` (off 0x673f50).
+    map_room_list_order_by_touch: bool = True
 
     # A fight is called a draw if neither side dies within this long. The game
     # has some real timeout or sudden-death rule.

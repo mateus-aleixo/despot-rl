@@ -25,7 +25,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from PIL import Image, ImageDraw, ImageFont
 
 import sim.run as sim_run
-from rl.env import MOVES, NON_MOVE_ACTIONS, DespotRunEnv
+from rl.env import NON_MOVE_ACTIONS, DespotRunEnv
 from sim.run import UNKNOWN
 from rl.heuristic import heuristic as policy_heuristic
 from rl.placement import POLICIES
@@ -101,7 +101,7 @@ class Scene:
     step: int
     action: str
     hud: dict
-    rooms: list           # (id, row, col, kind, cleared, current, state)
+    rooms: list           # (id, row, col, kind, cleared, current, state, portal)
     edges: list           # ((row, col), (row, col))
     context: list         # pre-rendered lines for the decision card
     fight: Fight | None = None
@@ -214,7 +214,9 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
         # The index reads better than the decoded action: a move decodes to the
         # room it lands on, and a room id says nothing on screen.
         if action_i < env.n_moves:
-            label = "move " + MOVES[action_i][0]
+            name = env.move_names[action_i]
+            label = (name.replace("_", " ") if name.startswith("teleport")
+                     else "move " + name)
         else:
             label = NON_MOVE_ACTIONS[action_i - env.n_moves].replace("_", " ")
 
@@ -222,11 +224,13 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
         # it. Drawing the whole level was fine while the sim handed the whole
         # level over; with fog it would show the viewer a map the policy is not
         # playing with.
-        rooms = [(r.id, r.row, r.col, r.kind, r.cleared, r.id == st.room, r.state)
+        rooms = [(r.id, r.row, r.col, r.kind, r.cleared, r.id == st.room, r.state,
+                  st.rooms.is_portal(r.id))
                  for r in st.rooms.rooms.values()]
         edges = []
         for rid, r in st.rooms.rooms.items():
-            for other in st.rooms.neighbours(rid):
+            # Doors only: a portal link drawn as a line would cut across the map.
+            for other in st.rooms.doors(rid):
                 o = st.rooms.rooms[other]
                 if (r.row, r.col) < (o.row, o.col) and UNKNOWN not in (r.state, o.state):
                     edges.append(((r.row, r.col), (o.row, o.col)))
@@ -327,7 +331,7 @@ def draw_map(d, sc: Scene):
 
     for a, b in sc.edges:
         d.line([centre(*a), centre(*b)], fill=LINE, width=3)
-    for rid, r, c, kind, cleared, cur, state in sc.rooms:
+    for rid, r, c, kind, cleared, cur, state, portal in sc.rooms:
         # An unknown room is not on the player's minimap: `V_MinimapRoom` builds
         # an icon for `unexplored` and `explored` and none at all for `Unknown`.
         # It still counts towards the bounds above, so the drawing does not jump
@@ -345,6 +349,13 @@ def draw_map(d, sc: Scene):
         g = KIND_GLYPH.get(kind, "")
         if g:
             d.text((cx, cy), g, font=F_S, fill=(20, 22, 28), anchor="mm")
+        if portal:
+            # A ring inside the corner, the way the minimap's `teleport` image
+            # sits on top of the room icon.
+            pr = size * 0.16
+            px, py = cx + size / 2 - pr - 3, cy - size / 2 + pr + 3
+            d.ellipse((px - pr, py - pr, px + pr, py + pr),
+                      outline=(87, 182, 196), width=2)
         if cur:
             d.ellipse((cx - 4, cy - size / 2 - 12, cx + 4, cy - size / 2 - 4),
                       fill=(255, 255, 255))

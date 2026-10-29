@@ -55,7 +55,7 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
         kinds.setdefault(a[0], []).append(a)
     here = st.rooms.rooms[st.room]
 
-    if here.kind == "item_shop":
+    if here.has("item_shop"):
         if upgrade == "first" and kinds.get("upgrade_shop"):
             return kinds["upgrade_shop"][0]
         best, best_gain = None, 0.0
@@ -108,7 +108,17 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
 
         return max(kinds["buy_mutation"], key=score)
 
-    if kinds.get("move"):
+    known = st.rooms.known_to_boss
+    far = max(known.values(), default=1)
+    moves = kinds.get("move", [])
+    # A teleport costs no food, so on equal terms it would win every time and
+    # two cleared portals would trade the squad back and forth for ever. It is
+    # taken only when it reaches something: a room nobody has entered, a room
+    # strictly nearer the boss as far as the map shows, or, when the larder
+    # cannot pay for the next door, a food shop with a pack the purse covers.
+    teleports = [a for a in kinds.get("teleport", ())
+                 if _worth_teleporting(st, a[1], known, far, hungry=not moves)]
+    if moves or teleports:
         # Hops over the room graph, not Manhattan distance on the grid: the map
         # is generated per level now and a straight line across it can cross
         # cells that hold no room.
@@ -118,13 +128,30 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
         # the boss from the start room is not a baseline for a policy that
         # cannot. Until the boss is found `known_to_boss` is empty, every room
         # ties, and the first key carries the decision: walk into the room that
-        # has not been cleared.
-        known = st.rooms.known_to_boss
-        far = max(known.values(), default=1)
-        return min(kinds["move"], key=lambda a: (
-            st.rooms.rooms[a[1]].cleared, known.get(a[1], far)))
+        # has not been cleared. A door wins a tie against a teleport.
+        return min(moves + teleports, key=lambda a: (
+            st.rooms.rooms[a[1]].cleared, known.get(a[1], far),
+            a[0] == "teleport"))
 
-    return rng.choice(legal) if rng is not None else legal[0]
+    # Never a teleport here: whatever is left is a teleport that leads nowhere
+    # (see above) or something that changes the state, and only the second can
+    # end a run that is going nowhere.
+    rest = [a for a in legal if a[0] != "teleport"] or legal
+    return rng.choice(rest) if rng is not None else rest[0]
+
+
+def _worth_teleporting(st: RunState, rid: str, known: dict, far: int,
+                       hungry: bool) -> bool:
+    room = st.rooms.rooms[rid]
+    if not room.cleared:
+        return True
+    if known and known.get(rid, far) < known.get(st.room, far):
+        return True
+    if hungry and room.kind == "food_shop":
+        _, costs = st.food_packs
+        return any(held > 0 and st.gold >= costs[i]
+                   for i, held in enumerate(room.food_stock or []))
+    return False
 
 
 def heuristic(env, obs, mask):

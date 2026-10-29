@@ -74,6 +74,62 @@ for _seed in range(4):
 check("the memoised mask always equals a fresh scan", _stale == 0,
       f"{_cached_checked} masks over 4 runs")
 
+print("\n== teleports ==")
+# A teleport slot names a portal that is on the map, is legal only while the
+# squad stands on a portal, and keeps naming the same room as more of the level
+# comes into view: the slots follow the order portals were revealed in, not
+# their names, which would say how many unseen portals sort before a seen one.
+from sim.run import UNEXPLORED, UNKNOWN
+from rl.env import MOVES, TELEPORT_SLOTS
+
+_te = DespotRunEnv(tables=TABLES)
+for _seed in range(200):
+    _te.reset(seed=_seed)
+    # level 1 is 7 rooms and always holds exactly two portals; level 2 holds
+    # three nearly every time
+    _te.state.next_level()
+    _te._mask_cache = None
+    _m = _te.state.rooms
+    _hidden = [p for p in _m.portals
+               if _m.rooms[p].state == UNKNOWN and p != _m.start]
+    if len(_m.portals) >= 3 and len(_hidden) >= 3:
+        break
+_tm = _te.state.rooms
+_here = _te.state.room
+_on = _tm.is_portal(_here)
+_mask = _te.action_mask()
+check("off a portal every teleport slot is masked",
+      _on or not _mask[len(MOVES):len(MOVES) + TELEPORT_SLOTS].any())
+# stand on a portal and bring the others onto the map one at a time
+_src = next(p for p in _tm.portals if p != _tm.start)
+_te.state.room = _src
+_tm.set_current(_src)
+_tm.rooms[_src].cleared = True
+_te._mask_cache = None
+_order = _tm.revealed_portals()
+_slots_seen = []
+for _p in sorted((p for p in _tm.portals if _tm.rooms[p].state == UNKNOWN),
+                 reverse=True):
+    _tm.rooms[_p].state = UNEXPLORED
+    _tm._refresh_known()
+    _te._mask_cache = None
+    _targets = _te._move_targets(_te.state)[len(MOVES):]
+    _slots_seen.append(list(_targets))
+_final = _te._move_targets(_te.state)[len(MOVES):]
+_mask = _te.action_mask()
+check("each slot keeps its room as more portals are revealed",
+      len(_slots_seen) >= 2
+      and all(s[i] in (None, _final[i]) for s in _slots_seen for i in range(len(s))),
+      f"{_slots_seen} -> {_final}")
+check("on a portal, every other revealed portal is a legal teleport slot",
+      sorted(t for t in _final if t is not None)
+      == sorted(p for p in _tm.portals if p != _src)
+      and all(_mask[len(MOVES) + i] == (t is not None) for i, t in enumerate(_final)),
+      f"{_final}")
+check("a teleport slot decodes to a teleport",
+      all(_te._decode(len(MOVES) + i) == ("teleport", t)
+          for i, t in enumerate(_final) if t is not None))
+
 print("\n== no legal action is a no-op ==")
 # A legal action that changes nothing is free real estate for a greedy policy.
 # One trained agent looped on `feed` at hunger 0 for a whole 400-step episode
