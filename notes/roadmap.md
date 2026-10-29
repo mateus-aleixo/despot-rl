@@ -133,15 +133,25 @@ thrown away.
   level at an unchanged `obs_dim`, so the pre-fog observation is an arm rather
   than a code change. The other two candidates are a few lines from here, one
   dropping the two boss features and one dropping the frontier.
-- **Portals.** `portalsCount` and `minPortalDistance` in `mapgen`. `RoomMap`
-  already links them and `from_table` reads the shipped three; generated levels
-  have none, so the `portal` action has never once been legal.
+- ~~**Portals.**~~ **Done, 2026-10-29**, and with them the rest of
+  `PositionRooms`. `portalsCount = num / 7 + 1`, `minPortalDistance = 3` and
+  `minFinishDistance = num / 6 + 2` are all written by `C_Rooms.Generate`, so
+  three "unrecoverable" parameters were recoverable. Generated levels carry two
+  to four portals; a teleport is its own free action (four slots, in reveal
+  order); the finish and start are uniform draws; shops spread only against
+  their own type; every level after the first opens in an item shop. Portals
+  are worth +0.237 [+0.115, +0.360] levels to the heuristic, paired. `obs_dim`
+  210 to 258, actions 33 to 36. Details in `notes/reference-sim.md`, "Portals,
+  and `PositionRooms` read end to end".
 - **The remaining room types.** `Secret` (with `activatesSecret`,
   `secretIsActive`, `roomsToActivateSecret = 2`, `secretRoomCount`, and
   `SecretRoom: true` on level 7), `TalentShop`, `PermanentShop`,
   `ConsumableShop`, `QuestExtra`, `FinalBoss`.
 - **The shrine split.** `Shrines` is 1 at level 1 and 0 after, while
-  `RerollShrines` is 1 from level 2 on. The sim conflates them.
+  `RerollShrines` is 1 from level 2 on. The placement is right:
+  `ChooseTreasureRooms` gives `RerollShrines` the `MutationShop` bit (`0x140`)
+  and the port does the same. What is left is the shop's own parameters, the
+  `m1` defaults in `sim/assumptions.py`.
 - **Quests.** Eleven in `Quests.json`, each with `Doors`, `ExtraRooms`,
   `RoomParams` (a named `Layout`, directional priorities,
   `guaranteedPositions`) and per-quest fields. `C_Rooms.CreateQuest`, the
@@ -160,14 +170,22 @@ thrown away.
   an action in the observation. `unlocks` is unused in the shipped file, so skip
   it. Note the second entry point: consumable ID 10 fires `Dialog.DejaVu`.
 - **Consumables.** `Consumables.json`, `ConsumablesByLevel.json`, and
-  `Rooms.json`'s `Consumables` and `SellCost`. Unreachable in Default (all eight
-  chips have `StatShops: 0`) but `TalentShop` builds the shop, and
-  `KingOfTheHill`, `Arcade` and `Tasks` are unchecked. Implement the mechanism,
-  then record where it fires.
+  `Rooms.json`'s `Consumables` and `SellCost`. Thought unreachable in Default
+  (all eight chips have `StatShops: 0`), but `ChooseFinishRoom` makes every boss
+  but the last `Boss | ConsumableShop`, and `C_Room.InitShop` builds its shop
+  from the class of the room's shop model rather than from `TalentShop`. Read
+  where the shop models are made (`C_Rooms.FromGeneratedData`) first: if the
+  boss room gets an `M_ConsumableShop`, consumables are live in every Default
+  run, and the run may also wait in the boss room after the win where the sim
+  moves straight to the next level. `KingOfTheHill`, `Arcade` and `Tasks` are
+  unchecked. Implement the mechanism, then record where it fires.
 - **Layouts.** `LayoutsByPack.json` and `SpecialRoomLayouts.csv`, neither named
   anywhere in the sim, plus `M_EnemyPack.ChooseLayout`.
-- **`InstantTransitions`**, and one more attempt at `maxDeadEnds`,
-  `minFinishDistance` and multi-square rooms with `tools/data_xrefs.py`.
+- **`InstantTransitions`**, and one more attempt at `maxDeadEnds` and
+  multi-square rooms. `minFinishDistance` is recovered. `maxDeadEnds` really is
+  0 (the struct is zeroed and the one delegate subscriber does not touch it), so
+  the next place to look is `LevelGenerator.Adjust` itself, and the room-list
+  order is in `CreateRooms`.
 
 **Boundary:** re-baseline random + heuristic over 240 seeds, squads cycled, then
 one sweep for the `to_boss` question, which is a genuine fork rather than a
@@ -271,11 +289,12 @@ rest:
    three-arm sweep it was meant to get moves to the Batch 1 boundary for the
    reason given above; `--lights-on` is the control arm and is in place.
 
-   So Batch 1 now picks up at the rest of the run layer: **portals**
-   (`portalsCount` is 0 in `sim/mapgen.py`, so the portal action has never once
-   been legal), the remaining room types, the shrine and reroll split, the 11
-   quests, the dialog system now that the table is decoded, consumables,
-   layouts, and `InstantTransitions`.
+   So Batch 1 now picks up at the rest of the run layer: the remaining room
+   types, the 11 quests, the dialog system now that the table is decoded,
+   consumables, layouts, and `InstantTransitions`.
+3. ~~Portals.~~ **Done, 2026-10-29**, with the rest of `PositionRooms` (see the
+   Batch 1 list). The cheapest next step is reading `C_Rooms.FromGeneratedData`,
+   because it decides whether the consumables item is a Default feature at all.
 
 Tools that did not exist before this session and are worth knowing about:
 `tools/coverage.py` (what the game ships against what the sim reads),
