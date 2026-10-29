@@ -192,6 +192,21 @@ class Assumptions:
     # Settle by: reading `LevelGenerator.CreateRooms` (off 0x673f50).
     map_room_list_order_by_touch: bool = True
 
+    # Consumables, where the port has to choose. (1) A RoomCleaner is used in
+    # the room it clears, during the placement stage, after the pack is on
+    # screen; the sim has no stage between entering and fighting, so it is used
+    # beforehand and spent on the next room entered, which decides it without
+    # seeing the pack. (2) A resurrected unit comes back whole; `ResurrectData`
+    # carries a `health` field whose writer was not read. (3) AntiHunger lasts
+    # one fight (`WaitExpire` was not read in full). (4) The shelf draw is
+    # weighted by how often the level lists a consumable, without the
+    # `WeightedList` history that discourages repeats. (5) A Teleport with no
+    # hidden room left goes to any other room. (6) The run layer picks the
+    # target of a one-unit heal: the most wounded.
+    # Settle by: modelling the placement stage as its own decision, and reading
+    # `C_Room.CreateCorpse` and `C_AntiHungerConsumable.WaitExpire`.
+    consumables_used_before_entering: bool = True
+
     # A fight is called a draw if neither side dies within this long. The game
     # has some real timeout or sudden-death rule.
     # Settle by: finding the fight timeout in the fight controller.

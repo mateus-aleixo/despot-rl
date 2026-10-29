@@ -39,8 +39,9 @@ except ImportError:  # the env is usable without gymnasium installed
 
 from sim.data import load_ruleset
 from sim.mapgen import portals_count
-from sim.run import (EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
-                     squad_names)
+from sim.run import (CONSUMABLE_FAMILIES, CONSUMABLE_SHELF, CONSUMABLE_SLOTS,
+                     EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
+                     consumable_family, squad_names)
 
 # The widest shop is `max(ItemShopData.Quantity)` = 7 slots, at shop level 5.
 # Checked against the table in `__init__` rather than trusted.
@@ -62,7 +63,10 @@ NON_MOVE_ACTIONS = (tuple(f"buy_item_{i}" for i in range(SHOP_SLOTS))
                     + tuple(f"buy_mutation_{i}" for i in range(MUTATION_SLOTS))
                     + ("reroll", "upgrade_shop", "buy_exp",
                        "buy_human", "take_mutation", "sacrifice",
-                       "reroll_mutations"))
+                       "reroll_mutations", "descend")
+                    + tuple(f"take_consumable_{i}" for i in range(CONSUMABLE_SHELF))
+                    + tuple(f"use_consumable_{i}" for i in range(CONSUMABLE_SLOTS))
+                    + tuple(f"sell_consumable_{i}" for i in range(CONSUMABLE_SLOTS)))
 ROOM_KINDS = ("start", "fight", "boss", "item_shop", "food_shop", "mutation",
               "mutation_shop", "talent_shop", "empty")
 
@@ -420,6 +424,33 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             1.0 if st.rooms.is_portal(st.room) else 0.0,
         ]
 
+        # The consumables: what the run carries, with its charges, what the boss
+        # room's shop is showing, and what is waiting on the next room or
+        # fight. All of it is on screen. `level_won` is the open pipe.
+        fams = len(CONSUMABLE_FAMILIES)
+        carried = np.zeros(CONSUMABLE_SLOTS * (2 + fams), dtype=np.float32)
+        for k, c in enumerate(st.consumables[:CONSUMABLE_SLOTS]):
+            base = k * (2 + fams)
+            carried[base] = 1.0
+            carried[base + 1] = min(1.0, c.charges / 3.0)
+            carried[base + 2 + CONSUMABLE_FAMILIES.index(consumable_family(c.row))] = 1.0
+        on_shelf = np.zeros(CONSUMABLE_SHELF * (1 + fams), dtype=np.float32)
+        if room_now.kind == "boss" and st.level_won:
+            st.ensure_stock(room_now)
+            for i, row in enumerate((room_now.consumable_offer or [])[:CONSUMABLE_SHELF]):
+                if row is None:
+                    continue
+                base = i * (1 + fams)
+                on_shelf[base] = 1.0
+                on_shelf[base + 1 + CONSUMABLE_FAMILIES.index(consumable_family(row))] = 1.0
+        waiting = np.asarray([
+            1.0 if st.level_won else 0.0,
+            1.0 if st.armed.get("cleaner") else 0.0,
+            1.0 if st.armed.get("anti_hunger") else 0.0,
+            min(1.0, len(st.armed.get("allies") or []) / 3.0),
+            1.0 if room_now.corpses else 0.0,
+        ], dtype=np.float32)
+
         # Which squad this run is playing. The policy has to know: the eight
         # differ in size, in whether they field a frontline and in whether they
         # field anything ranged, and a two-unit squad pays half the food a
@@ -433,6 +464,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             np.asarray(level_view, dtype=np.float32),
             np.asarray(comp, dtype=np.float32),
             here_kind, shelf, larder, shelf_m, around, who,
+            carried, on_shelf, waiting,
         ]).astype(np.float32)
 
     @staticmethod
@@ -514,6 +546,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             return ("buy_food", int(name.rsplit("_", 1)[1]))
         if name.startswith("buy_mutation_"):
             return ("buy_mutation", int(name.rsplit("_", 1)[1]))
+        for family in ("take_consumable", "use_consumable", "sell_consumable"):
+            if name.startswith(family + "_"):
+                return (family, int(name.rsplit("_", 1)[1]))
         return (name, None)
 
     def _index(self, action) -> int | None:
@@ -543,6 +578,10 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             if slot >= MUTATION_SLOTS:
                 return None
             kind = f"buy_mutation_{slot}"
+        if kind in ("take_consumable", "use_consumable", "sell_consumable"):
+            kind = f"{kind}_{int(arg or 0)}"
+            if kind not in NON_MOVE_ACTIONS:
+                return None
         return self.n_moves + NON_MOVE_ACTIONS.index(kind)
 
     def action_mask(self) -> np.ndarray:

@@ -2015,3 +2015,65 @@ something that now stays hurt.
 
 The observation carries the squad's mean and lowest health share; `obs_dim`
 217 to 219.
+
+### The boss room, the pipe and the consumables, implemented
+
+**The pipe.** A boss win calls `RunState.win_level`, which ends the run on the
+last level and otherwise sets `level_won`. The squad stays where it is, doors
+open; `descend` (legal in the won boss room) is the pipe, and calls
+`next_level`. Before this the next level started the moment the boss fell.
+
+**The shop.** On every level but the last the won boss room shows three
+consumables, drawn from `ConsumablesByLevel` for the level (a consumable
+listed twice weighs twice), no consumable twice and nothing the run carries.
+`C_ConsumableShop.Buy` never reads the purse and every shipped row costs 0, so
+taking one is free and the only limit is room: `M_Consumables..cctor` builds
+the inventory size as `new ReactiveProperty<int>(2)`. `C_Consumable.Sell`
+removes one and pays `Rooms.Shops.Consumables.SellCost`, 5 gold.
+
+**The fourteen**, from each controller's `Use` (`C_Consumable.Use` spends a
+charge of the row's `Count` and the item goes when they run out):
+
+    1  Heal, Direct      one unit +100%                    C_HealConsumable, target = a unit
+    2  Heal              every unit +30%                   range 0, so the whole team
+    3  RoomCleaner       an unfought, non-boss room won     C_Room.AfterFight(true), the room's exp
+                         without a fight
+    4  Reserve           three Novices join                kind TeamMember|Human
+    5-7 Reserve          one temporary ally for a fight    no TeamMember bit; C_Team.AfterFight
+                         (Dalek, FireHead, SwoopBird)      removes temporary units
+    8  Resurrection      the corpses in this room revive   C_Room.CreateCorpse, after the fight only
+    9  Teleport          a random room nobody has seen     collects UNKNOWN rooms, RND.Element
+    10 DejaVu            a dialog                          not modelled (no dialogs yet)
+    11 AntiHunger        hunger penalties held off         M_AntiHungerStatus wraps hunger
+    12 DamageAllEnemies  -                                 on no Default level's list
+    13 Event             a dialog                          not modelled
+    14 Reroll            a free reroll of this shop        RoomType.ShopWithChoices
+
+RoomCleaner and Resurrection both check the room: the cleaner does nothing
+(and still spends its charge) in a room whose fight has a result or in a boss
+room, and the resurrection only works in one whose fight has. The sim has no
+stage between entering a room and fighting it, so a cleaner is used beforehand
+and spent on the next room entered; `sim/assumptions.py` lists that and the
+other choices.
+
+Corpses are kept per room (`Room.corpses`), the observation shows the two
+carried consumables with their charges, the shelf, and what is waiting on the
+next fight, and the env has `descend`, three `take_consumable`, two
+`use_consumable` and two `sell_consumable` actions: `obs_dim` 219 to 281,
+actions 31 to 39. The heuristic takes the shelf best first, sells what it has
+no rule for, heals below half health (one unit) or 70% (the team), resurrects
+where corpses lie, calls reserves at once, and arms a cleaner or an AntiHunger
+just before walking into a fight.
+
+`tools/consumable_value.py --seeds 240 --fast`, the shop against the same
+seeds with `take_consumable` struck out:
+
+    takes them    3.367  (sd 1.080)   uses a run: heal_one 1.35, heal_all 1.12,
+                                      reserve_humans 1.12, reserve_ally 0.90,
+                                      cleaner 0.59, resurrection 0.42, anti_hunger 0.36
+    ignores them  2.646  (sd 0.704)
+
+    paired +0.721 [+0.597, +0.844], better on 116 of 240, worse on 8
+
+Most of that is healing: with wounds carried between fights, a free heal in
+every boss room is the only routine way to get health back.

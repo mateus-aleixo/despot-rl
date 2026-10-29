@@ -1757,6 +1757,171 @@ check("FoodPackHeal heals the squad by what the pack cost",
       all(abs(h.hp - (0.5 + _cost1 / 100.0)) < 1e-9 for h in _sf.squad),
       f"pack cost {_cost1}, hp {[h.hp for h in _sf.squad]}")
 
+# -- the boss room, the pipe, and consumables ---------------------------------
+from sim.run import (CONSUMABLE_SHELF as _SHELF, CONSUMABLE_SLOTS as _SLOTS,
+                     Consumable as _Cons, consumable_family as _fam)
+
+_cons_rows = {c["ID"]: c for c in _STRICT["Consumables"]}
+
+
+def _won_boss(seed, level=1):
+    """A run standing in a boss room it has just won."""
+    s = RunState.new(_STRICT, seed=seed)
+    if level > 1:
+        s.level = level
+        s.rooms = RoomMap.generate(s.level_row, s.rng)
+    s.room = s.rooms.boss
+    s.rooms.set_current(s.room)
+    s.rooms.rooms[s.room].cleared = True
+    s.win_level()
+    return s
+
+
+_bw = _won_boss(31)
+check("beating the boss does not change the level", _bw.level == 1 and _bw.level_won
+      and ("descend", None) in _bw.legal_actions())
+_bw.apply(("descend", None))
+check("the pipe does", _bw.level == 2 and not _bw.level_won)
+_bl = _won_boss(32, level=len(_STRICT["Levels"]))
+check("the last boss ends the run, won", _bl.finished and _bl.won and not _bl.level_won)
+
+_bs = _won_boss(33)
+_bs.ensure_stock(_bs.rooms.rooms[_bs.room])
+_shelf_c = _bs.rooms.rooms[_bs.room].consumable_offer
+_lvl1 = {r["Consumable"] for r in _STRICT["ConsumablesByLevel"] if r["Level"] == 1}
+check("a boss room shows three consumables from its level's list, none twice",
+      len(_shelf_c) == _SHELF and {c["ID"] for c in _shelf_c} <= _lvl1
+      and len({c["ID"] for c in _shelf_c}) == _SHELF, f"{[c['Name'] for c in _shelf_c]}")
+_g0 = _bs.gold
+while any(a[0] == "take_consumable" for a in _bs.legal_actions()):
+    _bs.apply(next(a for a in _bs.legal_actions() if a[0] == "take_consumable"))
+check("they are free, and the run carries two", len(_bs.consumables) == _SLOTS
+      and _bs.gold == _g0, f"{len(_bs.consumables)} carried, gold {_g0} -> {_bs.gold}")
+_bs.apply(("sell_consumable", 0))
+check("selling one pays SellCost", _bs.gold == _g0 + _bs.consumable_sell_price
+      and _bs.consumable_sell_price == 5.0 and len(_bs.consumables) == _SLOTS - 1)
+# what the run carries is never on the next shelf
+_bs.rooms.rooms[_bs.room].consumable_offer = None
+_carried_ids = {c.row["ID"] for c in _bs.consumables}
+_again = 0
+for _ in range(30):
+    _bs.rooms.rooms[_bs.room].consumable_offer = None
+    _bs.ensure_stock(_bs.rooms.rooms[_bs.room])
+    _again += sum(1 for c in _bs.rooms.rooms[_bs.room].consumable_offer if c["ID"] in _carried_ids)
+check("nothing the run carries is on a shelf", _again == 0)
+
+
+def _give(s, cid):
+    s.consumables = [_Cons(row=_cons_rows[cid], charges=int(_cons_rows[cid]["Count"]))]
+
+
+# heals: the potion makes the most wounded whole, the scroll gives 30% to all
+_hs = RunState.new(_STRICT, seed=5)
+for _h, _v in zip(_hs.squad, (0.2, 0.6, 0.9, 1.0)):
+    _h.hp = _v
+_give(_hs, 1)
+_hs.apply(("use_consumable", 0))
+check("a Heal potion makes the most wounded unit whole",
+      [h.hp for h in _hs.squad][:4] == [1.0, 0.6, 0.9, 1.0]
+      and _hs.consumables[0].charges == _cons_rows[1]["Count"] - 1)
+_give(_hs, 2)
+_hs.apply(("use_consumable", 0))
+check("a Heal scroll gives every unit 30%",
+      all(abs(a - b) < 1e-9 for a, b in zip([h.hp for h in _hs.squad][:4], [1.0, 0.9, 1.0, 1.0])),
+      f"{[h.hp for h in _hs.squad]}")
+
+# a cleaner wins the next room it is carried into, with no fight and its experience
+_built = []
+
+
+class _CountBattle(_sim_run.Battle):
+    def __init__(self, *a, **kw):
+        _built.append(1)
+        super().__init__(*a, **kw)
+
+
+_sim_run.Battle = _CountBattle
+try:
+    _cs = RunState.new(_STRICT, seed=6)
+    _give(_cs, 3)
+    _cs.apply(("use_consumable", 0))
+    _tgt = next(a for a in _cs.legal_actions() if a[0] == "move"
+                and not _cs.rooms.rooms[a[1]].cleared
+                and _cs.rooms.rooms[a[1]].kind != "boss")
+    _exp0 = sum(h.experience + 1000 * h.level for h in _cs.squad)
+    _built.clear()
+    _r = _cs.apply(_tgt)
+    check("a RoomCleaner wins the next room without a fight",
+          _r.get("cleaned") and _cs.rooms.rooms[_tgt[1]].cleared and not _built
+          and sum(h.experience + 1000 * h.level for h in _cs.squad) > _exp0, f"{_r}")
+finally:
+    _sim_run.Battle = _real_battle
+
+# reserves: three Novices join for good; an ally fights the next fight and goes
+_rs = RunState.new(_STRICT, seed=7)
+_n0 = len(_rs.squad)
+_give(_rs, 4)
+_rs.apply(("use_consumable", 0))
+check("a Reserve of Novices adds three humans", len(_rs.squad) == _n0 + 3
+      and all(h.item is None for h in _rs.squad[_n0:]))
+_starts.clear()
+_sim_run.Battle = _ProbeBattle
+try:
+    _ra = RunState.new(_STRICT, seed=7)
+    _give(_ra, 5)
+    _ra.apply(("use_consumable", 0))
+    _n1 = len(_ra.squad)
+    _mv = next(a for a in _ra.legal_actions() if a[0] == "move"
+               and not _ra.rooms.rooms[a[1]].cleared)
+    _ra.apply(_mv)
+finally:
+    _sim_run.Battle = _real_battle
+check("a summoned ally fights the next fight and does not join the squad",
+      _starts and len(_starts[0]) == _n1 + 1 and len(_ra.squad) <= _n1
+      and not _ra.armed.get("allies"), f"{len(_starts[0]) if _starts else 0} fielded")
+
+# resurrection brings back the dead lying in this room
+_rz = RunState.new(_STRICT, seed=8)
+_dead = _rz.squad.pop()
+_here = _rz.rooms.rooms[_rz.room]
+_here.corpses.append(_dead)
+_give(_rz, 8)
+check("Resurrection is usable where corpses lie",
+      ("use_consumable", 0) in _rz.legal_actions())
+_rz.apply(("use_consumable", 0))
+check("and brings them back", _dead in _rz.squad and not _here.corpses and _dead.hp == 1.0)
+
+# teleport: a random room nobody has seen, no food spent
+_tz = RunState.new(_STRICT, seed=9)
+_hidden_before = {rid for rid, r in _tz.rooms.rooms.items() if r.state == UNKNOWN}
+_give(_tz, 9)
+_food0 = (_tz.food.amount, _tz.food.moves_left)
+_tz.apply(("use_consumable", 0))
+check("a Teleport lands in a room that was hidden, for no food",
+      _tz.room in _hidden_before and (_tz.food.amount, _tz.food.moves_left) == _food0)
+
+# AntiHunger lifts the hunger penalties for one fight
+_az = RunState.new(_STRICT, seed=10)
+_az.food.amount, _az.food.moves_left = 0.0, 0
+_az.food.spend_move(_az.feed_cost)
+check("a starving squad fights with its penalties", _az.food.damage_penalty > 0
+      and _az.specs()[0].damage < _az.specs(no_hunger=True)[0].damage)
+_give(_az, 11)
+_az.apply(("use_consumable", 0))
+check("AntiHunger waits for the next fight", _az.armed.get("anti_hunger"))
+
+# Reroll: a free new shelf in the shop the squad stands in
+_rr = RunState.new(_STRICT, seed=2)
+_rr.next_level()                      # level 2 opens in an item shop
+_rr.ensure_stock(_rr.rooms.rooms[_rr.room])
+_before_offer, _g1 = list(_rr.offer), _rr.gold
+_give(_rr, 14)
+_rr.apply(("use_consumable", 0))
+check("a Reroll rolls the item shop for free",
+      _rr.gold == _g1 and len(_rr.offer) == len(_before_offer), f"{_before_offer} -> {_rr.offer}")
+check("every consumable the sim models has a family, three do not",
+      sum(1 for c in _STRICT["Consumables"] if _fam(c) == "unmodelled") == 3)
+
 # hunger model. `moves` is a list of thresholds on a `maxMoves` reserve, not an
 # allowance per stage, and moving feeds the team rather than costing a move.
 _f = Food.from_game(_STRICT["Game"])

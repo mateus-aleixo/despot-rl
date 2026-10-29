@@ -158,11 +158,11 @@ thrown away.
   full before each one. `Human.hp` carries the share. Worth **-1.000 [-1.105,
   -0.895]** levels to the heuristic, the largest single change this project has
   measured. `FoodPackHeal` implemented with it.
-- **The boss room and the pipe.** `C_Levels.WinLevel` does not move the squad;
-  `V_Pipes` is the only gameplay caller of `ChangeLevel`. So after the boss the
-  run stays on the level, with the doors open and, on every level but the last,
-  a three-slot consumable shop in the boss room. Needs a descend action and the
-  consumables below.
+- ~~**The boss room and the pipe.**~~ **Done, 2026-10-29.** `C_Levels.WinLevel`
+  does not move the squad; `V_Pipes` is the only gameplay caller of
+  `ChangeLevel`. The run stays on the level after the boss until it takes the
+  pipe (`descend`), and every boss room but the last has a free three-slot
+  consumable shop.
 - **Quests.** Eleven in `Quests.json`, each with `Doors`, `ExtraRooms`,
   `RoomParams` (a named `Layout`, directional priorities,
   `guaranteedPositions`) and per-quest fields. `C_Rooms.CreateQuest`, the
@@ -180,16 +180,13 @@ thrown away.
   events, the gates that fill `enableds` and `hiddens`, and the choice itself as
   an action in the observation. `unlocks` is unused in the shipped file, so skip
   it. Note the second entry point: consumable ID 10 fires `Dialog.DejaVu`.
-- **Consumables.** `Consumables.json`, `ConsumablesByLevel.json`, and
-  `Rooms.json`'s `Consumables` and `SellCost`. Thought unreachable in Default
-  (all eight chips have `StatShops: 0`), but `ChooseFinishRoom` makes every boss
-  but the last `Boss | ConsumableShop`, and `C_Room.InitShop` builds its shop
-  from the class of the room's shop model rather than from `TalentShop`. Read
-  where the shop models are made (`C_Rooms.FromGeneratedData`) first: if the
-  boss room gets an `M_ConsumableShop`, consumables are live in every Default
-  run, and the run may also wait in the boss room after the win where the sim
-  moves straight to the next level. `KingOfTheHill`, `Arcade` and `Tasks` are
-  unchecked. Implement the mechanism, then record where it fires.
+- ~~**Consumables.**~~ **Done, 2026-10-29**, eleven of the fourteen: they are
+  live in every Default run, from the boss rooms. Two carried, free to take,
+  5 gold to sell; heals, the cleaner, reserves, resurrection, teleport,
+  AntiHunger and reroll modelled. DejaVu and Event wait on dialogs;
+  DamageAllEnemies is on no Default list. Worth +0.721 [+0.597, +0.844] levels
+  to the heuristic. Open: the placement stage, where the game lets a cleaner be
+  used after the pack is on screen (`sim/assumptions.py`).
 - **Layouts.** `LayoutsByPack.json` and `SpecialRoomLayouts.csv`, neither named
   anywhere in the sim, plus `M_EnemyPack.ChooseLayout`.
 - **`InstantTransitions`**, and one more attempt at `maxDeadEnds` and

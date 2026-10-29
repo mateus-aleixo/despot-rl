@@ -142,9 +142,15 @@ from sim.run import RunState
 def snapshot(st):
     return (st.level, st.room, st.gold, st.food.amount, st.food.hunger_level,
             st.food.moves_left, len(st.squad), len(st.mutations),
-            st.shop_level, tuple(st.offer),
-            tuple((h.item, h.level, round(h.experience, 6)) for h in st.squad),
-            tuple(sorted((r.id, r.cleared, r.stock, tuple(r.food_stock or ()))
+            st.shop_level, tuple(st.offer), st.level_won,
+            tuple((c.name, c.charges) for c in st.consumables),
+            tuple(sorted((k, str(v)) for k, v in st.armed.items())),
+            tuple((h.item, h.level, round(h.experience, 6), round(h.hp, 6))
+                  for h in st.squad),
+            tuple(sorted((r.id, r.cleared, r.stock, tuple(r.food_stock or ()),
+                          tuple(m["ID"] if m else None for m in r.offer_mutations or ()),
+                          r.takes_left, r.rolls_left, len(r.corpses),
+                          tuple(c["ID"] if c else None for c in r.consumable_offer or ()))
                          for r in st.rooms.rooms.values())))
 
 

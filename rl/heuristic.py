@@ -13,7 +13,13 @@ from __future__ import annotations
 
 import random
 
-from sim.run import MAX_UNIT_LEVEL, RunState
+from sim.run import MAX_UNIT_LEVEL, RunState, consumable_family
+
+# What the baseline takes from a consumable shop, best first, and what it sells
+# on sight: the consumables it has no rule for, five gold each.
+TAKE_ORDER = ("heal_one", "heal_all", "resurrection", "reserve_humans",
+              "reserve_ally", "cleaner", "anti_hunger")
+USELESS_TO_BASELINE = ("unmodelled", "teleport", "reroll")
 
 
 def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
@@ -54,6 +60,29 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     for a in legal:
         kinds.setdefault(a[0], []).append(a)
     here = st.rooms.rooms[st.room]
+
+    # Consumables. Sell what the sim gives no effect, heal a badly wounded
+    # squad, bring back the dead lying here, and call reserves at once.
+    held = {a[1]: consumable_family(st.consumables[a[1]].row)
+            for a in kinds.get("use_consumable", ())}
+    for a in kinds.get("sell_consumable", ()):
+        if consumable_family(st.consumables[a[1]].row) in USELESS_TO_BASELINE:
+            return a
+    hp = [h.hp for h in st.squad] or [1.0]
+    for k, fam in held.items():
+        if ((fam == "heal_one" and min(hp) < 0.5)
+                or (fam == "heal_all" and sum(hp) / len(hp) < 0.7)
+                or fam in ("resurrection", "reserve_humans", "reserve_ally")):
+            return ("use_consumable", k)
+    # The boss room once won: take what the shop shows while there is room,
+    # most useful first, then go down the pipe.
+    if kinds.get("take_consumable"):
+        shelf = here.consumable_offer or []
+        return min(kinds["take_consumable"], key=lambda a: (
+            TAKE_ORDER.index(consumable_family(shelf[a[1]]))
+            if consumable_family(shelf[a[1]]) in TAKE_ORDER else len(TAKE_ORDER)))
+    if kinds.get("descend") and not kinds.get("buy_item"):
+        return kinds["descend"][0]
 
     if here.has("item_shop"):
         if upgrade == "first" and kinds.get("upgrade_shop"):
@@ -134,9 +163,18 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
         # cannot. Until the boss is found `known_to_boss` is empty, every room
         # ties, and the first key carries the decision: walk into the room that
         # has not been cleared. A door wins a tie against a teleport.
-        return min(moves + teleports, key=lambda a: (
+        step = min(moves + teleports, key=lambda a: (
             st.rooms.rooms[a[1]].cleared, known.get(a[1], far),
             a[0] == "teleport"))
+        # About to walk into a fight: a cleaner wins it outright (not on the
+        # boss, where it would be wasted), an AntiHunger lifts the penalties.
+        target = st.rooms.rooms[step[1]]
+        if not target.cleared:
+            for k, fam in held.items():
+                if ((fam == "cleaner" and target.kind != "boss")
+                        or (fam == "anti_hunger" and st.food.hunger_level > 0)):
+                    return ("use_consumable", k)
+        return step
 
     # Never a teleport here: whatever is left is a teleport that leads nowhere
     # (see above) or something that changes the state, and only the second can

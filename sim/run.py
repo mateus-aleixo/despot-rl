@@ -93,6 +93,60 @@ MUTATION_SHOP = {"ShowCount": 3, "BuyCount": 1, "RollCost": 0.0, "RollCount": 2}
 # shop that never runs out of rerolls.
 UNLIMITED_ROLLS = 90
 
+# The run carries two consumables: `M_Consumables..cctor` builds `_size` as
+# `new ReactiveProperty<int>(2)` and nothing in the Default path writes it.
+CONSUMABLE_SLOTS = 2
+
+# A consumable shop's shelf, `C_Room..ctor`: `quantity = 2 + (~type & 1)`, so
+# three in a boss room and two in a start room.
+CONSUMABLE_SHELF = 3
+
+
+@dataclass
+class Consumable:
+    """One consumable the run carries: its `Consumables.json` row and the
+    charges left of its `Count`. `C_Consumable.Use` spends one a use, and the
+    item goes when they run out."""
+    row: dict
+    charges: int
+
+    @property
+    def name(self) -> str:
+        return self.row.get("Name") or ""
+
+
+def consumable_params(row: dict) -> dict:
+    """`Param1Name`/`Param1Value` and so on, as a dict."""
+    return {row.get(f"Param{i}Name"): row.get(f"Param{i}Value")
+            for i in range(1, 6) if row.get(f"Param{i}Name")}
+
+
+def consumable_family(row: dict) -> str:
+    """What a consumable does, in the terms the sim models it in.
+
+    Read off each controller's `Use`: `C_HealConsumable` heals one unit when
+    the row is `Direct` and every unit otherwise; `C_ReserveConsumable` makes
+    team members when the row's `kind` carries `TeamMember` and temporary
+    allies when it does not (`Kinds.TeamMember = 64`, and `C_Team.AfterFight`
+    removes temporary units). `DejaVu` and `Event` open dialogs and
+    `DamageAllEnemies` is on no Default level's list, so those three are
+    carried and sold but have no effect here.
+    """
+    name = row.get("Name")
+    if name == "Heal":
+        return "heal_one" if row.get("Direct") else "heal_all"
+    if name == "Reserve":
+        kind = str(consumable_params(row).get("kind") or "")
+        return "reserve_humans" if "TeamMember" in kind else "reserve_ally"
+    return {"RoomCleaner": "cleaner", "Resurrection": "resurrection",
+            "Teleport": "teleport", "AntiHunger": "anti_hunger",
+            "Reroll": "reroll"}.get(name, "unmodelled")
+
+
+CONSUMABLE_FAMILIES = ("heal_one", "heal_all", "cleaner", "reserve_humans",
+                       "reserve_ally", "resurrection", "teleport", "anti_hunger",
+                       "reroll", "unmodelled")
+
 # `RoomState`, straight from the enum. `C_Rooms.SetCurrent` is the only thing
 # that writes it, and the disassembly says exactly what it writes: the room being
 # left is set to `EXPLORED`, the room being entered to `CURRENT`, and then the
@@ -144,6 +198,12 @@ class Room:
     # Whether this room has already refilled the shop's empty slots. Set on
     # arrival so that walking out and back in is not a free reroll.
     refilled: bool = False
+    # A boss room's consumable shop: what it is showing, `None` where a slot
+    # has been taken. See `RunState.draw_consumables`.
+    consumable_offer: list | None = None
+    # The humans who died in this room's fights. `C_Room.CreateCorpse` leaves
+    # one per dead unit, and a Resurrection used in the room brings them back.
+    corpses: list = field(default_factory=list)
     # Other kinds the same room is as well. `RoomType` is a flags enum, and the
     # start room of every level after the first is `Start | ItemShop`: it keeps
     # the start's place in the economy (`CalculatePower` tests `Start` first and
@@ -617,6 +677,14 @@ class RunState:
     # Default (see `Human.hp`). Off reproduces the sim as it was, every fight
     # at full health, and exists only so the difference can be measured.
     carry_hp: bool = True
+    # The consumables the run carries, at most `CONSUMABLE_SLOTS` of them.
+    consumables: list = field(default_factory=list)
+    # The boss is dead and the pipe is open, see `win_level`.
+    level_won: bool = False
+    # Consumable effects waiting on the next room or the next fight:
+    # "cleaner" (a RoomCleaner), "anti_hunger" (AntiHunger), "allies" (the
+    # temporary units a Reserve summons, as (class, level) pairs).
+    armed: dict = field(default_factory=dict)
 
     # -- setup -------------------------------------------------------------
     @classmethod
@@ -644,8 +712,9 @@ class RunState:
         return next((l for l in levels if l["ID"] == self.level), levels[-1])
 
     # -- squad -------------------------------------------------------------
-    def specs(self) -> list[UnitSpec]:
-        """Resolve the squad to UnitSpecs, applying hunger penalties."""
+    def specs(self, no_hunger: bool = False) -> list[UnitSpec]:
+        """Resolve the squad to UnitSpecs, applying hunger penalties unless an
+        AntiHunger is holding them off."""
         # One spec per squad member, in squad order: `fight` maps survivors back
         # by position, so the two lists must stay aligned.
         ubc = units_by_class(self.tables)
@@ -655,7 +724,8 @@ class RunState:
                 specs.append(build_player_squad(self.tables, [(h.item, h.level)])[0])
             else:
                 specs.append(build_unit(ubc, "Novice", h.level, name="Novice"))
-        if self.food and (self.food.damage_penalty or self.food.armor_penalty):
+        if (self.food and not no_hunger
+                and (self.food.damage_penalty or self.food.armor_penalty)):
             import dataclasses
             dm = 1.0 - self.food.damage_penalty / 100.0
             am = 1.0 - self.food.armor_penalty / 100.0
@@ -1203,6 +1273,22 @@ class RunState:
             # shop is closed and the reroll goes with it.
             if here.rolls_left > 0 and self.gold >= float(MUTATION_SHOP["RollCost"]):
                 acts.append(("reroll_mutations", None))
+        # The boss room once the boss is dead: the pipe down, and on every level
+        # but the last a consumable shop. `C_ConsumableShop.Buy` never reads
+        # the purse and every shipped consumable costs 0, so the only limit is
+        # room to carry it.
+        if open_ and here.kind == "boss" and self.level_won:
+            acts.append(("descend", None))
+            if len(self.consumables) < CONSUMABLE_SLOTS:
+                for i, c in enumerate(here.consumable_offer or []):
+                    if c is not None:
+                        acts.append(("take_consumable", i))
+        # What the run carries can be used where its controller allows, and
+        # sold anywhere for `Rooms.Shops.Consumables.SellCost`.
+        for k, c in enumerate(self.consumables):
+            if self.can_use(c, here):
+                acts.append(("use_consumable", k))
+            acts.append(("sell_consumable", k))
         # Humans are bought at the item shop, not anywhere on the map:
         # `C_ItemShop.BuyHuman` is the only caller, and it checks `M_Team.gold`
         # against `M_ItemShop.humanCost` (a flat 2, never raised after a sale).
@@ -1229,38 +1315,13 @@ class RunState:
             # the door walk feeds the squad.
             if kind == "move":
                 result["food"] = self.food.spend_move(self.feed_cost)
-            self.room = arg
-            # The reveal happens on entry, before the fight, so the neighbours
-            # of a room the squad dies in are still uncovered.
-            self.rooms.set_current(arg)
-            room = self.rooms.rooms[arg]
-            first_visit = not room.cleared
-            if first_visit:
-                # **Every room fights.** `C_Rooms.ChoosePacks` walks every room
-                # in the level, looks it up in the pack dictionary and logs
-                # "No enemy pack is set for room " on a miss, so a room without
-                # enemies is a bug in the game's own view. This used to fight
-                # only in `fight`, `boss` and `start` rooms and to treat every
-                # shop as peaceful, which left 132 of the 212 rows in
-                # `EnemyPacks.json` unused: the ItemShop, FoodShop and Treasure
-                # ones. See `notes/reference-sim.md`.
-                result.update(self.fight(room))
-            # `C_Room.AfterFight(win)` is what opens the doors, opens the
-            # shrine, opens the shop and pays `goldReward`, so none of that
-            # happens on a room that was not won.
-            if first_visit and result.get("won", True):
-                room.cleared = True
-            # A room pays `GoldPerRoom` once. `C_Room.AfterFight` reads
-            # `M_Room.goldReward`, skips the whole block when it is already 0,
-            # and sets it to 0 after paying -- so walking back through a cleared
-            # room pays nothing. This was paid on every move, which is an
-            # unbounded gold fountain: a trained agent walked two rooms back and
-            # forth for 400 steps and finished holding 1,115 gold.
-            if first_visit and room.cleared:
-                # `GoldPerRoom` is a level total too, `(num - 1)` of them shared
-                # out by the same weights, so a shop pays more than a corridor.
-                self.gold += self.room_gold(room.kind)
-            if first_visit and room.cleared and room.kind == "boss":
+            self._arrive(arg, result)
+        elif kind == "descend":
+            # `V_Pipes.<MoveInternal>` is the only gameplay caller of
+            # `C_Levels.ChangeLevel`, and the pipe opens on the boss room's
+            # `fightResult`. Until the squad takes it the run is still on this
+            # level, doors open, shops still selling.
+            if self.level_won and self.rooms.rooms[self.room].kind == "boss":
                 self.next_level()
         elif kind == "buy_item":
             # arg is (slot, target). A target of None means "whoever the game's
@@ -1377,6 +1438,29 @@ class RunState:
                     here.rolls_left -= 1
                 here.offer_mutations = self.draw_mutations(here)
                 result["rerolled"] = True
+        elif kind == "take_consumable":
+            here = self.rooms.rooms[self.room]
+            shelf = here.consumable_offer or []
+            i = int(arg or 0)
+            if (self.level_won and here.kind == "boss" and 0 <= i < len(shelf)
+                    and shelf[i] is not None
+                    and len(self.consumables) < CONSUMABLE_SLOTS):
+                row = shelf[i]
+                shelf[i] = None
+                self.consumables.append(
+                    Consumable(row=row, charges=int(row.get("Count") or 1)))
+                result["consumable"] = row.get("Name")
+        elif kind == "use_consumable":
+            k = int(arg or 0)
+            here = self.rooms.rooms[self.room]
+            if 0 <= k < len(self.consumables) and self.can_use(self.consumables[k], here):
+                result.update(self.use_consumable(k))
+        elif kind == "sell_consumable":
+            # `C_Consumable.Sell`: out of the inventory, `sellCost` into the purse.
+            k = int(arg or 0)
+            if 0 <= k < len(self.consumables):
+                result["sold"] = self.consumables.pop(k).name
+                self.gold += self.consumable_sell_price
         elif kind == "take_mutation":
             here = self.rooms.rooms[self.room]
             pool = self.mutation_pool() if (here.stock or 0) > 0 else []
@@ -1398,6 +1482,62 @@ class RunState:
             # to aim for it.
             self.finished, self.won = True, False
         return result
+
+    def _arrive(self, rid: str, result: dict) -> None:
+        """Walk or teleport into `rid`: reveal, fight if it was never won, pay."""
+        self.room = rid
+        # The reveal happens on entry, before the fight, so the neighbours
+        # of a room the squad dies in are still uncovered.
+        self.rooms.set_current(rid)
+        room = self.rooms.rooms[rid]
+        first_visit = not room.cleared
+        # A cleaner armed before this step is spent on this room whatever it
+        # is, the way using one in a room that has already fought spends it.
+        cleaner = self.armed.pop("cleaner", False)
+        if first_visit:
+            if cleaner and room.kind != "boss":
+                result.update(self.clean_room(room))
+            else:
+                # **Every room fights.** `C_Rooms.ChoosePacks` walks every room
+                # in the level, looks it up in the pack dictionary and logs
+                # "No enemy pack is set for room " on a miss, so a room without
+                # enemies is a bug in the game's own view. This used to fight
+                # only in `fight`, `boss` and `start` rooms and to treat every
+                # shop as peaceful, which left 132 of the 212 rows in
+                # `EnemyPacks.json` unused: the ItemShop, FoodShop and Treasure
+                # ones. See `notes/reference-sim.md`.
+                result.update(self.fight(room))
+        # `C_Room.AfterFight(win)` is what opens the doors, opens the shrine,
+        # opens the shop and pays `goldReward`, so none of that happens on a
+        # room that was not won.
+        if first_visit and result.get("won", True):
+            room.cleared = True
+        # A room pays `GoldPerRoom` once. `C_Room.AfterFight` reads
+        # `M_Room.goldReward`, skips the whole block when it is already 0, and
+        # sets it to 0 after paying -- so walking back through a cleared room
+        # pays nothing. This was paid on every move, which is an unbounded gold
+        # fountain: a trained agent walked two rooms back and forth for 400
+        # steps and finished holding 1,115 gold.
+        if first_visit and room.cleared:
+            # `GoldPerRoom` is a level total too, `(num - 1)` of them shared
+            # out by the same weights, so a shop pays more than a corridor.
+            self.gold += self.room_gold(room.kind)
+        if first_visit and room.cleared and room.kind == "boss":
+            self.win_level()
+
+    def win_level(self) -> None:
+        """`C_Levels.WinLevel`, which `C_Fight.AfterFight` calls on a boss win.
+
+        It ends the run only on the last level. Anywhere else it marks the level
+        won and moves nobody: the next level is the pipe's business, see
+        `descend`. The sim used to start the next level the moment the boss
+        fell, which skipped the boss room's consumable shop and any walk back
+        to a shop with the boss's gold.
+        """
+        if self.level >= len(self.tables["Levels"]):
+            self.finished, self.won = True, True
+            return
+        self.level_won = True
 
     def stranded(self) -> bool:
         """Whether nothing the run can still do leads anywhere.
@@ -1428,6 +1568,8 @@ class RunState:
         if room.has("item_shop") and not room.refilled:
             room.refilled = True
             self.refill_offer()
+        if room.kind == "boss" and self.level_won and room.consumable_offer is None:
+            room.consumable_offer = self.draw_consumables(CONSUMABLE_SHELF)
         if room.kind == "mutation_shop":
             if room.offer_mutations is None:
                 room.takes_left = int(MUTATION_SHOP["BuyCount"])
@@ -1473,9 +1615,158 @@ class RunState:
         show = int(MUTATION_SHOP["ShowCount"])
         return self.rng.sample(pool, min(show, len(pool))) if pool else []
 
+    # -- consumables --------------------------------------------------------
+    @property
+    def consumable_sell_price(self) -> float:
+        """`M_Consumables.sellCost`, from `Rooms.Shops.Consumables.SellCost`."""
+        shops = self.tables["Rooms"].get("Shops") or {}
+        return float((shops.get("Consumables") or {}).get("SellCost") or 0)
+
+    def consumable_pool(self) -> list[dict]:
+        """What a consumable shop can draw from on this level.
+
+        `C_ConsumableShop.Roll` weighs the level's `ConsumablesByLevel` rows,
+        so a consumable listed twice is twice as likely, and leaves out what
+        the run already carries. The draw itself is a `WeightedList` with
+        history, whose anti-repeat weighting is not modelled.
+        """
+        rows = {c["ID"]: c for c in self.tables.get("Consumables") or []}
+        held = {c.row.get("ID") for c in self.consumables}
+        return [rows[r["Consumable"]] for r in self.tables.get("ConsumablesByLevel") or []
+                if r.get("Level") == self.level and r.get("Consumable") in rows
+                and r["Consumable"] not in held]
+
+    def draw_consumables(self, n: int) -> list:
+        """A shelf of `n`, no consumable twice."""
+        pool, out = self.consumable_pool(), []
+        while pool and len(out) < n:
+            pick = self.rng.choice(pool)
+            out.append(pick)
+            pool = [p for p in pool if p["ID"] != pick["ID"]]
+        return out
+
+    def can_use(self, c: Consumable, here: Room) -> bool:
+        """Whether using `c` here does anything.
+
+        Mostly the controllers' own conditions. Two are this port's: a heal is
+        offered only to a squad with a wound to heal, and a cleaner or an
+        AntiHunger only while one is not already waiting.
+        """
+        fam = consumable_family(c.row)
+        if fam in ("heal_one", "heal_all"):
+            return any(h.hp < 1.0 for h in self.squad)
+        if fam == "cleaner":
+            return not self.armed.get("cleaner")
+        if fam == "anti_hunger":
+            return not self.armed.get("anti_hunger")
+        if fam in ("reserve_humans", "reserve_ally"):
+            return True
+        if fam == "resurrection":
+            # `C_ResurrectionConsumable.Use` revives only in a room whose fight
+            # has a result, and only the corpses lying in it.
+            return here.cleared and bool(here.corpses)
+        if fam == "teleport":
+            return len(self.rooms.rooms) > 1
+        if fam == "reroll":
+            # `RoomType.ShopWithChoices = 16652`: an item, food, mutation or
+            # consumable shop, open.
+            return here.cleared and (
+                here.has("item_shop") or here.kind == "food_shop"
+                or (here.kind == "mutation_shop" and here.takes_left > 0)
+                or (here.kind == "boss" and self.level_won
+                    and here.consumable_offer is not None))
+        return False
+
+    def use_consumable(self, k: int) -> dict:
+        """`C_<Name>Consumable.Use`, then `C_Consumable.Use`'s charge."""
+        from .unit_skills import param
+        c = self.consumables[k]
+        fam = consumable_family(c.row)
+        p = consumable_params(c.row)
+        here = self.rooms.rooms[self.room]
+        out = {"used": c.name, "family": fam}
+        if fam in ("heal_one", "heal_all"):
+            # A `Direct` heal is dragged onto one unit; the run layer picks the
+            # most wounded, the way the pit does. The others heal the team.
+            amount = param(p, "amount")
+            percent = str(p.get("percentage", "false")).lower() == "true"
+            targets = range(len(self.squad))
+            if fam == "heal_one":
+                targets = [min(targets, key=lambda i: (self.squad[i].hp, i))]
+            specs = None if percent else self.specs_cached()
+            for i in targets:
+                gain = (amount / 100.0 if percent
+                        else amount / max(1.0, specs[i].health))
+                self.squad[i].hp = min(1.0, self.squad[i].hp + gain)
+        elif fam == "cleaner":
+            self.armed["cleaner"] = True
+        elif fam == "anti_hunger":
+            self.armed["anti_hunger"] = True
+        elif fam == "reserve_humans":
+            n = int(param(p, "amount", default=1))
+            level = int(param(p, "level", default=1))
+            self.squad += [Human(item=None, level=level) for _ in range(n)]
+            out["joined"] = n
+        elif fam == "reserve_ally":
+            n = int(param(p, "amount", default=1))
+            level = int(param(p, "level", default=1))
+            self.armed.setdefault("allies", []).extend(
+                [(str(p.get("class")), level)] * n)
+        elif fam == "resurrection":
+            back = list(here.corpses)
+            here.corpses.clear()
+            for h in back:
+                h.hp = 1.0
+            self.squad += back
+            out["revived"] = len(back)
+        elif fam == "teleport":
+            # `C_TeleportConsumable.Use` collects the rooms still `UNKNOWN`,
+            # takes `RND.Element` of them, reveals it and `TeleportTo`s there.
+            hidden = sorted(rid for rid, r in self.rooms.rooms.items()
+                            if r.state == UNKNOWN and rid != self.room)
+            pool = hidden or sorted(rid for rid in self.rooms.rooms if rid != self.room)
+            dest = self.rng.choice(pool)
+            self.rooms.rooms[dest].state = UNEXPLORED
+            self._arrive(dest, out)
+        elif fam == "reroll":
+            self.reroll_shop(here)
+        c.charges -= 1
+        if c.charges <= 0 and c in self.consumables:
+            self.consumables.remove(c)
+        return out
+
+    def reroll_shop(self, here: Room) -> None:
+        """A free `Roll` of the shop the squad stands in, every slot."""
+        if here.has("item_shop"):
+            self.offer = [self.roll_item() for _ in range(self.shop_quantity())]
+        elif here.kind == "food_shop":
+            sizes, costs = self.food_packs
+            here.food_stock = determine_quantities(sizes, costs, self.food_shop_budget)
+        elif here.kind == "mutation_shop":
+            here.offer_mutations = self.draw_mutations(here)
+        elif here.kind == "boss":
+            here.consumable_offer = self.draw_consumables(CONSUMABLE_SHELF)
+
+    def clean_room(self, room: Room) -> dict:
+        """A RoomCleaner on a room that has not fought: `C_Room.AfterFight(true)`
+        with no fight, and the room's experience to the squad.
+
+        `CalculateExperience` reads the room's enemies; the pack is drawn the
+        way a fight would draw it and nobody fights it.
+        """
+        enemies = self.enemy_specs(room.kind)
+        exp = sum(s.exp_reward for s in enemies)
+        levels = self.gain_experience(exp)
+        return {"won": True, "cleaned": True, "exp": exp, "levels": levels}
+
     # -- fights ------------------------------------------------------------
     def fight(self, room: Room) -> dict:
-        specs = self.specs()
+        # An AntiHunger used before this fight holds the hunger penalties off
+        # for it: `M_AntiHungerStatus` wraps each unit's hunger status until
+        # the fight ends. Temporary allies from a Reserve fight once and go.
+        no_hunger = bool(self.armed.pop("anti_hunger", False))
+        allies = self.armed.pop("allies", [])
+        specs = self.specs(no_hunger=no_hunger)
         enemies = self.enemy_specs(room.kind)
         if not specs:
             self.finished, self.won = True, False
@@ -1496,6 +1787,10 @@ class RunState:
         # so there is nowhere to put unit 50 on a 49-cell layout. Without this,
         # bodies stack on one cell and buying humans is unboundedly good.
         fielded, _ = self.split_by_zone(layout, specs)
+        # Summoned allies take the cells after the humans, while there are any.
+        n_humans = len(fielded)
+        room_left = max(0, (len(layout.zone("p")) or 1) - n_humans)
+        fielded = fielded + self.ally_specs(allies)[:room_left]
         if self.placement_policy is not None:
             cells = self.placement_policy(grid, layout, fielded, rng, team1)
             team0 = place_at(grid, fielded, cells, team=0)
@@ -1506,10 +1801,10 @@ class RunState:
             from .mutations import apply_to_agents
             apply_to_agents(team0, self.mutations, rng)
         # Wounds carry over: each unit starts the fight with the share of its
-        # health it ended the last one with. `team0` is the squad's first
-        # `len(team0)` humans, in order.
+        # health it ended the last one with. `team0` starts with the squad's
+        # first `n_humans` humans, in order; allies arrive whole.
         if self.carry_hp:
-            for agent, human in zip(team0, self.squad):
+            for agent, human in zip(team0[:n_humans], self.squad):
                 agent.hp = agent.max_hp * human.hp
         seed = rng.randrange(1 << 30)
         b = Battle(grid, team0 + team1, seed=seed, tables=self.tables,
@@ -1527,25 +1822,42 @@ class RunState:
                         survivors=fr["survivors"], total_damage=fr["damage"],
                         healing={0: 0.0, 1: 0.0}, casts={},
                     )
-                    return self._after_fight(team0, team1, res)
+                    return self._after_fight(team0[:n_humans], team1, res, room)
                 except UnsupportedFight:
                     # outside the envelope: rebuild with trees and use the oracle
                     b = Battle(grid, team0 + team1, seed=seed, tables=self.tables)
         res = b.run()
 
-        return self._after_fight(team0, team1, res)
+        return self._after_fight(team0[:n_humans], team1, res, room)
+
+    def ally_specs(self, allies: list) -> list:
+        """The temporary units a Reserve summoned, as specs, `(class, level)`."""
+        if not allies:
+            return []
+        ubc = units_by_class(self.tables)
+        meta = self.tables["Meta"]["Classes"]
+        out = []
+        for cls, level in allies:
+            if cls in ubc:
+                size = int((meta.get(cls) or {}).get("Size") or 1)
+                out.append(build_unit(ubc, cls, int(level), name=cls, size=size))
+        return out
 
     def split_by_zone(self, layout, specs: list) -> tuple[list, list]:
         """Split the squad into who fits on the layout and who sits it out."""
         room = len(layout.zone("p")) or 1
         return specs[:room], specs[room:]
 
-    def _after_fight(self, team0, team1, res):
+    def _after_fight(self, team0, team1, res, room: Room | None = None):
         # survivors carry over; the dead are lost. Anyone who could not be
-        # fielded is untouched -- they were not in the room.
+        # fielded is untouched -- they were not in the room. `team0` is the
+        # humans only: summoned allies were removed before this was called.
         survivors = {id(a) for a in team0 if a.alive}
         kept = [h for h, a in zip(self.squad, team0) if id(a) in survivors]
         reserve = list(self.squad[len(team0):])
+        # The dead stay in the room as corpses, for a Resurrection.
+        if room is not None:
+            room.corpses += [h for h, a in zip(self.squad, team0) if id(a) not in survivors]
         # What each survivor walks out with. Measured against the unit's own
         # health rather than `max_hp`, which carries whatever buffs were still
         # running when the fight ended; they end with it, and the game clamps
@@ -1579,6 +1891,7 @@ class RunState:
             self.finished, self.won = True, True
             return
         self.level += 1
+        self.level_won = False
         self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip)
         self.room = self.rooms.start
         self.rooms.set_current(self.room)
