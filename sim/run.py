@@ -3,8 +3,8 @@
 A run is 12 levels. Each level is generated from its own `Levels.json` row --
 `MinRooms`..`MaxRooms` rooms, `ItemShops` item shops, `FoodShops` food shops,
 `Shrines` shrines, see `sim/mapgen.py`. You move between orthogonally adjacent
-rooms, fight what is in them, spend gold in shops and food to keep moving, and
-finish at the boss. The shipped fixed map in `Rooms.json` is still parsed, by
+rooms or teleport between portal rooms, fight what is in them, spend gold in
+shops and food to keep moving, and finish at the boss. The shipped fixed map in `Rooms.json` is still parsed, by
 `RoomMap.from_table`, and is what every level used to reuse.
 
 This is the layer the hierarchical agent acts on: which room to move to, what to
@@ -137,6 +137,16 @@ class Room:
     # Whether this room has already refilled the shop's empty slots. Set on
     # arrival so that walking out and back in is not a free reroll.
     refilled: bool = False
+    # Other kinds the same room is as well. `RoomType` is a flags enum, and the
+    # start room of every level after the first is `Start | ItemShop`: it keeps
+    # the start's place in the economy (`CalculatePower` tests `Start` first and
+    # pays it nothing) and sells items. `kind` is the role the economy and the
+    # pack chooser read; `extras` is what else the room offers.
+    extras: tuple = ()
+
+    def has(self, kind: str) -> bool:
+        """Whether the room is a `kind`, as its main role or as an extra one."""
+        return self.kind == kind or kind in self.extras
 
 
 class RoomMap:
@@ -156,6 +166,7 @@ class RoomMap:
         self.start = start
         self.boss = boss
         self.portals: list[str] = list(portals or [])
+        self._portal_set = frozenset(self.portals)
         if self.boss in self.rooms:
             self.rooms[self.boss].kind = "boss"
         if self.start in self.rooms:
@@ -184,6 +195,9 @@ class RoomMap:
         self.to_boss = self._distances(self.boss)
         self.current: str | None = None
         self.known_to_boss: dict[str, int] = {}
+        # The portals on the player's map, in the order they came onto it. See
+        # `revealed_portals`.
+        self._seen_portals: list[str] = []
 
     @classmethod
     def from_table(cls, rooms_table: dict) -> "RoomMap":
@@ -202,14 +216,17 @@ class RoomMap:
                    rooms_table.get("Portals"))
 
     @classmethod
-    def generate(cls, level_row: dict, rng: random.Random) -> "RoomMap":
+    def generate(cls, level_row: dict, rng: random.Random,
+                 chip: str = "default") -> "RoomMap":
         """The level the row asks for: see `sim/mapgen.py` for what is the
         game's and what is not."""
         from .mapgen import generate as _generate
-        spec = _generate(level_row, rng)
-        rooms = {rid: Room(id=rid, row=r, col=c, kind=kind)
+        spec = _generate(level_row, rng, chip)
+        extras = spec.get("extras") or {}
+        rooms = {rid: Room(id=rid, row=r, col=c, kind=kind,
+                           extras=tuple(extras.get(rid, ())))
                  for rid, (r, c, kind) in spec["rooms"].items()}
-        return cls(rooms, spec["start"], spec["boss"])
+        return cls(rooms, spec["start"], spec["boss"], spec.get("portals"))
 
     def _distances(self, source: str, known_only: bool = False) -> dict[str, int]:
         import collections
@@ -229,8 +246,34 @@ class RoomMap:
         return out
 
     def neighbours(self, rid: str) -> list[str]:
-        """Orthogonally adjacent rooms, plus portal-to-portal links."""
+        """Orthogonally adjacent rooms, plus portal-to-portal links.
+
+        What the distances are measured over. A move goes through a door, see
+        `doors`, and a teleport between portals, see `teleports`.
+        """
         return self._adj[rid]
+
+    def doors(self, rid: str) -> list[str]:
+        """The rooms one door away, which is all a move can reach."""
+        return self._ortho[rid]
+
+    def is_portal(self, rid: str) -> bool:
+        return rid in self._portal_set
+
+    def teleports(self, rid: str) -> list[str]:
+        """Where a teleport from `rid` can land: `C_Room.CanBeTeleportedTo`.
+
+        Read off the binary, every room the squad is not standing in, whose
+        state is not `UNKNOWN`, and that is a portal, from a room that is itself
+        a portal and whose fight has a result. A room's fight always has one by
+        the time the squad stands in it here (`AfterFight` writes `2 * win - 1`,
+        so a lost fight counts too). A target only has to be on the map, not
+        visited: teleporting into a room nobody has entered fights it.
+        """
+        if rid not in self._portal_set:
+            return []
+        return [p for p in self.portals
+                if p != rid and self.rooms[p].state != UNKNOWN]
 
     # -- fog of war --------------------------------------------------------
     def set_current(self, rid: str) -> None:
@@ -274,6 +317,20 @@ class RoomMap:
         methods above, and `_encode` asks for these several times a step.
         """
         self.known_to_boss = self._distances(self.boss, known_only=True)
+        fresh = sorted(p for p in self.portals
+                       if self.rooms[p].state != UNKNOWN and p not in self._seen_portals)
+        self._seen_portals += fresh
+
+    def revealed_portals(self) -> list[str]:
+        """The portals on the player's map, in the order they were revealed.
+
+        Not sorted by name: a portal's place in the whole level's sorted list
+        says how many portals the squad has not found yet sort before it, which
+        no player can know. The order a room came onto the map is fixed once it
+        has, since a revealed room is never hidden again, so an index into this
+        names one room for the rest of the level.
+        """
+        return list(self._seen_portals)
 
     def known(self) -> list[str]:
         """The rooms that are on the player's map, in any state but `UNKNOWN`."""
@@ -535,17 +592,21 @@ class RunState:
     _pack_cache: dict = field(default_factory=dict)
     # The cells the chosen squad opens in, one list per unit.
     start_cells: list = field(default_factory=list)
+    # The chip `load_ruleset` was given. The tables do not carry it, and level
+    # generation reads it: `ChoosePortals` forces a start portal on different
+    # levels under `shortpvp`.
+    chip: str = "default"
 
     # -- setup -------------------------------------------------------------
     @classmethod
     def new(cls, tables: dict, seed: int = 0,
-            squad_name: str | None = None) -> "RunState":
+            squad_name: str | None = None, chip: str = "default") -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
         squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
-                 food=Food.from_game(game), squad=squad, rng=rng)
-        st.rooms = RoomMap.generate(st.level_row, rng)
+                 food=Food.from_game(game), squad=squad, rng=rng, chip=chip)
+        st.rooms = RoomMap.generate(st.level_row, rng, chip)
         st.room = st.rooms.start
         st.rooms.set_current(st.room)
         # Level 1 opens the same way every later level does: see `next_level`.
@@ -1064,7 +1125,16 @@ class RunState:
         acts: list[tuple] = []
         here = self.rooms.rooms[self.room]
         if self.food.can_move(self.feed_cost):
-            acts += [("move", rid) for rid in self.rooms.neighbours(self.room)]
+            acts += [("move", rid) for rid in self.rooms.doors(self.room)]
+        # A teleport is not a move and costs no food. `C_Food.Move` has two
+        # callers, the walk through a door (`RoomTransition.OnTransitBlocked`)
+        # and `C_Rooms.InstantMove`; the minimap click that teleports
+        # (`V_MinimapRoom.OnLeftClick` -> `C_Rooms.TeleportTo`) reaches neither,
+        # and `M_Food.canMove` is read on the door path only. So a starving
+        # squad standing on a portal can still teleport. This used to be a
+        # portal "move" that charged a feeding, on generated maps that had no
+        # portals at all.
+        acts += [("teleport", rid) for rid in self.rooms.teleports(self.room)]
         shop = self._shop_config
         self.ensure_stock(here)
         # Nothing in a room is usable until its fight is won: `C_Room.AfterFight`
@@ -1074,7 +1144,7 @@ class RunState:
         # (`InactiveItemShop = 8196` is `Inactive | ItemShop`). A room the squad
         # walked into and did not win therefore offers nothing but a way out.
         open_ = here.cleared
-        if open_ and here.kind == "item_shop":
+        if open_ and here.has("item_shop"):
             # One action per slot, so the slot index is stable and the policy
             # can learn "the expensive one" rather than "an item".
             for i, name in enumerate(self.offer):
@@ -1112,7 +1182,7 @@ class RunState:
         # against `M_ItemShop.humanCost` (a flat 2, never raised after a sale).
         # This was unrestricted here, and a trained agent found it: 73% of its
         # actions were `buy_human` and one run ended with 277 humans.
-        if open_ and here.kind == "item_shop" and self.gold >= float(shop.get("HumanCost") or 2):
+        if open_ and here.has("item_shop") and self.gold >= float(shop.get("HumanCost") or 2):
             acts.append(("buy_human", None))
         if len(self.squad) > 1 and self.food.per_sacrifice:
             acts.append(("sacrifice", None))
@@ -1127,8 +1197,12 @@ class RunState:
         shop = self._shop_config
         result: dict = {"action": kind}
 
-        if kind == "move":
-            result["food"] = self.food.spend_move(self.feed_cost)
+        if kind in ("move", "teleport"):
+            # `C_Rooms.TeleportTo` runs `SetCurrent` and `C_Room.AfterMoveInto`
+            # exactly as a move does, so arriving is the same either way. Only
+            # the door walk feeds the squad.
+            if kind == "move":
+                result["food"] = self.food.spend_move(self.feed_cost)
             self.room = arg
             # The reveal happens on entry, before the fight, so the neighbours
             # of a room the squad dies in are still uncovered.
@@ -1220,7 +1294,7 @@ class RunState:
         elif kind == "buy_human":
             here = self.rooms.rooms[self.room]
             cost = float(shop.get("HumanCost") or 2)
-            if here.kind == "item_shop" and self.gold >= cost:
+            if here.has("item_shop") and self.gold >= cost:
                 self.gold -= cost
                 self.squad.append(Human(item=None))
         elif kind == "sacrifice":
@@ -1254,7 +1328,7 @@ class RunState:
 
         if not self.squad:
             self.finished, self.won = True, False
-        elif not self.legal_actions():
+        elif self.stranded():
             # Soft-locked: no food, no moves in reserve, and too small a squad
             # to sacrifice from, so `M_Food.canMove` is false and the run
             # cannot continue. Ending it here is what stops a stranded run from
@@ -1265,9 +1339,33 @@ class RunState:
             self.finished, self.won = True, False
         return result
 
+    def stranded(self) -> bool:
+        """Whether nothing the run can still do leads anywhere.
+
+        No legal action at all, or only teleports, none of which lands in a room
+        nobody has entered or in a food shop holding a pack the purse covers. A
+        teleport is free, so without the second clause a starving squad on a
+        portal could hop between cleared rooms for ever, and an agent would
+        learn to do that rather than take the loss.
+        """
+        legal = self.legal_actions()
+        if any(a[0] != "teleport" for a in legal):
+            return False
+        _, costs = self.food_packs
+        for _, rid in legal:
+            room = self.rooms.rooms[rid]
+            if not room.cleared:
+                return False
+            if room.kind == "food_shop":
+                self.ensure_stock(room)
+                if any(held > 0 and self.gold >= costs[i]
+                       for i, held in enumerate(room.food_stock or [])):
+                    return False
+        return True
+
     def ensure_stock(self, room: Room) -> None:
         """Per-room stock, plus the shop's one free refill for this room."""
-        if room.kind == "item_shop" and not room.refilled:
+        if room.has("item_shop") and not room.refilled:
             room.refilled = True
             self.refill_offer()
         if room.kind == "mutation_shop":
@@ -1384,7 +1482,7 @@ class RunState:
             self.finished, self.won = True, True
             return
         self.level += 1
-        self.rooms = RoomMap.generate(self.level_row, self.rng)
+        self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip)
         self.room = self.rooms.start
         self.rooms.set_current(self.room)
         # `C_BossVisionMutation.OnNewLevel` fires here, on the new level, and

@@ -1421,7 +1421,7 @@ whose values we could not recover, and lists a lot we never implemented:
 | the shop or shrine appears only after the fight is won | **confirmed**, `AfterFight` calls `M_Shop.set_open` |
 | an event on entering every level | **confirmed**, `C_Levels.StartDialog` on the level change |
 | no fight in the first room of a level | **confirmed and data-driven**, `FightInFirst` |
-| that first room is a shop | not shown either way |
+| that first room is a shop | **confirmed from level 2 on**: `ChooseStartRoom` makes it `Start | ItemShop` (2026-10-29) |
 | quest rooms have no fight | **likely**: there is no Quest pack in `EnemyPacks.json`, but not proven |
 
 ## The run does not start from `Game.Team.Packs`
@@ -1518,6 +1518,10 @@ other, and `from_table` reads the shipped `Portals` list. But `sim/mapgen.py`
 sets `portalsCount` to 0 and places none, so **the fixed map has three portals
 and every level a run actually plays has zero**. The `portal` move exists in the
 action space and is never legal.
+
+**Superseded 2026-10-29.** `portalsCount` is written, as `num / 7 + 1`, and
+generated levels now carry two to four portals; see "Portals, and
+`PositionRooms` read end to end" at the end of this file.
 
 ### The vision mutation is `BossVision`, and it reveals the boss
 
@@ -1734,3 +1738,169 @@ These are different agents, not different implementations of one agent, so the
 choice wants measuring rather than picking. `obs_dim` moves either way, so it
 gets the `--blind-*` treatment: hold the replacement features at zero and keep
 them in the vector.
+
+## Portals, and `PositionRooms` read end to end (2026-10-29)
+
+Portals were next in Batch 1, with `portalsCount` noted as never written in the
+Default path. It is written. Finding the write led through the rest of
+`LevelGenerator.PositionRooms`, and four of its five steps turned out to differ
+from the port.
+
+### The parameters
+
+`C_Rooms.Generate` keeps its `GenerationParams` at `rsp + 0x30` (it invokes the
+`BeforeGenerationDelegate` with `lea rdx, [rsp + 0x30]`), so every field is a
+fixed stack slot and its writes can be read off directly:
+
+    field               slot         value
+    portalsCount        rsp + 0x54   num / 7 + 1     0x92492493, add, sar 2: a signed divide by 7
+    minPortalDistance   rsp + 0x70   3               a literal
+    minFinishDistance   rsp + 0x48   IC_GameMode.GetRoomsMinFinishDistance(num)
+    maxDeadEnds         rsp + 0x44   0               zeroed by a movups over rsp + 0x40, never written
+
+`GetRoomsMinFinishDistance` is `IC_GameMode` slot 4. `C_DefaultMode` implements
+it as `num / 6 + 2` (`0x2aaaaaab` is a divide by 6) and `C_ArcadeMode` as
+`num - 1`. All three were in `sim/assumptions.py` as unrecoverable. They are set
+after the delegate runs, so the `RoomCount` mutation's extra rooms feed into
+them. `maxDeadEnds` stays open, with its obvious writers ruled out: the one
+subscriber to the delegate, `C_RoomCountMutation.OnBeforeGeneration`, adds to
+`num` and the shop counts and writes nothing else.
+
+When `LevelGenerator.Generate` returns false, `C_Rooms.Generate` disposes of it
+and builds another with the same parameters, with no cap. `Generate` returns
+what `PositionRooms` returns, so a placement step that finds nothing rebuilds
+the level. The port used to relax the predicate instead.
+
+### The five steps
+
+Every chooser draws uniformly from the rooms that qualify. `RND.Element` is
+inlined as `list[rnd.Next(list.Count)]`, so it shows up as a virtual call on
+the generator's `RND` followed by an indexed load.
+
+1. `ChooseFinishRoom`: untyped, not an articulation point, a dead end or exactly
+   two neighbours, `maxDistance >= minFinishDistance`. The port took the best of
+   these by average distance.
+2. `ChooseStartRoom` over `CouldBeStartRoom(room, d)`: untyped, not an
+   articulation point, at least `d` from the finish, with `d` counting down from
+   `minFinishDistance` until a room qualifies. The port took the furthest room.
+   On every level after the first the start is `Start | ItemShop` (`or eax, 5`),
+   so each later level opens in an item shop. `CalculatePower` tests `Start`
+   before `ItemShop` and pays the start nothing, and its weight sum is built from
+   the row's counts, so this shop adds nothing to the level's gold or Power.
+3. `ChooseDiversePositions(type, count, threshold, null)` once per shop type,
+   the type with more rooms first and item shops on a tie. Each draw is at least
+   `threshold` from the rooms this call has already drawn; the start, the boss
+   and the other shop type are not measured against. A draw that finds nothing
+   discards the partial set, and after ten of those the threshold drops by one.
+   The thresholds are `num >= 18 ? num / 6 : 2` for item shops and
+   `num >= 16 ? num / 4 : 3` for food shops. The port started at the map's whole
+   width and measured against every room placed so far.
+4. `ChoosePortals(portalsCount, minPortalDistance)`, only when
+   `portalsCount > 1` (with a secret room the game retries at shrinking
+   distances and needs `secretRoomCount + 2`; secret rooms are not generated).
+   The candidates are dead ends that may carry a portal (`roomTypesWithNoPortal
+   = 34307` is `Start | Boss | Quest | QuestExtra | Secret`, so shops may),
+   topped up to `2 * portalsCount` from the room list, sorted by mean distance
+   to each other, and taken greedily at least `minPortalDistance` apart. Then one
+   more goes on the most central room that clears the same distance, and if
+   fewer than two land the step is undone. On Default levels 5 and 9 (levels 3,
+   5 and 9 on a `shortpvp` chip) the start room is made a portal first and
+   counts as one of them. The three comparators were read too:
+   `maxAverageDistance` and `maxTmpValue` sort descending, `minAverageDistance`
+   ascending.
+5. `ChooseTreasureRooms`, over the rooms typed exactly `Default` or `Portal`:
+   `StatShops` get `TalentShop` (`0x1040`), `RerollShrines` `MutationShop`
+   (`0x140`), `Shrines` the shrine. The port had this one right.
+
+Over 300 seeds a level, no shipped row fails placement once, and the portal
+counts come out as: level 1 (7 rooms) always exactly 2, levels 2 to 11 mostly 3
+with a sixth to a third at 4 where the room count reaches 14, level 12 mostly 4.
+The walk from start to boss shortens from 4.2 to 8.3 rooms under the old
+placement to 3.4 to 5.7, before any teleport.
+
+### Teleporting
+
+`C_Room.CanBeTeleportedTo` is the whole rule: the target's state is not
+`UNKNOWN`, it is not the current room, the current room's `fightResult` is set,
+and both rooms carry the `Portal` bit. A target only has to be on the map, so a
+teleport can land in a room nobody has entered. `AfterFight` writes
+`2 * win - 1`, so a lost fight counts as set.
+
+A teleport costs nothing. `C_Food.Move` has two callers, the door walk
+(`RoomTransition.OnTransitBlocked`) and `C_Rooms.InstantMove`, and the minimap
+click (`V_MinimapRoom.OnLeftClick`, which calls `C_Rooms.TeleportTo`) reaches
+neither. `M_Food.canMove` is read on the door path only, so a starving squad on
+a portal can still teleport. `TeleportTo` runs `SetCurrent` and
+`C_Room.AfterMoveInto` as a move does, so arriving reveals the room's doors and
+fights a room that has not been fought.
+
+The minimap marks portals in every revealed state (`teleportsByState` has
+`unexplored-teleport`, `explored-teleport` and `current-teleport`), so the
+observation may say which revealed rooms are portals.
+
+### In the sim
+
+- `sim/mapgen.py` runs the five steps in the game's order and regenerates on a
+  failed step. `RoomMap.portals` is now filled on generated levels, and a room
+  carries `extras` for a second kind (`Room.has`).
+- `RunState`: a move goes through a door (`RoomMap.doors`); a teleport is its
+  own action, `("teleport", rid)`, free, from `RoomMap.teleports`. A portal link
+  used to be a move that charged a feeding. `stranded()` replaces "no legal
+  action": a run whose only actions are teleports into cleared rooms with
+  nothing to buy is lost, since otherwise free teleports would let a starving
+  squad (and an agent) put off a loss for ever.
+- `rl/env.py`: four teleport slots after the four directions, in the order the
+  portals were revealed (`RoomMap.revealed_portals`). Ordering by name would
+  have leaked: a revealed portal's place among all of a level's portals says how
+  many unseen ones sort before it. Each door neighbour and slot has a portal
+  bit, the room kinds are multi-hot, and a flag says whether the squad stands on
+  a portal. `obs_dim` 210 to 258, actions 33 to 36, so every checkpoint is
+  stale.
+- `rl/heuristic.py` teleports only to an unentered room, to a room strictly
+  nearer the known boss, or, when the larder cannot pay for a door, to a stocked
+  food shop. On a tie a door wins.
+
+The no-leak check now also flips whether each hidden room is a portal, and has
+its own positive control: flipping a visible neighbour moves the encoding.
+
+### What it is worth
+
+`tools/portal_cost.py`, the heuristic over seeds 30,000 to 30,239 on the Rust
+core:
+
+    faithful       3.663  (sd 0.903)   teleports 0.80 a run, in 125 of 240 runs
+    no portals     3.425  (sd 1.006)   the same levels with the portals taken off
+    old placement  3.425  (sd 1.097)   sim/mapgen.py as of da2e518
+
+    portals, paired                 +0.237 [+0.115, +0.360], better on 55, worse on 23
+    faithful against old, by seed   +0.237 [+0.057, +0.418]
+
+The Python oracle over the first 120 of those seeds agrees:
+
+    faithful       3.675  (sd 0.950)   teleports 0.81 a run, in 71 of 120 runs
+    no portals     3.450  (sd 0.973)
+    old placement  3.408  (sd 1.061)
+
+    portals, paired                 +0.225 [+0.045, +0.405], better on 28, worse on 13
+    faithful against old, by seed   +0.267 [+0.012, +0.522]
+
+`ChoosePortals` draws nothing from the random stream, so the first pair differs
+in the portals and nothing else until the first teleport. The rest of the port
+(uniform draws, the shop spreads, a shop at every later start) nets to about
+zero for this heuristic: 0.000 on the core and +0.042 on the oracle, unpaired.
+This is a check that the features change something, not a baseline; Batch 1 is
+still open.
+
+### Read and not modelled
+
+- `ChooseFinishRoom` makes the boss `Boss | ConsumableShop` on every level but
+  the last (`or edx, 0x4002`) and the final boss `Boss | FinalBoss`, plus an item
+  shop unless the chip is `hard`. `C_Room.InitShop` builds its controller from
+  the class of the room's shop model (`M_ConsumableShop` gives a
+  `C_ConsumableShop`), so whether that bit produces a consumable shop is decided
+  where the models are made, which is unread (`C_Rooms.FromGeneratedData` is the
+  likely place). **The note above that consumables cannot be reached in Default
+  play rested on `InitShop` alone and is open again.**
+- With `longRunReward` set, the level-1 start room is a `ConsumableShop` too.
+- The quest choosers between the start and the shops, the secret-room branch of
+  the portal step, and Arcade's own predicates for the finish and the start.

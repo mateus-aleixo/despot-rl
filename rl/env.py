@@ -7,10 +7,13 @@ level, see `rl/placement.py`). There is no `feed`: moving feeds the team when
 the larder covers it, so food is the price of a room rather than a decision.
 
 The action space is fixed and masked rather than variable-length. A move is a
-**direction** -- north, south, east, west, or through a portal -- because the map
-is generated per level from that level's own room count (`sim/mapgen.py`), so
-room ids are not stable across levels and a per-room action index would mean a
-different room on every one of them. `action_mask()` marks which moves are
+**direction** -- north, south, east, west -- because the map is generated per
+level from that level's own room count (`sim/mapgen.py`), so room ids are not
+stable across levels and a per-room action index would mean a different room on
+every one of them. A teleport is one action per **portal slot**: the level's
+portals in the order they came onto the map, so slot 2 is the same room for the
+rest of the level, and the slot the squad stands in is never legal.
+`action_mask()` marks which moves are
 currently legal, and stepping an illegal action is a no-op with a small penalty
 rather than an exception, so a policy that has not learned masking yet still
 trains.
@@ -35,6 +38,7 @@ except ImportError:  # the env is usable without gymnasium installed
     spaces = None
 
 from sim.data import load_ruleset
+from sim.mapgen import portals_count
 from sim.run import (EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
                      squad_names)
 
@@ -60,11 +64,17 @@ NON_MOVE_ACTIONS = (tuple(f"buy_item_{i}" for i in range(SHOP_SLOTS))
 ROOM_KINDS = ("start", "fight", "boss", "item_shop", "food_shop", "mutation",
               "mutation_shop", "talent_shop", "empty")
 
-# A move is a direction, not a room. (row, col) deltas, then the portal, which
-# is not a direction but is a move: `RoomMap.neighbours` links portal rooms to
-# each other, and the shipped fixed map has three of them.
+# A move is a direction, not a room: (row, col) deltas.
 MOVES = (("north", (-1, 0)), ("south", (1, 0)),
-         ("west", (0, -1)), ("east", (0, 1)), ("portal", None))
+         ("west", (0, -1)), ("east", (0, 1)))
+
+# One teleport action per portal on the level. `ChoosePortals` places
+# `portalsCount = num / 7 + 1` and then one more in the middle, so a Default
+# level holds at most `MaxRooms / 7 + 2`: four at 18 rooms. Checked against the
+# level rows in `__init__` rather than trusted.
+TELEPORT_SLOTS = 4
+MOVE_NAMES = tuple(name for name, _ in MOVES) + tuple(
+    f"teleport_{i}" for i in range(TELEPORT_SLOTS))
 
 # Player classes, for the squad-composition part of the observation.
 PLAYER_CLASSES = ("Warrior", "Tank", "Shooter", "Thrower", "Medic", "Mage",
@@ -153,8 +163,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self._mask_cache: np.ndarray | None = None
 
         probe = RunState.new(self.tables, seed=0)
-        self.n_moves = len(MOVES)
+        self.n_moves = len(MOVE_NAMES)
+        self.move_names = MOVE_NAMES
         self.n_actions = self.n_moves + len(NON_MOVE_ACTIONS)
+        most = max(portals_count(int(r.get("MaxRooms") or r.get("MinRooms") or 7)) + 1
+                   for r in self.tables["Levels"])
+        if most > TELEPORT_SLOTS:
+            raise ValueError(f"a level can hold {most} portals, "
+                             f"the action space has {TELEPORT_SLOTS}")
         widest = max(r["Quantity"] for r in self.tables["ItemShopData"])
         if widest > SHOP_SLOTS:
             raise ValueError(f"ItemShopData sells up to {widest} slots, "
@@ -234,7 +250,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
 
         # what is on the shelf: quality and whether it is affordable, per slot
         shelf = np.zeros(2 * SHOP_SLOTS, dtype=np.float32)
-        if st.rooms.rooms[st.room].kind == "item_shop":
+        if st.rooms.rooms[st.room].has("item_shop"):
             for i, name in enumerate(st.offer[:SHOP_SLOTS]):
                 if name is None:
                     continue
@@ -308,12 +324,12 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                 0.0 if self.blind_shrine
                 else 1.0 if (room_now.stock or 0) > 0 else 0.0)
 
-        # The room the squad is standing in, one-hot over the kinds. With a
-        # per-level map there is no stable per-room index to carry this, and the
-        # policy still has to tell a shop from a fight.
-        here_kind = np.zeros(len(ROOM_KINDS), dtype=np.float32)
-        if st.rooms.rooms[st.room].kind in ROOM_KINDS:
-            here_kind[ROOM_KINDS.index(st.rooms.rooms[st.room].kind)] = 1.0
+        # The room the squad is standing in, over the kinds. With a per-level
+        # map there is no stable per-room index to carry this, and the policy
+        # still has to tell a shop from a fight. Several bits can be set, since
+        # `RoomType` is a flags enum: the start of every level after the first
+        # is an item shop as well.
+        here_kind = self._kinds(st.rooms.rooms[st.room])
 
         # What lies one step away, per direction: whether there is a room there,
         # whether it is cleared, whether it has been walked into at all, whether
@@ -333,7 +349,15 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # Every door neighbour of the room the squad stands in was revealed by
         # `set_current` on entry, so these are always at least `UNEXPLORED` and
         # reading them leaks nothing.
-        per = 4 + len(ROOM_KINDS)
+        #
+        # The teleport slots describe the level's portals the same way, and are
+        # filled for every portal on the map, not only while the squad stands
+        # on one, because the minimap shows them: `V_MinimapRoom` carries a
+        # `teleport` image and `teleportsByState` has an `unexplored-teleport`
+        # and an `explored-teleport` sprite. The mask says when they are legal.
+        # Whether a room is a portal is the fifth bit, for a door neighbour as
+        # much as for a slot.
+        per = 5 + len(ROOM_KINDS)
         around = np.zeros(self.n_moves * per, dtype=np.float32)
         known = st.rooms.known_to_boss
         far = max(1, max(known.values(), default=1))
@@ -351,8 +375,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             around[base + 2] = 1.0 if room.state == UNEXPLORED else 0.0
             around[base + 3] = (1.0 if known and known.get(rid, far) < d_here
                                 else 0.0)
-            if room.kind in ROOM_KINDS:
-                around[base + 4 + ROOM_KINDS.index(room.kind)] = 1.0
+            around[base + 4] = 1.0 if st.rooms.is_portal(rid) else 0.0
+            around[base + 5:base + per] = self._kinds(room)
 
         # and where this room sits in the level **as far as it has been seen**.
         # Every one of these used to be computed over `st.rooms.rooms`, the
@@ -382,6 +406,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # with the level size hidden it is the only sense of "how much is
             # left" the policy has.
             sum(1 for r in seen if r.state == UNEXPLORED) / max(1, len(seen)),
+            # Standing on a portal, which is what makes the teleport slots
+            # legal. The `current-teleport` sprite shows it.
+            1.0 if st.rooms.is_portal(st.room) else 0.0,
         ]
 
         # Which squad this run is playing. The policy has to know: the eight
@@ -399,30 +426,35 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             here_kind, shelf, larder, shelf_m, around, who,
         ]).astype(np.float32)
 
-    def _move_targets(self, st: RunState) -> list:
-        """The room each move leads to from where the squad stands, or None.
+    @staticmethod
+    def _kinds(room) -> np.ndarray:
+        """`room`'s kinds as bits over `ROOM_KINDS`, extras included."""
+        out = np.zeros(len(ROOM_KINDS), dtype=np.float32)
+        for i, kind in enumerate(ROOM_KINDS):
+            if room.has(kind):
+                out[i] = 1.0
+        return out
 
-        A portal move goes to the linked portal room nearest the boss, so the
-        action still means one thing when a room links to more than one.
+    def _move_targets(self, st: RunState) -> list:
+        """The room each move slot leads to from where the squad stands, or None.
+
+        The four directions, then the teleport slots. A teleport slot indexes
+        `RoomMap.revealed_portals`, so it names one room for the rest of the
+        level and holds nothing about portals not yet found; it is empty for the
+        room the squad stands in. Whether the slot is legal right now (the squad
+        has to be standing on a portal) is the mask's business.
         """
         here = st.rooms.rooms[st.room]
         by_pos = {(r.row, r.col): rid for rid, r in st.rooms.rooms.items()}
-        near = set(st.rooms.neighbours(st.room))
-        known = st.rooms.known_to_boss
+        near = set(st.rooms.doors(st.room))
         out = []
         for _, delta in MOVES:
-            if delta is None:
-                # Nearest the boss among the linked portals, over the revealed
-                # subgraph rather than the whole map. Before the boss is found
-                # every link scores the same and the tie breaks on room id,
-                # which is stable and is the point: the action still means one
-                # thing when a room links to more than one.
-                links = [p for p in st.rooms.portals if p != st.room and p in near]
-                out.append(min(links, key=lambda p: known.get(p, 99))
-                           if links else None)
-                continue
             rid = by_pos.get((here.row + delta[0], here.col + delta[1]))
             out.append(rid if rid in near else None)
+        slots = st.rooms.revealed_portals()
+        for i in range(TELEPORT_SLOTS):
+            rid = slots[i] if i < len(slots) else None
+            out.append(rid if rid != st.room else None)
         return out
 
     # -- reward shaping ----------------------------------------------------
@@ -464,7 +496,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # A direction only names a room once you know where you stand, so
             # this decodes against the live state rather than a fixed table.
             target = self._move_targets(self.state)[index] if self.state else None
-            return ("move", target)
+            return ("move" if index < len(MOVES) else "teleport", target)
         name = NON_MOVE_ACTIONS[index - self.n_moves]
         if name.startswith("buy_item_"):
             # (slot, target); a target of None lets the run layer choose.
@@ -478,9 +510,15 @@ class DespotRunEnv(gym.Env if gym is not None else object):
     def _index(self, action) -> int | None:
         """The action's fixed index, or None if it has none."""
         kind, arg = action
-        if kind == "move":
+        if kind in ("move", "teleport"):
+            # A portal room can be a door neighbour too, and then it sits in
+            # both halves of the list: a move costs a feeding and a teleport
+            # does not, so the kind picks the half.
             targets = self._move_targets(self.state)
-            return targets.index(arg) if arg in targets else None
+            half = (targets[:len(MOVES)] if kind == "move"
+                    else targets[len(MOVES):])
+            offset = 0 if kind == "move" else len(MOVES)
+            return offset + half.index(arg) if arg in half else None
         if kind == "buy_item":
             slot = arg[0] if isinstance(arg, tuple) else int(arg or 0)
             if slot >= SHOP_SLOTS:

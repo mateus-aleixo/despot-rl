@@ -1321,12 +1321,165 @@ for _seed in range(30):
 check("the boss room is a dead end or has two neighbours", not _shape, f"{_shape[:4]}")
 check("the boss room is not an articulation point", not _arts, f"{_arts[:4]}")
 
-# the start should be the far end of the map from the boss, which is the
-# strongest reading of `LevelGenerator`'s `minFinishDistance`
-_m = RoomMap.generate(_STRICT["Levels"][3], random.Random(4))
-check("the start is the furthest room from the boss",
-      _m.to_boss[_m.start] == max(_m.to_boss.values()),
-      f"start {_m.to_boss[_m.start]} of {max(_m.to_boss.values())}")
+# `PositionRooms` draws the finish and the start uniformly from the rooms that
+# qualify. This used to check that the start was the furthest room from the
+# boss, which is what the port did until `ChooseStartRoom` was read: it takes
+# `RND.Element` of the rooms at least `d` from the finish, `d` counting down
+# from `minFinishDistance = num / 6 + 2` until one qualifies.
+from sim.mapgen import (MIN_PORTAL_DISTANCE, Generator, min_finish_distance,
+                        portals_count, start_is_portal)
+
+
+def _graph(m):
+    """Door distances between every pair of rooms, and the articulation points."""
+    _adj = {rid: list(m.doors(rid)) for rid in m.rooms}
+    _d = {}
+    for _src in m.rooms:
+        _out, _q = {_src: 0}, collections.deque([_src])
+        while _q:
+            _c = _q.popleft()
+            for _n in _adj[_c]:
+                if _n not in _out:
+                    _out[_n] = _out[_c] + 1
+                    _q.append(_n)
+        _d[_src] = _out
+    return _d, Generator(7, random.Random(0)).articulation_points(_adj)
+
+
+_short, _start_far, _start_short, _below, _levels = [], [], 0, [], 0
+for _seed in range(40):
+    _rng = random.Random(3000 + _seed)
+    for _row in _STRICT["Levels"]:
+        _m = RoomMap.generate(_row, _rng)
+        _d, _arts = _graph(_m)
+        _need = min_finish_distance(len(_m.rooms))
+        # `ChooseFinishRoom`: the boss can see at least `minFinishDistance`
+        if max(_d[_m.boss].values()) < _need:
+            _short.append((_row["ID"], max(_d[_m.boss].values()), _need))
+        # `ChooseStartRoom`: the start is at least the largest `d <= need` that
+        # some eligible room clears, and is not always the furthest of them
+        _eligible = [r for r in _m.rooms if r not in (_m.boss,) and r not in _arts]
+        _best = max(_d[r][_m.boss] for r in _eligible)
+        if _d[_m.start][_m.boss] < min(_need, _best):
+            _below.append((_row["ID"], _d[_m.start][_m.boss], min(_need, _best)))
+        _start_short += _d[_m.start][_m.boss] < _best
+        _levels += 1
+check("the boss room clears minFinishDistance = num / 6 + 2", not _short,
+      f"{_short[:4]}")
+check("the start clears the highest distance threshold any room can",
+      not _below, f"{_below[:4]}")
+check("the start is a draw, not the far end of the map",
+      0.2 < _start_short / _levels < 1.0,
+      f"short of the furthest eligible room on {_start_short} of {_levels} levels")
+
+# `or eax, 5` in `ChooseStartRoom`: every level after the first opens in an item
+# shop. The second half gives it teeth: the shop actually sells there.
+_lv = [RoomMap.generate(_row, random.Random(17)) for _row in _STRICT["Levels"][:3]]
+check("the start room is an item shop on every level but the first",
+      [m.rooms[m.start].has("item_shop") for m in _lv] == [False, True, True]
+      and all(m.rooms[m.start].kind == "start" for m in _lv))
+_sh = RunState.new(_STRICT, seed=5)
+_sh.next_level()
+_acts = {a[0] for a in _sh.legal_actions()}
+check("and the shop is open the moment the level starts",
+      _sh.level == 2 and _sh.rooms.rooms[_sh.room].has("item_shop")
+      and "reroll" in _acts and _sh.room_gold("start") == 0.0,
+      f"level {_sh.level}, actions {sorted(_acts)}")
+
+# -- portals ----------------------------------------------------------------
+# `C_Rooms.Generate` sets `portalsCount = num / 7 + 1` and `minPortalDistance =
+# 3`; `ChoosePortals` places them on spread-out dead ends, adds one central
+# room, undoes the lot if fewer than two land, and makes the start a portal on
+# levels 5 and 9.
+_counts, _close, _bad_room, _forced, _unforced = collections.Counter(), [], [], [], []
+for _seed in range(40):
+    _rng = random.Random(4000 + _seed)
+    for _row in _STRICT["Levels"]:
+        _m = RoomMap.generate(_row, _rng)
+        _d, _ = _graph(_m)
+        _p = _m.portals
+        _counts[len(_p)] += 1
+        if not (2 <= len(_p) <= portals_count(len(_m.rooms)) + 1):
+            _bad_room.append((_row["ID"], "count", len(_p)))
+        if _m.boss in _p:
+            _bad_room.append((_row["ID"], "boss"))
+        for _i, _a in enumerate(_p):
+            for _b in _p[_i + 1:]:
+                if _d[_a][_b] < MIN_PORTAL_DISTANCE:
+                    _close.append((_row["ID"], _a, _b, _d[_a][_b]))
+        if start_is_portal(_row["ID"]) != (_m.start in _p):
+            (_forced if start_is_portal(_row["ID"]) else _unforced).append(_row["ID"])
+check("every generated level has between 2 and portalsCount + 1 portals, none "
+      "on the boss", not _bad_room,
+      f"{dict(sorted(_counts.items()))} over 480 levels, {_bad_room[:4]}")
+check("portals are at least minPortalDistance apart", not _close, f"{_close[:4]}")
+check("the start is a portal on levels 5 and 9 and on no other",
+      not _forced and not _unforced, f"missing {_forced[:4]}, extra {_unforced[:4]}")
+
+# A teleport: free, legal only from a portal, only to a portal on the map, and
+# arriving is the same as walking in.
+from sim.run import UNEXPLORED as _UNEXPLORED, UNKNOWN
+
+def _on_portal(seed):
+    """Seed `seed`'s first level, standing on a cleared portal that is not the
+    start, with another portal still unrevealed. Deterministic in `seed`."""
+    _s = RunState.new(_STRICT, seed=seed)
+    _m = _s.rooms
+    _src = next((p for p in _m.portals if p != _m.start), None)
+    if _src is None:
+        return None
+    _s.room = _src
+    _m.set_current(_src)
+    _m.rooms[_src].cleared = True
+    _dst = next(p for p in _m.portals if p != _src)
+    if _m.rooms[_dst].state != UNKNOWN or _dst in _m.doors(_src):
+        return None
+    return _s, _src, _dst
+
+
+# the first seed whose teleport fight is won, so the checks after it run on a
+# squad that is still standing
+for _seed in range(200):
+    _tp = _on_portal(_seed)
+    if _tp is None:
+        continue
+    _tp[0].rooms.rooms[_tp[2]].state = _UNEXPLORED
+    _tp[0].rooms._refresh_known()
+    if _tp[0].apply(("teleport", _tp[2])).get("won"):
+        break
+_s, _src, _dst = _on_portal(_seed)
+check("an unrevealed portal is not a teleport target",
+      ("teleport", _dst) not in _s.legal_actions())
+_s.rooms.rooms[_dst].state = _UNEXPLORED
+_s.rooms._refresh_known()
+check("a revealed one is, without having been visited",
+      ("teleport", _dst) in _s.legal_actions() and not _s.rooms.rooms[_dst].cleared)
+_plain = next(r for r in _s.rooms.rooms if r not in _s.rooms.portals)
+check("a room that is not a portal teleports nowhere",
+      _s.rooms.teleports(_plain) == [])
+_food, _left = _s.food.amount, _s.food.moves_left
+_res = _s.apply(("teleport", _dst))
+check("a teleport spends no food and no move",
+      _s.food.amount == _food and _s.food.moves_left == _left and "food" not in _res,
+      f"food {_food} -> {_s.food.amount}, moves {_left} -> {_s.food.moves_left}")
+check("teleporting into a room nobody has entered fights it",
+      "won" in _res and _s.room == _dst, f"{_res}")
+check("and reveals its doors the way walking in does",
+      all(_s.rooms.rooms[n].state != UNKNOWN for n in _s.rooms.doors(_dst)))
+_s.food.amount, _s.food.moves_left = 0.0, 0
+_acts = _s.legal_actions()
+check("a starving squad on a portal can still teleport",
+      not any(a[0] == "move" for a in _acts)
+      and any(a[0] == "teleport" for a in _acts), f"{_acts}")
+# with every room cleared and nothing to buy, a teleport leads nowhere
+for _r in _s.rooms.rooms.values():
+    _r.cleared = True
+_s.squad = _s.squad[:1]
+_s.gold = 0.0
+check("only teleports into cleared rooms is stranded", _s.stranded(),
+      f"{_s.legal_actions()}")
+_s.rooms.rooms[_src].cleared = False
+check("one into a room nobody has cleared is not", not _s.stranded())
 
 # adjacency is symmetric on a generated map too
 check("generated adjacency is symmetric",
@@ -1384,8 +1537,11 @@ check("standing on a portal does not reveal the portals it links to",
           for _p in _pm.portals if _p != _p0 and _p not in _pm._ortho[_p0]),
       f"portals {_pm.portals}, "
       f"states {[_pm.rooms[_p].state for _p in _pm.portals]}")
-check("but a portal room is still reachable in one move",
+check("but the portals it links to stay one step away in the distance graph",
       set(_pm.portals) - {_p0} <= set(_pm.neighbours(_p0)))
+check("and they are not teleport targets until they are on the map",
+      _pm.teleports(_p0) == [p for p in _pm.portals
+                             if p != _p0 and _pm.rooms[p].state != UNKNOWN])
 
 # `known_to_boss` is the fair distance, and it is empty until the boss is found
 _fb = RunState.new(_STRICT, seed=3).rooms
@@ -1427,8 +1583,16 @@ for _seed in range(12):
             for _r in _hidden:
                 _r.kind = "boss" if _r.kind != "boss" else "fight"
                 _r.cleared = not _r.cleared
+            # and every hidden room swaps whether it is a portal, which a slot
+            # order over all of the level's portals would give away
+            _rm = _env.state.rooms
+            _portals_were = list(_rm.portals)
+            _rm.portals = sorted(set(_rm.portals) ^ {r.id for r in _hidden})
+            _rm._portal_set = frozenset(_rm.portals)
             if (_o1 != _env._encode(_env.state)).any():
                 _leaks.append((_seed, _hop))
+            _rm.portals = _portals_were
+            _rm._portal_set = frozenset(_portals_were)
             for _r, (_k, _c) in zip(_hidden, _was):
                 _r.kind, _r.cleared = _k, _c
         _moves = [a for a in _env.state.legal_actions() if a[0] == "move"]
@@ -1452,6 +1616,18 @@ check("the observation does follow a room the squad can see",
       bool(_visible) and (_o2 != _o3).any(),
       f"{len(_visible)} visible neighbours rewritten, "
       f"{int((_o2 != _o3).sum())} features moved")
+# and the portal half of the rewrite has teeth of its own: making a visible
+# door neighbour a portal moves it, through the neighbour's portal bit and the
+# teleport slot it now fills
+_rm = _env.state.rooms
+_was = list(_rm.portals)
+_rm.portals = sorted(set(_rm.portals) ^ {r.id for r in _visible})
+_rm._portal_set = frozenset(_rm.portals)
+_rm._refresh_known()
+_o4 = _env._encode(_env.state)
+check("and whether a room it can see is a portal",
+      bool(_visible) and (_o3 != _o4).any(), f"{int((_o3 != _o4).sum())} features moved")
+_rm.portals, _rm._portal_set = _was, frozenset(_was)
 
 # and the level's food supply is now the row's own expression, because the map
 # really does hold `FoodShops` food shops

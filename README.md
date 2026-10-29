@@ -25,9 +25,9 @@ behaviour trees) at a fixed 50 Hz tick, instead of moves on a grid. Every number
 still a guess lives in one file, `sim/assumptions.py`, so no unexplained constants are
 spread through the code.
 
-**A hierarchical agent.** The high level plays the run: where to move, what to buy, when to
-upgrade the shop, which mutation to take, and which of the eight starting squads it is
-playing. It sees a 210-dimensional observation and chooses among 33 masked actions, under
+**A hierarchical agent.** The high level plays the run: where to move or teleport, what to
+buy, when to upgrade the shop, which mutation to take, and which of the eight starting squads
+it is playing. It sees a 258-dimensional observation and chooses among 36 masked actions, under
 the same fog of war the game gives a player: the map is revealed one room at a time, and
 nothing the policy sees is computed from rooms it has not yet passed. The low level places
 the squad on the grid before each fight. Both levels are trained with PPO. Fights are
