@@ -52,9 +52,12 @@ PLACEMENT = POLICIES["frontline"]
 
 
 def _mutation_indices(env) -> np.ndarray:
-    """Where the two mutation action families sit in the fixed layout."""
+    """Where the mutation action families sit in the fixed layout. The shop's
+    reroll is struck out with them: it buys nothing on its own, but drawing a
+    shelf moves the random stream and would unpair the two halves."""
     return np.array([env.n_moves + i for i, name in enumerate(NON_MOVE_ACTIONS)
-                     if name.startswith("buy_mutation_") or name == "take_mutation"])
+                     if name.startswith("buy_mutation_")
+                     or name in ("take_mutation", "reroll_mutations")])
 
 
 def play(seed: int, mutations: bool) -> dict:

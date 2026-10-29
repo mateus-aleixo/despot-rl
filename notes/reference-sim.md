@@ -1258,6 +1258,9 @@ at level 1 and 0 after, while `RerollShrines` is 1 from level 2 on, so the shrin
 family after level 1 is the **reroll** shrine, which we conflate with the plain
 one. `StatShops` is 0 on all twelve, which is the earlier finding that
 consumables are unreachable in Default play.
+(**Wrong, 2026-10-29**: every boss room but the last builds a consumable
+shop, and the mutation shop's placement is right; see "What `C_Room..ctor`
+builds" at the end of this file.)
 
 ### `FightInFirst`, and the first room of a level
 
@@ -1641,6 +1644,8 @@ twelve level rows, `C_Consumables.Add` has exactly one caller
 consumables are unreachable. Implementing them would add code that can never
 execute and a maintenance surface that can never be tested. That is not
 fidelity.
+(**Wrong, 2026-10-29**: the shop is also built in every boss room but the
+last, from the `ConsumableShop` bit `ChooseFinishRoom` sets.)
 
 **Every environment change invalidates every agent and every number.** This has
 happened four times in a day. The cost is not the implementation, it is the
@@ -1904,3 +1909,109 @@ still open.
 - With `longRunReward` set, the level-1 start room is a `ConsumableShop` too.
 - The quest choosers between the start and the shops, the secret-room branch of
   the portal step, and Arcade's own predicates for the finish and the start.
+
+## What `C_Room..ctor` builds, and what nothing heals (2026-10-29, later)
+
+Reading `C_Rooms.FromGeneratedData` to settle the consumable shop question led
+into `C_Room..ctor`, which is where every room's shop model is made, and from
+there to three corrections.
+
+### The constructor dispatches on the room bits
+
+`FromGeneratedData` builds an `M_Room` per generator node, copies the node's
+type onto it, and constructs a `C_Room(room, levelData)`, handing it the level
+data only when the type carries `FoodShop`. The constructor then takes the
+first branch that matches:
+
+    type & 8                 FoodShop        C_FoodShop, budget from the level data
+    type & 4                 ItemShop        the run's one C_ItemShop
+    bt type, 14              ConsumableShop  M_Shop<M_Consumable>, quantity 2 + (~type & 1)
+    (type & 0x140) == 0x140  MutationShop    see below
+    (type & 0x1040) == 0x1040 TalentShop     C_TalentShop
+
+`ChooseFinishRoom` made every boss but the last `Boss | ConsumableShop`
+(`0x4002`), and that is neither a food shop nor an item shop, so **every boss
+room before the last builds a consumable shop**: three slots (two in a start
+room, where `type & 1` is set), roll cost 0, opened at construction. The note
+earlier in this file that consumables cannot be reached in Default play was
+wrong.
+
+The run also does not leave the boss room when the boss dies. `C_Fight.AfterFight`
+calls `C_Levels.WinLevel`, which marks the level won (and, on level 4 in
+Default, sets the persistent flag behind `longRunReward`) and ends the session
+only on the last level. The only gameplay caller of `C_Levels.ChangeLevel` is
+`V_Pipes.<MoveInternal>`, the pipe in the boss room. So the squad stays on the
+level until it takes the pipe, with the consumable shop open and the doors
+open behind it; the sim moves to the next level the moment the boss falls.
+Both are still to be modelled.
+
+### A generated mutation shop is 3, 1 and 2
+
+The mutation branch reads `ShowCount`, `BuyCount`, `RollCount` and `RollCost`
+from the level data when there is any, which for a generated room there never
+is, and otherwise uses its own defaults: a shelf of 3 (4 in a secret room, 6 in
+Arcade), 1 take, 2 rerolls (0 in a secret room), roll cost 0, and a pool named
+`default` (or `secret`). The sim had been using `Rooms.Shops.Mutations.m1`,
+`{ShowCount 10, BuyCount 2, RollCount 0}`, which belongs to the shipped fixed
+map's one mutation room: three times the shelf and twice the takes.
+
+`C_MutationShop.Roll` needs `gold >= rollCost` and `rollCount > 0`, pays,
+decrements `rollCount` unless it is 90 or more, and builds a whole new shelf
+(`UnregisterMutations`, then `CreateMutations`). `BaseMutationShop.Buy` refuses
+a bought item, a short purse or `buyCount <= 0`, decrements `buyCount` and
+closes the shop at zero; with takes left and the shelf bought out, `Buy` rolls a
+fresh shelf for free.
+
+What a shelf is drawn from: `C_Mutations.OnLevelChange` rebuilds the available
+mutations for the level, per mutation and per class, filtered by the player's
+unlocks, and finishes by reserving every mutation the run holds and every one
+already on a shelf in the level's shops. `ReserveMutation` takes an (id, class)
+out of the pool. So nothing the run holds is offered again. The sim now draws
+by id with the same two exclusions; the per-class granularity and the unlock
+state are in `sim/assumptions.py`.
+
+The shop has a `reroll_mutations` action, and the env four mutation slots
+instead of ten. `tools/mutation_value.py --runs 600`, heuristic taking against
+ignoring: **+0.04 [-0.02, +0.10]** levels, 2.2 mutations a run. On the old
+shelf the same test gave +0.13.
+
+### Nothing heals a unit between fights
+
+`C_Unit.BeforeFight` sets `health = min(desiredHealth, totalMaxHealth)` only
+when the mode is KingOfTheHill, or Arcade in a boss room for team 1.
+`C_Unit.AfterFight` refills mana and resets traits, actions and passives, and
+never writes health. `M_Unit.set_health` has 22 callers and the `_health`
+property is written directly through `ModelExtensions.Set<float>` in 17 more
+places (a scan for functions that load `M_Unit`'s statics at `+0x68` and call
+`Set<float>`); none of them is a routine heal. Health comes back only from
+`UnitExtensions.Heal` (a heal consumable, the Medic's channelled heal, and
+`HealAfterFight`, which is the "Regeneration" perk of the meta-progression
+grid in `MutationGrid.json`, not a run mutation), from in-fight healing,
+resurrection, and mutation 356 `FoodPackHeal`. `CS_Units.LevelUp` and
+`CS_Item.ApplyBonus` both rescale it as `totalMaxHealth * ratio`.
+
+So in Default **wounds carry over**, and the sim had been rebuilding every unit
+at full health for every fight. `Human.hp` is now the share of health a unit
+carries, set from the survivors after each fight and handed to the next;
+`RunState.carry_hp = False` is the old behaviour, kept for measuring. A share
+rather than a number of hit points is exactly what level-ups and item swaps
+preserve. The pit takes the most wounded human. `FoodPackHeal` is implemented:
+`UpdateHealth` heals every unit `goldSpent * koefficient / 100` of its health
+when a pack is bought.
+
+`tools/hp_cost.py --seeds 240 --fast`, the heuristic on seeds 30,000 to
+30,239:
+
+    wounds carried       2.688  (sd 0.746)   lowest health in a run, mean 0.12
+    healed every fight   3.688  (sd 0.903)
+
+    paired -1.000 [-1.105, -0.895], better on 1 of 240, worse on 169
+
+A full level, the largest effect any single change has had in this project, and
+in the direction of a harder game: the sim was handing out a free full heal
+after every fight. It also changes what several things are worth. Heal
+consumables, the Medic, vampirism, `FoodPackHeal` and resurrection all heal
+something that now stays hurt.
+
+The observation carries the squad's mean and lowest health share; `obs_dim`
+217 to 219.

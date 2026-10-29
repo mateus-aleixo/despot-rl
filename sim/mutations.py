@@ -130,7 +130,11 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "HumanBlinkAway": Handler(UNIMPLEMENTED, note="displacement"),
     "BlindingLightning": Handler(UNIMPLEMENTED, note="bespoke projectile"),
     "LightningChance": Handler(UNIMPLEMENTED, note="bespoke projectile"),
-    "FoodPackHeal": Handler(UNIMPLEMENTED, note="food economy, outside a fight"),
+    # Not a fight effect either: `C_FoodPackHealMutation.UpdateHealth` heals
+    # every unit `goldSpent * koefficient` percent of its health whenever a
+    # food pack is bought, which `RunState.apply("buy_food")` does. It was
+    # worth nothing while every fight started at full health.
+    "FoodPackHeal": Handler(NOOP, note="run layer: buying food heals the squad"),
     "Combined": Handler(UNIMPLEMENTED, note="composite of child mutations"),
 }
 

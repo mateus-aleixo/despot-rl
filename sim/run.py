@@ -80,13 +80,18 @@ EMPTY = "  "
 # item shop draws from, so the leading letter is what matters here.
 ROOM_KIND = {"i": "item_shop", "f": "food_shop", "m": "mutation", "e": "fight", " ": "empty"}
 
-# How many mutations a mutation shop puts on the shelf, and how many of them may
-# be taken. `Rooms.Shops.Mutations` ships `m1` as `{RollCost 0, RollCount 0,
-# BuyCount 2, ShowCount 10}` and leaves the generic `m` entry null, so the
-# defaults behind a generated shop are not in the data; `m1` is the only shipped
-# example and is used for all of them. `RollCount 0` is why there is no reroll
-# action here: the shop shows its shelf once. See `sim/assumptions.py`.
-MUTATION_SHOP = {"ShowCount": 10, "BuyCount": 2, "RollCost": 0.0, "RollCount": 0}
+# A generated mutation shop, read out of `C_Room..ctor`. `C_Rooms.FromGeneratedData`
+# hands the constructor its level data only for a food shop, so every other
+# shop is built from the constructor's own defaults: a shelf of 3 (4 in a secret
+# room, 6 in Arcade), 1 take, 2 rerolls (none in a secret room) at a roll cost of
+# 0. This used to be `Rooms.Shops.Mutations.m1`, `{ShowCount 10, BuyCount 2,
+# RollCount 0}`, which is what the shipped fixed map's one mutation room carries
+# and is three times the shelf and twice the takes a generated level offers.
+MUTATION_SHOP = {"ShowCount": 3, "BuyCount": 1, "RollCost": 0.0, "RollCount": 2}
+
+# `C_MutationShop.Roll` decrements `rollCount` only below this; 90 or more is a
+# shop that never runs out of rerolls.
+UNLIMITED_ROLLS = 90
 
 # `RoomState`, straight from the enum. `C_Rooms.SetCurrent` is the only thing
 # that writes it, and the disassembly says exactly what it writes: the room being
@@ -125,9 +130,11 @@ class Room:
     # either -- they stock packs, and their stock is `food_stock`.
     stock: int | None = None
     # A mutation shop's shelf: the mutations it is showing, `None` where one has
-    # been taken, and how many takes are left of `MUTATION_SHOP["BuyCount"]`.
+    # been taken, how many takes are left of `MUTATION_SHOP["BuyCount"]` and
+    # how many rerolls of `MUTATION_SHOP["RollCount"]`.
     offer_mutations: list | None = None
     takes_left: int = 0
+    rolls_left: int = 0
     # A food shop's stock: how many of each `Rooms.Shops.Food.Packs` entry this
     # room holds, from `C_FoodShop.DetermineQuantities`. One list per room,
     # filled on arrival and never refilled: `C_FoodShop..ctor` is called from
@@ -500,6 +507,16 @@ class Human:
     item: str | None
     level: int = 1
     experience: float = 0.0
+    # The share of its health it carries into the next fight. In Default a
+    # unit is not healed between fights: `C_Unit.BeforeFight` restores health
+    # only in KingOfTheHill and in an Arcade boss room, `C_Unit.AfterFight`
+    # never writes it, and `UnitExtensions.Heal` is reached only from a heal
+    # consumable, a heal skill and `HealAfterFight` (the "Regeneration" perk of
+    # the meta-progression grid, not a run mutation). `CS_Units.LevelUp` and
+    # `CS_Item.ApplyBonus` both rescale health as `totalMaxHealth * ratio`, so
+    # a level or an item keeps the share, which is why this is a share and not
+    # a number of hit points.
+    hp: float = 1.0
 
 
 def squad_names(tables: dict) -> list[str]:
@@ -596,6 +613,10 @@ class RunState:
     # generation reads it: `ChoosePortals` forces a start portal on different
     # levels under `shortpvp`.
     chip: str = "default"
+    # Carry each unit's health from one fight to the next, as the game does in
+    # Default (see `Human.hp`). Off reproduces the sim as it was, every fight
+    # at full health, and exists only so the difference can be measured.
+    carry_hp: bool = True
 
     # -- setup -------------------------------------------------------------
     @classmethod
@@ -1177,6 +1198,11 @@ class RunState:
             for i, m in enumerate(here.offer_mutations or []):
                 if m is not None:
                     acts.append(("buy_mutation", i))
+            # `C_MutationShop.Roll` refuses when the purse is short of
+            # `rollCost` or no rerolls are left. Once the take is spent the
+            # shop is closed and the reroll goes with it.
+            if here.rolls_left > 0 and self.gold >= float(MUTATION_SHOP["RollCost"]):
+                acts.append(("reroll_mutations", None))
         # Humans are bought at the item shop, not anywhere on the map:
         # `C_ItemShop.BuyHuman` is the only caller, and it checks `M_Team.gold`
         # against `M_ItemShop.humanCost` (a flat 2, never raised after a sale).
@@ -1291,6 +1317,17 @@ class RunState:
                 self.food.amount += sizes[i]
                 result["bought_food"] = sizes[i]
                 result["cost"] = costs[i]
+                # Mutation 356, `FoodPackHeal`: each unit gets back `cost *
+                # koefficient` percent of its health, up to full. The
+                # controller watches the shop's stock and turns what was bought
+                # into gold spent, so the heal is by price, not by pack size.
+                for m in self.mutations:
+                    if m.get("Name") == "FoodPackHeal":
+                        from .mutations import mutation_params
+                        from .unit_skills import param
+                        k = param(mutation_params(m), "koefficient", default=1.0)
+                        for h in self.squad:
+                            h.hp = min(1.0, h.hp + costs[i] * k / 100.0)
         elif kind == "buy_human":
             here = self.rooms.rooms[self.room]
             cost = float(shop.get("HumanCost") or 2)
@@ -1298,7 +1335,13 @@ class RunState:
                 self.gold -= cost
                 self.squad.append(Human(item=None))
         elif kind == "sacrifice":
-            self.squad.pop()
+            # The player drags a human of their choosing into the pit. Who is
+            # not in the action space, the same way the target of a bought item
+            # is not, so it is the most wounded human, the last one on a tie:
+            # with wounds carried between fights that is the one losing least.
+            worst = min(range(len(self.squad)),
+                        key=lambda i: (self.squad[i].hp, -i))
+            self.squad.pop(worst)
             self.food.amount += self.food.per_sacrifice
         elif kind == "buy_mutation":
             # `BaseMutationShop.Buy`: refuse one already taken, refuse one the
@@ -1316,10 +1359,27 @@ class RunState:
                 here.takes_left -= 1
                 self.mutations.append(m)
                 result["mutation"] = m["Name"]
-        elif kind == "take_mutation":
-            from .mutations import offered_at_level
+                # `C_MutationShop.Buy`: with takes left and nothing unbought on
+                # the shelf, a free `Roll` fills it again.
+                if here.takes_left > 0 and all(x is None for x in shelf):
+                    here.offer_mutations = self.draw_mutations(here)
+        elif kind == "reroll_mutations":
+            # `C_MutationShop.Roll(free: false)`: pay `rollCost`, spend a
+            # reroll (unless the shop has 90 or more), and build a whole new
+            # shelf. `UnregisterMutations` puts the old shelf back in the pool
+            # first, so a reroll can show some of the same mutations again.
             here = self.rooms.rooms[self.room]
-            pool = offered_at_level(self.tables, self.level) if (here.stock or 0) > 0 else []
+            cost = float(MUTATION_SHOP["RollCost"])
+            if (here.kind == "mutation_shop" and here.takes_left > 0
+                    and here.rolls_left > 0 and self.gold >= cost):
+                self.gold -= cost
+                if here.rolls_left < UNLIMITED_ROLLS:
+                    here.rolls_left -= 1
+                here.offer_mutations = self.draw_mutations(here)
+                result["rerolled"] = True
+        elif kind == "take_mutation":
+            here = self.rooms.rooms[self.room]
+            pool = self.mutation_pool() if (here.stock or 0) > 0 else []
             if pool:
                 here.stock -= 1
                 m = self.rng.choice(pool)
@@ -1370,12 +1430,9 @@ class RunState:
             self.refill_offer()
         if room.kind == "mutation_shop":
             if room.offer_mutations is None:
-                from .mutations import offered_at_level
-                pool = list(offered_at_level(self.tables, self.level))
-                show = int(MUTATION_SHOP["ShowCount"])
-                room.offer_mutations = (self.rng.sample(pool, min(show, len(pool)))
-                                        if pool else [])
                 room.takes_left = int(MUTATION_SHOP["BuyCount"])
+                room.rolls_left = int(MUTATION_SHOP["RollCount"])
+                room.offer_mutations = self.draw_mutations(room)
             return
         if room.kind == "food_shop":
             if room.food_stock is None:
@@ -1389,6 +1446,32 @@ class RunState:
             room.stock = 1
         else:
             room.stock = 0
+
+    def mutation_pool(self, besides: Room | None = None) -> list[dict]:
+        """What a shelf or a shrine can draw from on this level.
+
+        `C_Mutations.OnLevelChange` rebuilds the available mutations for the
+        level and then reserves every one the run already holds and every one
+        already on a shelf in the level's shops, and `ReserveMutation` takes a
+        reserved mutation out of the pool. So nothing the run holds is offered
+        again, and two shelves on one level never show the same mutation.
+        `besides` is the shelf being drawn for, which does not count against
+        itself: `Roll` unreserves the old shelf before drawing the new one.
+        """
+        from .mutations import offered_at_level
+        taken = {m.get("ID") for m in self.mutations}
+        for room in self.rooms.rooms.values():
+            if room is besides or not room.offer_mutations:
+                continue
+            taken.update(m.get("ID") for m in room.offer_mutations if m is not None)
+        return [m for m in offered_at_level(self.tables, self.level)
+                if m.get("ID") not in taken]
+
+    def draw_mutations(self, room: Room) -> list:
+        """`C_MutationShop.CreateMutations`: a fresh shelf of `ShowCount`."""
+        pool = self.mutation_pool(besides=room)
+        show = int(MUTATION_SHOP["ShowCount"])
+        return self.rng.sample(pool, min(show, len(pool))) if pool else []
 
     # -- fights ------------------------------------------------------------
     def fight(self, room: Room) -> dict:
@@ -1422,6 +1505,12 @@ class RunState:
         if self.mutations:
             from .mutations import apply_to_agents
             apply_to_agents(team0, self.mutations, rng)
+        # Wounds carry over: each unit starts the fight with the share of its
+        # health it ended the last one with. `team0` is the squad's first
+        # `len(team0)` humans, in order.
+        if self.carry_hp:
+            for agent, human in zip(team0, self.squad):
+                agent.hp = agent.max_hp * human.hp
         seed = rng.randrange(1 << 30)
         b = Battle(grid, team0 + team1, seed=seed, tables=self.tables,
                    build_trees=not self.use_fast_core)
@@ -1457,6 +1546,14 @@ class RunState:
         survivors = {id(a) for a in team0 if a.alive}
         kept = [h for h, a in zip(self.squad, team0) if id(a) in survivors]
         reserve = list(self.squad[len(team0):])
+        # What each survivor walks out with. Measured against the unit's own
+        # health rather than `max_hp`, which carries whatever buffs were still
+        # running when the fight ended; they end with it, and the game clamps
+        # health to the new maximum.
+        if self.carry_hp:
+            for h, a in zip(self.squad, team0):
+                if id(a) in survivors:
+                    h.hp = min(1.0, max(0.0, a.hp / max(1.0, a.spec.health)))
 
         # `C_Unit.Die` gives a dead enemy's `expReward` to the other team, and
         # `C_Team.GetExperience` splits it evenly over the units in the room.

@@ -147,11 +147,22 @@ thrown away.
   `secretIsActive`, `roomsToActivateSecret = 2`, `secretRoomCount`, and
   `SecretRoom: true` on level 7), `TalentShop`, `PermanentShop`,
   `ConsumableShop`, `QuestExtra`, `FinalBoss`.
-- **The shrine split.** `Shrines` is 1 at level 1 and 0 after, while
-  `RerollShrines` is 1 from level 2 on. The placement is right:
-  `ChooseTreasureRooms` gives `RerollShrines` the `MutationShop` bit (`0x140`)
-  and the port does the same. What is left is the shop's own parameters, the
-  `m1` defaults in `sim/assumptions.py`.
+- ~~**The shrine split.**~~ **Done, 2026-10-29.** The placement was right
+  (`ChooseTreasureRooms` gives `RerollShrines` the `MutationShop` bit), and the
+  shop's own parameters were not: `C_Room..ctor` builds a generated mutation
+  shop as 3 shown, 1 taken, 2 free rerolls, where the sim used `m1`'s 10 and 2
+  and no reroll. Draws exclude what the run holds. The shelf is now worth +0.04
+  [-0.02, +0.10] to the heuristic, against +0.13 on the old shelf.
+- ~~**Wounds between fights.**~~ **Done, 2026-10-29**, found on the way: in
+  Default nothing heals a unit between fights, and the sim healed every unit to
+  full before each one. `Human.hp` carries the share. Worth **-1.000 [-1.105,
+  -0.895]** levels to the heuristic, the largest single change this project has
+  measured. `FoodPackHeal` implemented with it.
+- **The boss room and the pipe.** `C_Levels.WinLevel` does not move the squad;
+  `V_Pipes` is the only gameplay caller of `ChangeLevel`. So after the boss the
+  run stays on the level, with the doors open and, on every level but the last,
+  a three-slot consumable shop in the boss room. Needs a descend action and the
+  consumables below.
 - **Quests.** Eleven in `Quests.json`, each with `Doors`, `ExtraRooms`,
   `RoomParams` (a named `Layout`, directional priorities,
   `guaranteedPositions`) and per-quest fields. `C_Rooms.CreateQuest`, the

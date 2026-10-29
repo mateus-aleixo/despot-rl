@@ -106,7 +106,12 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
             e = st.mutation_effect(m)
             return (1.0 if e["implemented"] else 0.0, e["fraction"])
 
-        return max(kinds["buy_mutation"], key=score)
+        best = max(kinds["buy_mutation"], key=score)
+        # The shop rerolls for nothing, so a shelf with nothing on it the sim
+        # models is rerolled while rerolls last.
+        if score(best)[0] == 0.0 and kinds.get("reroll_mutations"):
+            return kinds["reroll_mutations"][0]
+        return best
 
     known = st.rooms.known_to_boss
     far = max(known.values(), default=1)

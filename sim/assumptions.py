@@ -163,13 +163,18 @@ class Assumptions:
     # Settle by: finding the read of `M_Room.expectedPower`.
     shops_hold_no_enemies: bool = True
 
-    # A mutation shop's shelf. `Rooms.Shops.Mutations` ships `m1` as
-    # `{RollCost 0, RollCount 0, BuyCount 2, ShowCount 10}` and leaves the
-    # generic `m` entry null, so what a generated shop shows is a code default
-    # that is not in the data. `m1` is the only shipped example and is used for
-    # every shop; `RollCount 0` is why there is no reroll action.
-    # Settle by: reading `M_MutationShop`'s defaults out of `C_MutationShop..ctor`.
-    mutation_shop_from_m1: bool = True
+    # How a shelf is drawn, beyond what `MUTATION_SHOP` settles (the shelf of 3,
+    # one take, two rerolls are read out of `C_Room..ctor`). The game's pool is
+    # per mutation *and per class*: `C_Mutations.OnLevelChange` builds
+    # `_availableClasses`, a list of classes for every mutation id, filtered by
+    # the player's unlocks (`Stats.MutationUnlocker.GetMutationState`), and a
+    # shelf reserves an (id, class) pair. The port draws whole definitions by id,
+    # treats every mutation as unlocked, excludes ids the run holds or another
+    # shelf shows, and draws a shelf when the shop is first entered rather than
+    # when the level is built. In Default the last of these changes nothing,
+    # since no level has two mutation sources.
+    # Settle by: reading `C_Mutations.TryGetTreasureParameters` (off 0x65b310).
+    mutation_pool_by_id_all_unlocked: bool = True
 
     # The order among equal keys in `LevelGenerator`'s sorts. `ChoosePortals`
     # sorts the room list by average distance twice and its candidates by

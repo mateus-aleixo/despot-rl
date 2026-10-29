@@ -1122,7 +1122,8 @@ Two findings and one new decision for the policy.
 **Consumables are unreachable in Default play**, so the "unmodelled income" the
 section above blamed for the small margin is not income at all: `C_Consumables.Add`
 has one caller (`C_ConsumableShop.Buy`), that shop is built only in a `TalentShop`
-room, and `StatShops` is 0 on all twelve level rows. Nothing to wire.
+room, and `StatShops` is 0 on all twelve level rows. Nothing to wire. (**Retracted 2026-10-29**:
+every boss room but the last builds a consumable shop; see `notes/reference-sim.md`.)
 
 **Treasure rooms are the shrine family**, placed at random by
 `ChooseTreasureRooms`: a `Shrine` on level 1, a `MutationShop` on every level

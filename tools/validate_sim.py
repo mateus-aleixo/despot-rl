@@ -1152,11 +1152,16 @@ for _seed in range(30):
                 _treasure.append((_row["ID"], _kind, _k[_kind], _row.get(_col)))
 check("a level holds the treasure rooms its row asks for", not _treasure,
       f"{_treasure[:4]}")
-check("no Default level asks for a talent shop, so consumables never appear",
+check("no Default level asks for a talent shop",
       all(int(r.get("StatShops") or 0) == 0 for r in _STRICT["Levels"]))
 
-# the mutation shop: a shelf of `ShowCount`, `BuyCount` takes, no reroll
+# the mutation shop, as `C_Room..ctor` builds it on a generated level: a shelf
+# of 3, one take, two free rerolls
 from sim.run import MUTATION_SHOP as _MS
+
+check("a generated mutation shop is the constructor's defaults",
+      (_MS["ShowCount"], _MS["BuyCount"], _MS["RollCount"], _MS["RollCost"])
+      == (3, 1, 2, 0.0), f"{_MS}")
 
 _stm = RunState.new(_STRICT, seed=21)
 _stm.level = 3
@@ -1171,6 +1176,19 @@ if _shop is not None:
           len(_shop.offer_mutations) == _MS["ShowCount"], f"{len(_shop.offer_mutations)}")
     check("the shelf holds no duplicates",
           len({id(m) for m in _shop.offer_mutations}) == len(_shop.offer_mutations))
+    # a reroll is a whole new shelf, free, and there are RollCount of them
+    _rolled, _shelves = 0, [[m["ID"] for m in _shop.offer_mutations]]
+    _gold_before = _stm.gold
+    while ("reroll_mutations", None) in _stm.legal_actions() and _rolled < 10:
+        _stm.apply(("reroll_mutations", None))
+        _rolled += 1
+        _shelves.append([m["ID"] for m in _shop.offer_mutations])
+    check("the shelf rerolls RollCount times, for nothing",
+          _rolled == _MS["RollCount"] and _stm.gold == _gold_before
+          and len(_shelves[-1]) == _MS["ShowCount"],
+          f"{_rolled} rerolls, shelves {_shelves}")
+    check("and a reroll draws the shelf again",
+          any(a != b for a, b in zip(_shelves, _shelves[1:])), f"{_shelves}")
     _gold_before, _taken = _stm.gold, 0
     while any(a[0] == "buy_mutation" for a in _stm.legal_actions()) and _taken < 20:
         _stm.apply(next(a for a in _stm.legal_actions() if a[0] == "buy_mutation"))
@@ -1179,6 +1197,15 @@ if _shop is not None:
           f"{_taken} takes")
     check("a mutation costs nothing", _stm.gold == _gold_before, f"{_stm.gold}")
     check("the takes land in the run's mutations", len(_stm.mutations) == _taken)
+    # `OnLevelChange` reserves what the run holds, so it is never offered again
+    _held = {m["ID"] for m in _stm.mutations}
+    _again = 0
+    for _ in range(30):
+        _shop.offer_mutations = None
+        _stm.ensure_stock(_shop)
+        _again += sum(1 for m in _shop.offer_mutations if m["ID"] in _held)
+    check("a mutation the run holds is never on a shelf", _held and _again == 0,
+          f"held {sorted(_held)}, offered again {_again} times in 30 shelves")
 
 # what a mutation on the shelf would do to this squad
 from sim.mutations import EFFECT_STATS as _EFFECT_STATS
@@ -1636,6 +1663,99 @@ _row1 = _stf.level_row
 check("a food shop's budget is TotalFood / FoodShops",
       _stf.food_shop_budget == _row1["TotalFood"] / _row1["FoodShops"],
       f"{_stf.food_shop_budget}")
+
+# -- wounds carry from fight to fight ----------------------------------------
+# In Default nothing heals a unit between fights (`C_Unit.BeforeFight` restores
+# health only in KingOfTheHill and an Arcade boss room), and a level or an item
+# rescales health as `totalMaxHealth * ratio`. These check the share is carried,
+# kept, and actually handed to the next fight.
+import sim.run as _sim_run
+from sim.run import Human as _Hum
+
+_starts = []
+
+
+class _ProbeBattle(_sim_run.Battle):
+    """Record what each player unit starts a fight with."""
+
+    def __init__(self, grid, agents, *a, **kw):
+        _starts.append([(ag.hp, ag.max_hp) for ag in agents if ag.team == 0])
+        super().__init__(grid, agents, *a, **kw)
+
+
+_real_battle = _sim_run.Battle
+_sim_run.Battle = _ProbeBattle
+try:
+    _sw = RunState.new(_STRICT, seed=13)
+    _hurt_seen = None
+    for _ in range(30):
+        _moves = [a for a in _sw.legal_actions() if a[0] == "move"
+                  and not _sw.rooms.rooms[a[1]].cleared]
+        if not _moves or _sw.finished:
+            break
+        _sw.apply(_moves[0])
+        if any(h.hp < 1.0 for h in _sw.squad):
+            _hurt_seen = [h.hp for h in _sw.squad]
+            break
+    check("a fight leaves its wounds on the squad",
+          _hurt_seen is not None and all(0.0 < x <= 1.0 for x in _hurt_seen),
+          f"{_hurt_seen}")
+    _carried = [h.hp for h in _sw.squad]
+    _starts.clear()
+    _next = [a for a in _sw.legal_actions() if a[0] == "move"
+             and not _sw.rooms.rooms[a[1]].cleared]
+    if _next:
+        _sw.apply(_next[0])
+    _first = _starts[0] if _starts else []
+    check("and the next fight starts with them",
+          bool(_first) and all(abs(hp - mx * c) < 1e-3
+                               for (hp, mx), c in zip(_first, _carried)),
+          f"carried {[round(c, 3) for c in _carried]}, "
+          f"started {[round(hp / mx, 3) for hp, mx in _first]}")
+finally:
+    _sim_run.Battle = _real_battle
+
+# a level and an item both keep the share; a bought human is whole
+_sk = RunState.new(_STRICT, seed=2)
+_sk.squad[0].hp = 0.5
+_sk.gain_experience(10_000.0, targets=[_sk.squad[0]])
+check("a level-up keeps the share of health", _sk.squad[0].level > 1
+      and _sk.squad[0].hp == 0.5, f"level {_sk.squad[0].level}, hp {_sk.squad[0].hp}")
+check("a new human arrives at full health", _Hum(item=None).hp == 1.0)
+# the pit takes the most wounded
+_sk.squad[1].hp = 0.1
+_before_ids = [id(h) for h in _sk.squad]
+_wounded = id(_sk.squad[1])
+_sk.apply(("sacrifice", None))
+check("the pit takes the most wounded human",
+      _wounded not in {id(h) for h in _sk.squad} and len(_sk.squad) == len(_before_ids) - 1)
+# carry_hp off is the old sim: everyone whole after every fight
+_so = RunState.new(_STRICT, seed=13)
+_so.carry_hp = False
+for _ in range(30):
+    _moves = [a for a in _so.legal_actions() if a[0] == "move"
+              and not _so.rooms.rooms[a[1]].cleared]
+    if not _moves or _so.finished:
+        break
+    _so.apply(_moves[0])
+check("with carry_hp off every unit stays whole", all(h.hp == 1.0 for h in _so.squad))
+
+# Mutation 356, `FoodPackHeal`: buying food heals `cost * koefficient` percent
+_sf = RunState.new(_STRICT, seed=11)
+_fp = next(m for m in _STRICT["SimpleMutations"] if m["Name"] == "FoodPackHeal")
+_sf.mutations.append(_fp)
+_shopf = next(r for r in _sf.rooms.rooms.values() if r.kind == "food_shop")
+_sf.room = _shopf.id
+_shopf.cleared = True
+_sf.ensure_stock(_shopf)
+_sf.gold = 100.0
+for _h in _sf.squad:
+    _h.hp = 0.5
+_sf.apply(("buy_food", 1))
+_cost1 = _sf.food_packs[1][1]
+check("FoodPackHeal heals the squad by what the pack cost",
+      all(abs(h.hp - (0.5 + _cost1 / 100.0)) < 1e-9 for h in _sf.squad),
+      f"pack cost {_cost1}, hp {[h.hp for h in _sf.squad]}")
 
 # hunger model. `moves` is a list of thresholds on a `maxMoves` reserve, not an
 # allowance per stage, and moving feeds the team rather than costing a move.

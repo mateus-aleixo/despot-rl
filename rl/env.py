@@ -52,15 +52,17 @@ FOOD_PACKS = 5
 
 # A mutation shop shows `MUTATION_SHOP["ShowCount"]` mutations and lets the run
 # take `BuyCount` of them. One action per slot, for the same reason the item
-# shop has one per slot.
-MUTATION_SLOTS = 10
+# shop has one per slot. Three on a generated level and four in a secret room's
+# shop, so four slots; this was ten while the shelf was `m1`'s.
+MUTATION_SLOTS = 4
 
 # Fixed action layout: room moves first, then the non-move actions.
 NON_MOVE_ACTIONS = (tuple(f"buy_item_{i}" for i in range(SHOP_SLOTS))
                     + tuple(f"buy_food_{i}" for i in range(FOOD_PACKS))
                     + tuple(f"buy_mutation_{i}" for i in range(MUTATION_SLOTS))
                     + ("reroll", "upgrade_shop", "buy_exp",
-                       "buy_human", "take_mutation", "sacrifice"))
+                       "buy_human", "take_mutation", "sacrifice",
+                       "reroll_mutations"))
 ROOM_KINDS = ("start", "fight", "boss", "item_shop", "food_shop", "mutation",
               "mutation_shop", "talent_shop", "empty")
 
@@ -238,6 +240,10 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             st.shop_level / max(1, st.max_shop_level),
             np.log1p(st.squad_power()) / 12.0,
             float(np.clip(np.log1p(st.squad_power() / max(1.0, room)) / 4.0, -10.0, 10.0)),
+            # The squad's wounds, which carry from fight to fight. The health
+            # bars are on screen, so these are fair to show.
+            sum(h.hp for h in st.squad) / max(1, len(st.squad)),
+            min((h.hp for h in st.squad), default=0.0),
         ]
 
         # squad composition by class
@@ -285,7 +291,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # does not stand in for it, because 96 of the 603 modelled offers attach
         # no passive and are exactly the ones measuring at zero.
         per_m = 7
-        shelf_m = np.zeros(MUTATION_SLOTS * per_m + 2, dtype=np.float32)
+        shelf_m = np.zeros(MUTATION_SLOTS * per_m + 3, dtype=np.float32)
         room_now = st.rooms.rooms[st.room]
         if room_now.kind == "mutation_shop":
             st.ensure_stock(room_now)
@@ -309,6 +315,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                 shelf_m[base + 6] = 1.0 if e["passive"] else 0.0
             shelf_m[MUTATION_SLOTS * per_m] = (
                 room_now.takes_left / max(1, int(MUTATION_SHOP["BuyCount"])))
+            # The rerolls left, which the shop shows on its button.
+            shelf_m[MUTATION_SLOTS * per_m + 2] = (
+                room_now.rolls_left / max(1, int(MUTATION_SHOP["RollCount"])))
         elif room_now.kind == "mutation":
             # The shrine's one free mutation. Without this a stocked shrine and
             # a spent one encode identically and only the action mask separates
