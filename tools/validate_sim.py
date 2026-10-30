@@ -528,6 +528,33 @@ check("a timed StatBonus does not change the spec",
           for a, b in zip(_specs, _after2)),
       f"{len(_timed)} timed definitions")
 
+# The two that follow the run. HoboFury (239): Damage +30 while
+# `goldAmount >= floor(gold)`; HungerFury (227): AttackSpeed +40% at hunger
+# level 1 and +60% above, nothing when fed.
+_hobo = next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 239)
+_hf = next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 227)
+_d0 = _specs[0].damage
+_hob = [apply_to_specs(_specs, [_hobo], random.Random(0), gold=g)[0].damage
+        for g in (10.99, 11.0)]
+check("HoboFury adds 30 Damage at 10.99 gold and nothing at 11",
+      _hob == [_d0 + 30.0, _d0], f"{_d0} -> {_hob}")
+_as0 = _specs[0].attack_speed
+_hfs = [apply_to_specs(_specs, [_hf], random.Random(0), hunger=h)[0].attack_speed
+        for h in (0, 1, 2)]
+check("HungerFury is nothing fed, +40% attack speed at hunger 1 and +60% beyond",
+      abs(_hfs[0] - _as0) < 1e-9 and abs(_hfs[1] - _as0 * 1.4) < 1e-9
+      and abs(_hfs[2] - _as0 * 1.6) < 1e-9, f"{_as0} -> {_hfs}")
+from sim.run import RunState as _RS
+_rs = _RS.new(_STRICT, seed=5)
+_rs.squad = [_rs.squad[0]]
+_rs.mutations = [_hobo]
+_rs.gold = 3.0
+_poor = _rs.specs_cached()[0].damage
+_rs.gold = 50.0
+_rich = _rs.specs_cached()[0].damage
+check("a run's own purse switches HoboFury, cache and all", _poor == _rich + 30.0,
+      f"{_poor} at 3 gold, {_rich} at 50")
+
 # and it becomes a castable action instead
 _rngM = random.Random(2)
 _monks = build_player_squad(_STRICT, [("gloves", 1)] * 3)      # Monk class

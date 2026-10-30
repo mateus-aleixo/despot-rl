@@ -19,6 +19,7 @@ coverage is measurable, and an unregistered one raises.
 from __future__ import annotations
 
 import dataclasses
+import math
 import random
 from typing import Any
 
@@ -73,8 +74,9 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "SuperPunch": Handler(UNIMPLEMENTED, note="bespoke attack replacement"),
     "CooldownReduction": Handler(PASSIVE, note="scales every action's cooldown"),
     "CastSpeed": Handler(UNIMPLEMENTED, note="scales cast animation speed"),
-    "HungerFury": Handler(UNIMPLEMENTED, note="food economy"),
-    "HoboFury": Handler(UNIMPLEMENTED, note="gold economy"),
+    # Stat bonuses that follow the run: see `apply_to_specs`.
+    "HungerFury": Handler(PASSIVE, note="stat bonus by hunger level"),
+    "HoboFury": Handler(PASSIVE, note="stat bonus while the purse is nearly empty"),
     "CSRange": Handler(UNIMPLEMENTED, note="class-skill range"),
     "ChainLightning": Handler(UNIMPLEMENTED, note="chaining projectile"),
     "PlagueAntiHeal": Handler(UNIMPLEMENTED, note="swaps the Medic class skill"),
@@ -209,7 +211,8 @@ def apply_stat_bonus(spec, params: dict):
 
 
 def apply_to_specs(specs: list, mutations: list[dict],
-                   rng: random.Random | None = None) -> list:
+                   rng: random.Random | None = None, gold: float | None = None,
+                   hunger: int | None = None) -> list:
     """Apply the stat-changing mutations to a squad's specs.
 
     Returns new specs; the originals are untouched. Everything that is a hook
@@ -221,6 +224,20 @@ def apply_to_specs(specs: list, mutations: list[dict],
     a single randomly chosen member of its class, by `bonus x count(otherClass)`
     -- the game applies it at fight start and re-picks when that unit dies, so
     reading it as a standing pre-fight change is the approximation here.
+
+    Two more follow the run, and need its state: `gold` and `hunger` (the
+    food's hunger level). Without them they do nothing.
+
+      * `HoboFury`: `C_HoboFuryMutation.OnGold` turns a `StatBonus` status on
+        for every live unit while `goldAmount >= floor(gold)` and off again
+        above it. The shipped row is Damage +30, flat, at 10 gold or less.
+      * `HungerFury` hands its units `C_HungerFurySkill`, whose
+        `Food_HungerLevelChanged` sets the bonus to nothing at hunger level 0,
+        `lowValue` at 1 and `highValue` above. The shipped row is AttackSpeed
+        +40% and +60%.
+
+    Gold and hunger change between fights and not inside one here, so the
+    bonus is read once, when the squad's specs are built for the fight.
     """
     rng = rng or random.Random(0)
     classes = sorted({s.cls for s in specs})
@@ -242,7 +259,23 @@ def apply_to_specs(specs: list, mutations: list[dict],
             bonus = class_diversity_bonus(out, p)
             if i >= 0 and bonus:
                 out[i] = apply_stat_bonus(out[i], dict(p, bonus=bonus))
+        elif name == "HoboFury":
+            if gold is not None and param(p, "goldAmount") >= math.floor(gold):
+                out = [apply_stat_bonus(s, p) if applies_to(m, s.cls, rng) else s
+                       for s in out]
+        elif name == "HungerFury":
+            if hunger:
+                value = param(p, "lowValue") if hunger == 1 else param(p, "highValue")
+                bonus = dict(p, value=value)
+                out = [apply_stat_bonus(s, bonus) if applies_to(m, s.cls, rng) else s
+                       for s in out]
     return out
+
+
+def hobo_fury_active(mutations: list[dict], gold: float) -> tuple:
+    """Which held `HoboFury` mutations are on at this purse, for a cache key."""
+    return tuple(param(mutation_params(m), "goldAmount") >= math.floor(gold)
+                 for m in mutations if m["Name"] == "HoboFury")
 
 
 # The stats a mutation can move that this sim resolves into a spec, and what a

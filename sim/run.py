@@ -871,7 +871,8 @@ class RunState:
                      for s in specs]
         if self.mutations:
             from .mutations import apply_to_specs
-            specs = apply_to_specs(specs, self.mutations, self.rng)
+            specs = apply_to_specs(specs, self.mutations, self.rng, gold=self.gold,
+                                   hunger=self.food.hunger_level if self.food else 0)
         return specs
 
     @property
@@ -899,9 +900,10 @@ class RunState:
 
     def _specs_key(self) -> tuple:
         """What the squad's resolved specs depend on, for the cache below."""
+        from .mutations import hobo_fury_active
         return (tuple((h.item, h.level, h.cls) for h in self.squad),
                 self.food.hunger_level if self.food else 0,
-                len(self.mutations))
+                len(self.mutations), hobo_fury_active(self.mutations, self.gold))
 
     def specs_cached(self) -> list[UnitSpec]:
         """`specs()`, memoised for the length of one squad state.

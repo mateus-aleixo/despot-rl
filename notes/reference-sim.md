@@ -2599,3 +2599,29 @@ these runs reach. `tools/diff_core.py` prints the same table before and
 after. The gates matter to a policy that fields mages or meets magic users,
 which is where an agent would find the difference.
 
+## HoboFury and HungerFury, implemented (2026-10-30)
+
+Two of the 44 mutation names the sim did nothing with, offered once a level
+each, and both a stat bonus that follows the run rather than the fight.
+
+  * **HoboFury** (239: Damage +30, flat, `goldAmount` 10).
+    `C_HoboFuryMutation.OnGold` floors the team's gold (`roundss` mode 9) and,
+    whenever `goldAmount >= floor(gold)` flips, adds or removes a "HoboFury"
+    `StatBonus` status on every unit that is not `Dead` or `DeSpawning`
+    (traits `0x401`). So the squad hits 30 harder while it holds under 11
+    gold.
+  * **HungerFury** (227: AttackSpeed, `lowValue` 40, `highValue` 60,
+    percentage). The mutation hands its units `C_HungerFurySkill`, whose
+    `Food_HungerLevelChanged` sets the status to nothing at hunger level 0,
+    `lowValue` at 1 and `highValue` at 2 and up.
+
+`apply_to_specs` takes the run's gold and hunger level and applies both when
+the squad's specs are built for a fight, and the spec cache keys on whether
+HoboFury is on. Gold and hunger change between fights here, never inside one,
+so reading them once per fight loses nothing the sim could show.
+
+On the heuristic over 2400 seeds from 40000, implemented against
+unimplemented: -0.006 [-0.012, +0.001], with 293 runs ending holding one of
+them. The heuristic takes a shelf's implemented mutation that covers most of
+the squad, so these displace other picks about as often as they help.
+
