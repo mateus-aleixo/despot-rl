@@ -1931,6 +1931,32 @@ check("every consumable but DejaVu and DamageAllEnemies has an effect",
       {c["Name"] for c in _STRICT["Consumables"] if _fam(c) == "unmodelled"}
       == {"DejaVu", "DamageAllEnemies"})
 
+# -- layouts: the pack chooses the room ------------------------------------------
+from sim.data import parse_room_layouts as _prl
+
+_lay_by_id = {lay.id: lay for lay in _prl(_STRICT["RoomLayouts"])}
+_lay_of = {r["Pack"]: r["Layout"] for r in _STRICT["LayoutsByPack"]}
+_lay_bad = []
+for _row in _STRICT["EnemyPacks"]:
+    if _row["ID"] >= 1001:              # 1001 to 1011 are no Default level's
+        continue
+    _lid = _lay_of.get(_row["ID"])
+    if _lid is None or not _lay_by_id[_lid].cells(_row.get("Zone") or "e1"):
+        _lay_bad.append((_row["ID"], _row.get("Zone"), _lid))
+check("every pack has a layout holding every zone its rows name", not _lay_bad,
+      f"{_lay_bad[:4]}")
+_lf = RunState.new(_STRICT, seed=3)
+_lay_seen = []
+for _ in range(8):
+    _mv = [a for a in _lf.legal_actions() if a[0] == "move"
+           and not _lf.rooms.rooms[a[1]].cleared]
+    if not _mv or _lf.finished:
+        break
+    _lf.apply(_mv[0])
+    _lay_seen.append((_lf._last_pack[0], _lf._last_layout))
+check("a fight is fought in its pack's own layout",
+      _lay_seen and all(_lay_of.get(p) == l for p, l in _lay_seen), f"{_lay_seen}")
+
 # -- the level-entry dialogs ----------------------------------------------------
 from sim.dialogs import Engine as _Engine, pool as _dpool, table as _dtable
 

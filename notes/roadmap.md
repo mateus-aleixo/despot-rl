@@ -191,8 +191,10 @@ thrown away.
   DamageAllEnemies is on no Default list. Worth +0.721 [+0.597, +0.844] levels
   to the heuristic. Open: the placement stage, where the game lets a cleaner be
   used after the pack is on screen (`sim/assumptions.py`).
-- **Layouts.** `LayoutsByPack.json` and `SpecialRoomLayouts.csv`, neither named
-  anywhere in the sim, plus `M_EnemyPack.ChooseLayout`.
+- ~~**Layouts.**~~ **Done, 2026-10-30**, for the packs: each fights in its one
+  `LayoutsByPack` layout with every enemy in its row's zone, where the sim drew
+  any of 77 layouts with everyone in `e1`. Worth -0.263 [-0.439, -0.086] to the
+  heuristic. `SpecialRoomLayouts.csv` waits on the quests.
 - **`InstantTransitions`**, and one more attempt at `maxDeadEnds` and
   multi-square rooms. `minFinishDistance` is recovered. `maxDeadEnds` really is
   0 (the struct is zeroed and the one delegate subscriber does not touch it), so

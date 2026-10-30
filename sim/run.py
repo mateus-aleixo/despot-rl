@@ -694,6 +694,13 @@ class RunState:
     dialog: Any = None
     # Off plays a run with no dialogs at all, for measuring what they change.
     dialogs_on: bool = True
+    # Fight each pack in its own layout, zone by zone. Off is the old draw of
+    # any layout with every enemy in e1, kept for measuring.
+    pack_layouts: bool = True
+    # (pack id, zone per enemy) of the pack `enemy_specs` last drew, and the
+    # layout the last fight was fought in.
+    _last_pack: tuple | None = None
+    _last_layout: int | None = None
 
     # -- setup -------------------------------------------------------------
     @classmethod
@@ -1128,8 +1135,8 @@ class RunState:
                     groups.setdefault(row["ID"], []).append(row)
         return list(groups.values())
 
-    def _pack_units(self, rows: list[dict]) -> list[tuple[UnitSpec, int, int]]:
-        """One pack as (unit, min count, max count) per row."""
+    def _pack_units(self, rows: list[dict]) -> list[tuple[UnitSpec, int, int, str]]:
+        """One pack as (unit, min count, max count, zone) per row."""
         ubc = units_by_class(self.tables)
         meta = self.tables["Meta"]["Classes"]
         out = []
@@ -1141,7 +1148,7 @@ class RunState:
             unit = build_unit(ubc, cls, int(row.get("Level") or 1), name=cls,
                               size=size)
             lo, hi = int(row.get("Min") or 1), int(row.get("Max") or 1)
-            out.append((unit, min(lo, hi), max(lo, hi)))
+            out.append((unit, min(lo, hi), max(lo, hi), row.get("Zone") or "e1"))
         return out
 
     def _pack_table(self, want: str) -> list[tuple[list, float, float]]:
@@ -1160,9 +1167,9 @@ class RunState:
             units = self._pack_units(rows)
             if not units:
                 continue
-            lo = sum(u.power * a for u, a, _ in units)
-            hi = sum(u.power * b for u, _, b in units)
-            table.append((units, lo, hi))
+            lo = sum(u.power * a for u, a, _, _ in units)
+            hi = sum(u.power * b for u, _, b, _ in units)
+            table.append((units, lo, hi, rows[0].get("ID")))
         self._pack_cache[key] = table
         return table
 
@@ -1189,9 +1196,9 @@ class RunState:
         # The pack whose band the room's Power falls in, else the nearest band.
         inside = [t for t in table if t[1] <= budget <= t[2]]
         if inside:
-            units, _, _ = self.rng.choice(inside)
+            units, _, _, pack_id = self.rng.choice(inside)
         else:
-            units, _, _ = min(table, key=lambda t: min(abs(budget - t[1]),
+            units, _, _, pack_id = min(table, key=lambda t: min(abs(budget - t[1]),
                                                        abs(budget - t[2])))
         # Counts start at each row's `Min` and are raised toward the room's
         # Power, never past that row's `Max`. That the count is bounded by the
@@ -1200,9 +1207,9 @@ class RunState:
         # way that respects both ends. Drawing uniformly in [Min, Max] instead
         # puts 14 units and 23,000 Power in a level-1 item shop, because `Max`
         # runs to 20 and 40 on some rows.
-        counts = [lo for _, lo, _ in units]
-        power = sum(u.power * c for (u, _, _), c in zip(units, counts))
-        room = [i for i, (_, lo, hi) in enumerate(units) if hi > lo]
+        counts = [lo for _, lo, _, _ in units]
+        power = sum(u.power * c for (u, _, _, _), c in zip(units, counts))
+        room = [i for i, (_, lo, hi, _) in enumerate(units) if hi > lo]
         while room:
             # Add the unit that lands the room closest to its Power, and stop
             # when no addition gets closer. Filling while `power < budget`
@@ -1217,14 +1224,18 @@ class RunState:
                     best, gain = i, d
             if best is None:
                 break
-            unit, _, hi = units[best]
+            unit, _, hi, _ = units[best]
             counts[best] += 1
             power += unit.power
             if counts[best] >= hi:
                 room.remove(best)
         out: list[UnitSpec] = []
-        for (unit, _, _), c in zip(units, counts):
+        zones: list[str] = []
+        for (unit, _, _, zone), c in zip(units, counts):
             out += [unit] * c
+            zones += [zone] * c
+        # Where they stand, for `fight`: the pack's layout and each unit's zone.
+        self._last_pack = (pack_id, zones)
         return out
 
     # -- actions -----------------------------------------------------------
@@ -1907,12 +1918,31 @@ class RunState:
             return {"won": True, "reason": "empty room"}
 
         layouts = parse_room_layouts(self.tables["RoomLayouts"])
-        layout = layouts[self.rng.randrange(len(layouts))]
+        # The pack chooses the room: `M_EnemyPack.ChooseLayout` takes one of the
+        # pack's own `LayoutsByPack` layouts, and every shipped pack lists
+        # exactly one. This used to be any of the 77 layouts at random, 35 of
+        # which no pack uses.
+        pack_id, zones = self._last_pack or (None, [])
+        by_id = {lay.id: lay for lay in layouts}
+        own = self.pack_layout(pack_id) if self.pack_layouts else None
+        layout = by_id.get(own) if own is not None else None
+        if layout is None:
+            layout = layouts[self.rng.randrange(len(layouts))]
+            zones = []
+        self._last_layout = layout.id
         grid = Grid.from_layout(layout)
         rng = random.Random(self.rng.randrange(1 << 30))
         # Enemies deploy first so a placement policy can see what it is facing,
-        # which is what the game shows the player before a fight starts.
-        team1 = deploy(grid, layout, enemies, 1, "e1", rng)
+        # which is what the game shows the player before a fight starts. Each
+        # pack row names its zone (`EnemyPacks.Zone`, e1 to e3), and
+        # `M_EnemyPack.Create` places the row's units there.
+        if zones and len(zones) == len(enemies):
+            team1 = []
+            for zone in dict.fromkeys(zones):
+                group = [s for s, z in zip(enemies, zones) if z == zone]
+                team1 += deploy(grid, layout, group, 1, zone, rng)
+        else:
+            team1 = deploy(grid, layout, enemies, 1, "e1", rng)
         # The player zone is the roster: one unit per cell, and a squad bigger
         # than the zone leaves the rest out of the fight. `C_Player.FindCell`
         # walks the layout for an empty cell through `C_UnitLayout.IsCellEmpty`,
@@ -1961,6 +1991,13 @@ class RunState:
         res = b.run()
 
         return self._after_fight(team0[:n_humans], team1, res, room)
+
+    def pack_layout(self, pack_id) -> int | None:
+        """The layout `LayoutsByPack` gives a pack, or None."""
+        for row in self.tables.get("LayoutsByPack") or []:
+            if row.get("Pack") == pack_id:
+                return row.get("Layout")
+        return None
 
     def ally_specs(self, allies: list) -> list:
         """The temporary units a Reserve summoned, as specs, `(class, level)`."""

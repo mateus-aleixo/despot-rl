@@ -2136,3 +2136,32 @@ The no-dialog arm reproduces `tools/consumable_value.py`'s 3.367 to the last
 digit, which is the check that turning the dialogs off leaves the rest alone.
 The choice matters: about five decisions a run, worth a sixth of a level
 between a rough heuristic and a coin.
+
+## The pack chooses the room (2026-10-30)
+
+`M_EnemyPack` carries `layouts`, and `ChooseLayout` takes one of them (at random
+among those whose player cells match, logging "Pack id=... does not have any
+associated layouts" when there are none). `LayoutsByPack.json` gives every
+shipped pack exactly one, so **the pack fixes the battlefield**. Each
+`EnemyPacks` row also names a `Zone`, `e1` to `e3`, and every zone a Default
+pack's rows name exists in that pack's layout. The 11 packs with no layout are
+ids 1001 to 1011, which no Default level draws.
+
+The sim used to fight every room in any of the 77 layouts at random, 35 of
+which no pack uses at all, with every enemy in `e1`. Now a fight is fought in
+its pack's layout with each enemy in its row's zone; `RunState.pack_layouts`
+keeps the old draw for measuring. `SpecialRoomLayouts.csv` (`sci-quest` and
+the like) belongs to the quest rooms and waits on them.
+
+`tools/ablate.py pack_layouts --seeds 240 --fast`, the heuristic on seeds
+30,000 to 30,239:
+
+    pack layouts   3.300  (sd 1.137)
+    random layout  3.562  (sd 1.146)
+
+    paired -0.263 [-0.439, -0.086], better on 63 of 240, worse on 94
+
+The packs' own rooms are harder for this squad than a random room was; why has
+not been measured. `tools/ablate.py` is the general form of `tools/hp_cost.py`, for any of the
+`RunState` switches that keep an old behaviour for measuring (`carry_hp`,
+`pack_layouts`, `dialogs_on`).
