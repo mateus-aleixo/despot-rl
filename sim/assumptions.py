@@ -241,24 +241,6 @@ class Assumptions:
     # Settle by: finding the fight timeout in the fight controller.
     max_fight_seconds: float = 120.0
 
-    # `Craggy`'s debuff when the row does not name one. `M_CraggySkill.debuff`
-    # is a `DebuffType` (None/Stun/Silence) carrying a [DefaultValue] whose
-    # value the dump does not give. Read as Stun: the one shipped row without a
-    # `debuff` is a 30% reaction to physical damage, which would do nothing
-    # whatever if the default were None, and a shipped mutation that does
-    # nothing is the less likely reading.
-    # Settle by: resolving the [DefaultValue] attribute on M_CraggySkill.debuff.
-    craggy_default_debuff: str = "Stun"
-
-    # A damage reaction with no `chance` in its row always fires.
-    # `M_DamageReactionSkill.chance` carries a [DefaultValue] the dump does not
-    # give; Untouchable ships without one, and a reaction that never fires is
-    # the less likely reading of a shipped mutation. Same argument as the line
-    # above, and the two would be settled by the same read.
-    # Settle by: resolving the [DefaultValue] attribute on
-    # M_DamageReactionSkill.chance.
-    reaction_default_chance: float = 100.0
-
     # `ClassDiversity` is applied once, before the fight. The game subscribes to
     # fight start and re-picks its target when that unit dies, so a squad that
     # loses the buffed unit gets the bonus back on someone else; here it is lost
@@ -287,21 +269,6 @@ class Assumptions:
     # So Rat and PoringSmall2 are stronger here than they are in the game.
     # Settle by: modelling NC-Fear's panic target, or timing a Rat in game.
     panic_flees: bool = False
-
-    # `M_EvasionSkill.healthThreshold` carries `[DefaultValueAttribute]`, whose
-    # value the dump does not print, and only two of the seven shipped rows set
-    # it. `C_EvasionSkill.OnHealthChanged` sets `_active = healthThreshold >=
-    # health / totalMaxHealth * 100`, so a default below 100 would switch plain
-    # evasion off at full health, which it plainly is not in game. 100 is the
-    # smallest value that keeps every other row always-on.
-    # Settle by: reading the DefaultValue attribute's blob out of the metadata.
-    evasion_health_threshold_default: float = 100.0
-
-    # `M_VampirismSkill.percentage` is likewise defaulted. Only the rows the
-    # game's Meta calls FixedVampirism set it, and they set it to false, so the
-    # unset majority reads as a percentage share of the damage.
-    # Settle by: the same metadata read.
-    vampirism_percentage_default: bool = True
 
     # `C_VampirismSkill.Addon.OnApply` divides the heal by one plus the length
     # of a list carried on the damage and heals each of its members as well as

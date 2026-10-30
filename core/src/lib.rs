@@ -201,7 +201,7 @@ struct Agent {
     dodge_ready_in: f32,
     unit_dodge_cooldown: f32,
     unit_dodge_ready_in: f32,
-    vampirisms: Vec<(f32, bool)>, // (value, percentage)
+    vampirisms: Vec<(f32, bool, i32)>, // (value, percentage, damage mask)
     fury_per_stack: f32,
     fury_stacks: i32,
     reflect_pct: f32,
@@ -870,7 +870,12 @@ impl Sim {
             // `C_VampirismSkill.Addon.OnApply`: a share of the damage capped
             // at what the victim had left, or a flat value for FixedVampirism.
             for k in 0..self.agents[a].vampirisms.len() {
-                let (value, percentage) = self.agents[a].vampirisms[k];
+                let (value, percentage, mask) = self.agents[a].vampirisms[k];
+                // `C_VampirismSkill.OnDamageCreated`: only damage of the
+                // skill's type, and never `Secondary`.
+                if dtype & mask != mask || dtype & DT_SECONDARY != 0 {
+                    continue;
+                }
                 let heal = if percentage {
                     (dealt * value / 100.0).min(victim_hp.max(0.0))
                 } else {
@@ -1773,7 +1778,7 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
             P_MODIFY_DAMAGE => a.damage_bonus.push((p.damage_mask, p.amount, p.flag)),
             P_RESURRECT => a.resurrect = Some((p.chance, p.amount, p.flag)),
             P_EVASION => a.evasions.push((p.chance, p.amount, p.flag)),
-            P_VAMPIRISM => a.vampirisms.push((p.amount, p.flag)),
+            P_VAMPIRISM => a.vampirisms.push((p.amount, p.flag, p.damage_mask)),
             P_EXPLODE => a.explodes.push((p.amount, p.radius, p.chance, p.damage_mask)),
             P_KNOCKBACK => {
                 a.knockbacks

@@ -149,8 +149,12 @@ def handler_for(name: str) -> Handler:
 
 
 def mutation_params(m: dict) -> dict[str, Any]:
-    return {m[f"Param{i}Name"]: m[f"Param{i}Value"]
-            for i in range(1, 9) if m.get(f"Param{i}Name")}
+    """The row's parameters, plus the model defaults it leaves out
+    (`sim/model_defaults.py`)."""
+    from .model_defaults import with_model_defaults
+    return with_model_defaults(m.get("Name"), {
+        m[f"Param{i}Name"]: m[f"Param{i}Value"]
+        for i in range(1, 9) if m.get(f"Param{i}Name")})
 
 
 def by_id(tables: dict) -> dict[int, dict]:
@@ -480,11 +484,10 @@ def fire_on_damaged(battle, victim, attacker, dtype: int) -> None:
             continue
         duration = param(p, "duration", "Duration")
         if name == "Craggy":
-            # DebuffType is None/Stun/Silence, and the property carries a
-            # [DefaultValue] this dump does not give. The shipped row without
-            # one is a 30% reaction to physical damage, which would do nothing
-            # at all if the default were None, so it is read as Stun.
-            debuff = str_param(p, "debuff", "Debuff", default="Stun")
+            # DebuffType is None/Stun/Silence, and the model's default is
+            # Stun (`sim/model_defaults.py`).
+            from .model_defaults import CRAGGY_DEBUFF
+            debuff = str_param(p, "debuff", "Debuff", default=CRAGGY_DEBUFF)
             attacker.apply_status("silence" if debuff == "Silence" else "stun",
                                   duration)
         elif name == "Untouchable":

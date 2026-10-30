@@ -1013,7 +1013,8 @@ that was always 0.
 
 Only row 263 sets `percentage: false`, and the game's `Meta` calls that variant
 FixedVampirism, so the unset majority is a percentage share: that is the reading
-`vampirism_percentage_default` records. Nothing in this sim fills the healer
+`vampirism_percentage_default` recorded, and the model's default confirmed it
+(see "The model defaults, read" at the end of this file). Nothing in this sim fills the healer
 list, so the attacker keeps the whole heal (`vampirism_shares_with_healers`).
 
 The victim-health cap is real and worth keeping: a 20% vampirism swing into a
@@ -1033,7 +1034,8 @@ use it -- mutation 221 (35% under 30% health, the variant `Meta` calls
 LastSecondChance) and the Novice row -- and the sim had been giving both of them
 away at full health. `healthThreshold` is a `[DefaultValueAttribute]` the dump
 does not print; 100 is the only value that leaves a plain evasion always on,
-which is `evasion_health_threshold_default`.
+which is what `evasion_health_threshold_default` assumed and the model's
+default turned out to be.
 
 `OnTryToEvade` gates on the damage itself before it rolls:
 
@@ -2545,3 +2547,55 @@ Against a uniform draw inside the quality, on the heuristic over 2400 seeds
 from 40000, it is worth -0.005 [-0.035, +0.025]: fidelity with nothing
 measurable behind it, as expected of a rule that only reorders which of ten
 equally priced items of a quality turns up.
+
+## The model defaults, read (2026-10-30)
+
+A skill or mutation row fills a model, and a field the row leaves out keeps
+the value its property was built with. Four of `sim/assumptions.py`'s entries
+were guesses at such values, argued from what a shipped row would do under
+each reading, because the dump prints `[DefaultValueAttribute]` without its
+argument. The argument is in code: each attribute line in `dump.cs` carries
+the RVA of the generator that builds it, and the generator passes the value
+to `DefaultValueAttribute..ctor` as an immediate (a `movss` constant, a `dl`
+for a bool, a boxed enum built from `mov dword [rsp+0x30], n`). The models'
+static constructors build the properties with the same constants
+(`M_VampirismSkill..cctor`: `new ReactiveProperty<DamageType>(1)`), and
+`Model.CreateSettings` sets `DefaultValueHandling.Ignore`, so the JSON never
+populates anything and the constructor's value is the one a row gets.
+
+All four guesses stand: evasion's `healthThreshold` is 100, a damage
+reaction's `chance` 100, Craggy's `debuff` Stun (1), vampirism's `percentage`
+true. They are facts now and live in `sim/model_defaults.py`.
+
+The read found what the guesses had missed: `damageType`. It gates a passive
+the same way in every handler read (`C_VampirismSkill.OnDamageCreated`,
+`C_BuffAttackSkill.OnDamageCreated`, `C_DamageReactionSkill.OnDamageInternal`):
+the passive fires only when `(damage.type & damageType) == damageType` and the
+damage is not `Secondary`. A model without the attribute starts at `Empty`,
+which passes everything, and that is what the port gave every row that left
+the field out. The defaults are not empty:
+
+    Physical   Vampirism, BuffAttack, PassiveStun, PassiveBurn, PassiveKnockback,
+               and the damage reactions (Craggy, Untouchable, LoveOfPain)
+    Magical    AggressiveDodge, ReinforcedDamage, PassiveBlock, Blurp,
+               M_DamageOverTimeStatus
+
+Shipped rows that leave it out and are live in the sim: every Vampirism row
+(two skills, four mutations), six BuffAttack rows (one skill, five
+mutations), the Untouchable mutation, and the one Blurp skill. So vampirism
+now heals off physical hits only (a mage with a vampirism mutation heals
+nothing), and never off `Secondary` damage, which the port had not gated
+either; BuffAttack and Untouchable fire on physical damage only; Blurp hits as
+magical damage, through resistance rather than armour. `with_model_defaults`
+writes the default into a row's parameters when it is parsed, so the oracle
+and the core read the same thing.
+
+It changes no heuristic run. Over 2400 seeds from 40000, with the defaults and
+with an empty table, every seed ends on the same level, although 79 of 300
+runs hold a BuffAttack mutation, 18 Untouchable and 13 Vampirism: the squads
+the heuristic builds hit physically, the Vampirism mutation does not attach
+to Mage units at all, and the reactions are rarely hit by magic on the levels
+these runs reach. `tools/diff_core.py` prints the same table before and
+after. The gates matter to a policy that fields mages or meets magic users,
+which is where an agent would find the difference.
+

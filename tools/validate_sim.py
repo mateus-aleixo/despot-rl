@@ -779,11 +779,13 @@ from sim.unit_skills import vampirism_entry as _vampirism_entry
 # Every shipped row names the number `value`, never `percent`. Reading it as
 # `percent` is why vampirism healed exactly nothing, in the oracle and in the
 # core, from the day it was "ported" until this check existed.
-check("a Vampirism row reads its value, not a percent",
-      _vampirism_entry({"value": 5}) == (5.0, True),
+check("a Vampirism row reads its value, not a percent, and feeds on physical damage",
+      _vampirism_entry({"value": 5}) == (5.0, True, _DT_PHY),
       f"{_vampirism_entry({'value': 5})}")
 check("FixedVampirism is a flat heal",
-      _vampirism_entry({"value": 15, "percentage": "false"}) == (15.0, False))
+      _vampirism_entry({"value": 15, "percentage": "false"})[:2] == (15.0, False))
+check("a row that names its damage type keeps it",
+      _vampirism_entry({"value": 5, "damageType": "Magical"})[2] == _DT_MAG)
 check("an Evasion row carries chance, threshold and jumpBack",
       _evasion_entry({"chance": 35, "healthThreshold": 30}) == (35.0, 30.0, False)
       and _evasion_entry({"chance": 40, "jumpBack": "true"})[2] is True,
@@ -793,7 +795,7 @@ check("an absent healthThreshold leaves the skill always on",
 
 _t0, _t1, _b = _mut_fight([23])          # Vampirism, a 5% share of the damage
 check("a Vampirism mutation reaches the agents",
-      all(a.vampirisms == [(5.0, True)] for a in _t0), f"{_t0[0].vampirisms}")
+      all(a.vampirisms == [(5.0, True, _DT_PHY)] for a in _t0), f"{_t0[0].vampirisms}")
 _b.run()
 check("vampirism heals the squad that carries it", _b.healing_done[0] > 0.0,
       f"{_b.healing_done[0]:.1f} healed")
@@ -802,6 +804,39 @@ check("vampirism never heals past the ceiling",
 _t0n, _t1n, _bn = _mut_fight([])
 _bn.run()
 check("the same fight without it heals nothing", _bn.healing_done[0] == 0.0)
+
+# `C_VampirismSkill.OnDamageCreated` attaches the heal only to damage of the
+# model's type, Physical unless the row says otherwise, and never to
+# `Secondary` damage: a magical hit or a splash feeds nobody.
+_t0, _t1, _b = _mut_fight([23])
+_va, _vt = _t0[0], _t1[0]
+_va.hp = _va.max_hp * 0.5
+_hp0 = _va.hp
+_b.hit(0, _vt, 50.0, magical=True, attacker=_va)
+_mag = _va.hp - _hp0
+_b.hit(0, _vt, 50.0, magical=False, attacker=_va, dtype=_DT_PHY | _DT_SEC)
+_sec = _va.hp - _hp0
+_b.hit(0, _vt, 50.0, magical=False, attacker=_va)
+check("vampirism feeds on a physical hit and not on a magical one or a splash",
+      _mag == 0.0 and _sec == 0.0 and _va.hp > _hp0, f"{_mag} {_sec} {_va.hp - _hp0}")
+
+# The other model defaults on `damageType` (`sim/model_defaults.py`), where
+# shipped rows leave it out: BuffAttack and Untouchable on Physical, Blurp's
+# damage Magical.
+from sim.model_defaults import with_model_defaults as _wmd
+from sim.mutations import _mask as _dmask
+from sim.unit_skills import _magical as _is_magical
+check("a BuffAttack or Untouchable row without a damage type gates on Physical",
+      _dmask(_wmd("BuffAttack", {})) == _DT_PHY
+      and _dmask(_wmd("Untouchable", {"stat": "Armor"})) == _DT_PHY
+      and _dmask(_wmd("BuffAttack", {"DamageType": "Magical"})) == _DT_MAG)
+check("Blurp hits as magical damage", _is_magical(_wmd("Blurp", {"damage": 10})))
+check("a model without a default stays ungated",
+      _dmask(_wmd("ExplodeProjectile", {"damage": 5})) == 0)
+_rows = [m for m in _STRICT["SimpleMutations"] if m["Name"] in ("BuffAttack", "Untouchable")]
+from sim.mutations import mutation_params as _mparams
+check("every shipped BuffAttack and Untouchable mutation carries a damage type now",
+      all(_dmask(_mparams(m)) != 0 for m in _rows), f"{len(_rows)} rows")
 
 # `Battle._evaded` is the whole gate in one call, so it can be asked directly
 # rather than inferred from a win rate.

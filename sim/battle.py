@@ -193,7 +193,7 @@ class Agent:
     evasions: list = field(default_factory=list)   # (chance, threshold, jump_back)
     # Same reasoning for vampirism: one `C_VampirismSkill` per source, each
     # with its own damage addon, so two sources heal twice.
-    vampirisms: list = field(default_factory=list)  # (value, percentage)
+    vampirisms: list = field(default_factory=list)  # (value, percentage, damage mask)
     fury_per_stack: float = 0.0
     fury_stacks: int = 0
     regen: tuple[str, float, float] | None = None  # (stat, period, value)
@@ -543,7 +543,12 @@ class Battle:
             attacker.hp -= back                     # Reflection: raw, not re-mitigated
             self.damage_done[tgt.team] += back
         if attacker is not None:
-            for value, percentage in attacker.vampirisms:
+            for value, percentage, mask in attacker.vampirisms:
+                # `C_VampirismSkill.OnDamageCreated` attaches the heal only to
+                # damage of the skill's type (Physical unless the row says
+                # otherwise) that is not `Secondary`.
+                if (dtype & mask) != mask or dtype & DT_SECONDARY:
+                    continue
                 # `C_VampirismSkill.Addon.OnApply`: a percentage share of the
                 # damage, capped at what the victim actually had left, or a
                 # flat `value` when `percentage` is false (the FixedVampirism

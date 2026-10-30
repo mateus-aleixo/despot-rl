@@ -344,9 +344,9 @@ def passive_rows(a, i: int, templates: "_Templates | None" = None) -> list[list[
             row[3], row[8], row[10] = chance, threshold, 1.0 if jump_back else 0.0
             rows.append(row)
 
-        for value, pct in getattr(a, "vampirisms", ()):
+        for value, pct, mask in getattr(a, "vampirisms", ()):
             row = blank(i, P_VAMPIRISM)
-            row[8], row[10] = value, 1.0 if pct else 0.0
+            row[2], row[8], row[10] = mask, value, 1.0 if pct else 0.0
             rows.append(row)
 
         for damage, radius, chance, mask in getattr(a, "explodes", ()):
