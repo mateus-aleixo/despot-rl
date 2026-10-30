@@ -42,7 +42,7 @@ STATUS_SLOT = {"stun": 0, "silence": 1, "panic": 2, "blinked": 3}
  P_UNTOUCHABLE, P_BUFF_ON_CAST, P_MULTICAST, P_BUFF_ON_DEATH, P_STICKY_BLOOD,
  P_RESURRECT, P_COMPENSATION, P_MODIFY_DAMAGE, P_CS_LINK,
  P_DEATH_DAMAGE, P_DEATH_SUMMON, P_EVASION, P_VAMPIRISM,
- P_EXPLODE, P_KNOCKBACK) = range(20)
+ P_EXPLODE, P_KNOCKBACK, P_REVENGE) = range(21)
 
 PASSIVE_KIND = {
     "BuffAttack": P_BUFF_ATTACK, "FearsomeAttack": P_FEARSOME,
@@ -50,6 +50,7 @@ PASSIVE_KIND = {
     "Craggy": P_CRAGGY, "Untouchable": P_UNTOUCHABLE,
     "BuffOnCasted": P_BUFF_ON_CAST, "MultiCast": P_MULTICAST,
     "BuffOnDeath": P_BUFF_ON_DEATH, "StickyBlood": P_STICKY_BLOOD,
+    "Revenge": P_REVENGE,
     "Compensation": P_COMPENSATION,
 }
 
@@ -328,7 +329,12 @@ def passive_rows(a, i: int, templates: "_Templates | None" = None) -> list[list[
                 row[9] = param(p, "saveCooldownPercent")
             elif name == "Compensation":
                 row[8] = param(p, "healthThreshold", "HealthThreshold")
-            put_stats(row, status_stats(p, numbered=(name == "BuffAttack")))
+            if name == "Revenge":
+                from .mutations import REVENGE_DURATION
+                row[4] = REVENGE_DURATION
+                put_stats(row, (("damage", param(p, "amount"), False),))
+            else:
+                put_stats(row, status_stats(p, numbered=(name == "BuffAttack")))
             rows.append(row)
 
         for mask, amount, pct in getattr(a, "damage_bonus", ()):

@@ -96,6 +96,8 @@ const P_EVASION: i32 = 16;
 const P_VAMPIRISM: i32 = 17;
 const P_EXPLODE: i32 = 18;
 const P_KNOCKBACK: i32 = 19;
+/// `C_RevengeSkill`: on death, damage to the allies around, once each.
+const P_REVENGE: i32 = 20;
 
 /// `DamageType`, the flags enum from the game. Only the bits the gates read.
 const DT_PHYSICAL: i32 = 1;
@@ -245,6 +247,8 @@ struct Agent {
     /// ResurrectionChance: (chance%, health value, percentage).
     resurrect: Option<(f32, f32, bool)>,
     resurrected: bool,
+    /// Holds a Revenge bonus already, which does not stack.
+    revenged: bool,
     death_handled: bool,
 }
 
@@ -679,9 +683,27 @@ impl Sim {
                         })
                         .collect()
                 }
+                // `C_RevengeSkill.OnDeath`: allies inside `radius` that hold
+                // no Revenge bonus yet.
+                P_REVENGE => {
+                    let r2 = p.radius * p.radius;
+                    (0..self.agents.len())
+                        .filter(|&j| {
+                            self.agents[j].team == team
+                                && self.agents[j].hp > 0.0
+                                && !self.agents[j].revenged
+                                && (self.agents[j].x - ax).powi(2)
+                                    + (self.agents[j].y - ay).powi(2)
+                                    <= r2
+                        })
+                        .collect()
+                }
                 _ => Vec::new(),
             };
             for j in victims {
+                if p.kind == P_REVENGE {
+                    self.agents[j].revenged = true;
+                }
                 self.add_stat_buff(j, p.duration, &p);
             }
         }
@@ -1700,6 +1722,7 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         damage_bonus: Vec::new(),
         resurrect: None,
         resurrected: false,
+        revenged: false,
         death_handled: false,
     }
 }
@@ -1770,7 +1793,7 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
             }
             P_CRAGGY | P_UNTOUCHABLE => a.on_damaged.push(p),
             P_BUFF_ON_CAST | P_MULTICAST => a.on_cast.push(p),
-            P_BUFF_ON_DEATH | P_STICKY_BLOOD | P_DEATH_DAMAGE | P_DEATH_SUMMON => {
+            P_BUFF_ON_DEATH | P_STICKY_BLOOD | P_DEATH_DAMAGE | P_DEATH_SUMMON | P_REVENGE => {
                 a.on_death.push(p)
             }
             P_COMPENSATION => a.standing.push(p),

@@ -125,7 +125,7 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     # Verified as an on-death buff to allies in radius, but its *stat* lives on
     # the status prefab rather than in the shipped data, so there is no number
     # to implement it from.
-    "Revenge": Handler(UNIMPLEMENTED, note="on-death ally buff, stat not in the data"),
+    "Revenge": Handler(PASSIVE, note="on death, damage to the allies around, once each"),
     "Rage": Handler(UNIMPLEMENTED, note="conditional buff"),
     "Overheal": Handler(UNIMPLEMENTED, note="excess healing becomes a pool"),
     "PassiveBlock": Handler(UNIMPLEMENTED, note="conditional mitigation"),
@@ -437,7 +437,11 @@ def effect_on(specs: list, mutation: dict,
 ON_ATTACK = ("BuffAttack", "FearsomeAttack", "PassiveStun", "ManaBreak")
 ON_DAMAGED = ("Craggy", "Untouchable")
 ON_CAST = ("BuffOnCasted", "MultiCast")
-ON_DEATH = ("BuffOnDeath", "StickyBlood")
+ON_DEATH = ("BuffOnDeath", "StickyBlood", "Revenge")
+
+# `C_RevengeSkill.OnDeath` builds its status with duration -1, for the rest
+# of the fight; both engines read this stand-in for "never runs out".
+REVENGE_DURATION = 1e9
 STANDING = ("Compensation",)
 
 # Every mutation that lands as an agent-level passive rather than a stat. The
@@ -686,6 +690,20 @@ def fire_on_cast(battle, agent, action) -> None:
 def run_death_passives(agent, battle) -> None:
     """`C_BaseOnDeathSkill.OnDeath`, once, after the unit is confirmed dead."""
     for name, p in agent.on_death_passives:
+        if name == "Revenge":
+            # `C_RevengeSkill.OnDeath`: every living ally within `radius` of
+            # the dead unit gets a "Revenge" status of `amount` damage for the
+            # rest of the fight ("increase the damage of allies"), and an ally
+            # that has one gets no second ("this bonus doesn't stack").
+            r2 = param(p, "radius") ** 2
+            for o in battle.agents:
+                if o.team != agent.team or not o.alive or o.revenged:
+                    continue
+                if (o.x - agent.x) ** 2 + (o.y - agent.y) ** 2 <= r2:
+                    o.revenged = True
+                    battle.add_stat_buff(o, REVENGE_DURATION,
+                                         (("damage", param(p, "amount"), False),))
+            continue
         duration = param(p, "duration", "Duration")
         stats = status_stats(p)
         if not stats:

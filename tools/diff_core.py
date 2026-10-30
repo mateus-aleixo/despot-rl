@@ -127,6 +127,7 @@ PASSIVE_CASES = [
     ("ModifyDamage", [355], item_for("Mage")),
     ("StickyBlood", [303], "broadsword"),
     ("BuffOnDeath", [353], "broadsword"),
+    ("Revenge", [316], "broadsword"),
     ("ResurrectionChance", [245], "broadsword"),
     ("Compensation", [374], item_for("Monk")),
     ("CSLinkStatBonus", [379], item_for("Monk")),

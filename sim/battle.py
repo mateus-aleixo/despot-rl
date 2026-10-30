@@ -227,6 +227,8 @@ class Agent:
     # ResurrectionChance: (chance%, health value, percentage)
     resurrect: tuple[float, float, bool] | None = None
     resurrected: bool = False
+    # Holds a Revenge bonus already, which does not stack.
+    revenged: bool = False
     # CSLinkStatBonus: params applied to the class skill's targets on cast
     cs_link_bonus: list = field(default_factory=list)
 

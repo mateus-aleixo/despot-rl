@@ -2704,3 +2704,15 @@ built, on their specs, which both engines read. No heuristic run over the
 not, +0.000, says nothing about its worth; `tools/validate_sim.py` holds it to
 the arithmetic.
 
+**Revenge** (316: radius 100, amount 80, a "random" class). The registry had
+it as "stat not in the data". `C_RevengeSkill.OnDeath` collects the dead
+unit's living allies within `radius` and gives each a "Revenge"
+`StatBonusStatus` set up with `amount`, duration -1 (the fight's length); the
+description names the stat ("increase the damage of allies") and says the
+bonus does not stack, which an ally that already holds one keeps to. Both
+engines now carry it as an on-death passive (`P_REVENGE` in the core), with a
+per-unit flag for the no-stacking. `tools/diff_core.py` has a Revenge row and
+agrees as the other on-death rows do (16/16 at 1v1 and 2v2, 12/16 at 4v6
+against BuffOnDeath's 12/16). On the heuristic, against not: -0.001
+[-0.006, +0.004] over 2400 seeds from 40000, 241 runs ending with it.
+

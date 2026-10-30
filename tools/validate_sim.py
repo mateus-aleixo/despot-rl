@@ -903,6 +903,23 @@ _ci = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 215]
 _t0c, _t1c, _bc = _mut_fight([221])
 _before = [e[0] for e in _t0c[0].evasions]
 _boost(_t0c[0], _bonuses(_ci, _t0c[0].spec.cls))
+# Revenge (316: radius 100, +80 damage): a death hands every living ally in
+# the radius the bonus for the rest of the fight, and a second death adds
+# nothing to an ally that has it.
+from sim.mutations import run_death_passives as _rdp
+_t0r, _t1r, _br = _mut_fight([], n=3, foes=2)
+_dead, _near, _far = _t0r
+_near.x, _near.y = _dead.x + 50.0, _dead.y
+_far.x, _far.y = _dead.x + 150.0, _dead.y
+_dead.on_death_passives = [("Revenge", {"radius": 100, "amount": 80})]
+_dmg0 = (_near.damage, _far.damage)
+_rdp(_dead, _br)
+_dmg1 = (_near.damage, _far.damage)
+_rdp(_dead, _br)
+check("Revenge: +80 damage to an ally 50 away, none 150 away, and no second helping",
+      _dmg1 == (_dmg0[0] + 80.0, _dmg0[1]) and _near.damage == _dmg1[0],
+      f"{_dmg0} -> {_dmg1} -> {(_near.damage, _far.damage)}")
+
 # Underdog (259: +10 armour per enemy beyond the squad's count) at fight start.
 from sim.mutations import underdog as _underdog
 _ud = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 259]
