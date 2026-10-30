@@ -63,10 +63,11 @@ def test_level_shape(row, seed):
                 todo.append(n)
     assert seen == cells
 
-    # `CheckNeighborCount`, and the 2x2 rationing that keeps levels thin.
-    assert all(len(neighbours(cells, p)) <= 3 for p in cells)
+    # The 2x2 rationing that keeps levels thin. `MaybeMakeRoom` holds growth and
+    # `Adjust` to it; `CloseLoops` writes rooms directly and can add a block.
+    # Nothing bounds a room's neighbours (`CheckNeighborCount` has no caller).
     squares = sum(1 for r, c in cells if {(r + 1, c), (r, c + 1), (r + 1, c + 1)} <= cells)
-    assert squares <= len(rooms) // 10 + 1
+    assert squares <= len(rooms) // 10 + 2
 
     assert rooms[level["start"]][2] == "start" and rooms[level["boss"]][2] == "boss"
     assert level["start"] != level["boss"]
@@ -76,16 +77,17 @@ def test_level_shape(row, seed):
     assert kinds["mutation"] == row.get("Shrines", 0)
     assert kinds["mutation_shop"] == row.get("RerollShrines", 0)
 
-    # Portals: between two and `portalsCount + 1`, never on the boss, all at
-    # least `minPortalDistance` apart by doors, and the start one exactly when
-    # the level is 5 or 9.
+    # Portals: none (a step that lands fewer than two is undone, which a compact
+    # small level can force) or between two and `portalsCount + 1`, never on
+    # the boss, all at least `minPortalDistance` apart by doors, and the start
+    # one exactly when the level is 5 or 9.
     dist = door_distances(cells)
     portals = [rooms[p][:2] for p in level["portals"]]
-    assert 2 <= len(portals) <= portals_count(len(rooms)) + 1
+    assert not portals or 2 <= len(portals) <= portals_count(len(rooms)) + 1
     assert rooms[level["boss"]][:2] not in portals
     assert all(dist[a][b] >= MIN_PORTAL_DISTANCE
                for i, a in enumerate(portals) for b in portals[i + 1:])
-    assert (level["start"] in level["portals"]) == start_is_portal(row["ID"])
+    assert not portals or (level["start"] in level["portals"]) == start_is_portal(row["ID"])
 
     # The finish can see `minFinishDistance`; every level after the first
     # opens in an item shop.

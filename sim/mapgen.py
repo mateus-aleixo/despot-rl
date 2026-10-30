@@ -52,20 +52,19 @@ permanently, that position is never offered again -- unless both hold:
 Those two are what stop the weight function from producing a rectangle. A level
 is a thin, winding shape because 2x2 blocks are rationed to `num / 10 + 1`.
 
-`Adjust` then removes dead ends outright -- `deadends[0].state = Never` -- while
-there are more than `maxDeadEnds` of them, and `CloseLoops` runs afterwards with
-an iteration cap of 10. `CheckNeighborCount` separately keeps any room from
-having four room-neighbours.
-
-`maxDeadEnds` is the one parameter this port could not recover. `C_Rooms.Generate`
-never writes that field, which reads as a zero, and zero is impossible: a level
-with **no** dead ends must be a union of cycles, and an exhaustive search says no
-7-room shape satisfies that together with the neighbour ceiling and
-`maxSquares = 1` -- while level 1 is exactly 7 rooms (`MinRooms == MaxRooms == 7`).
-So something outside `C_Rooms.Generate` sets it. Until that is found, `Adjust`
-here prunes dead ends only while the map is over its room count, which keeps the
-count exact and lets the growth rule decide how many dead ends are left. See
-`sim/assumptions.py`.
+Growth runs once, until the map holds `num` rooms. `Adjust` then trades dead
+ends for rooms elsewhere: while there are more than `maxDeadEnds` (0, the field
+is never written), the farthest dead end becomes `Never` and a replacement goes
+on an open position drawn uniformly, retried until `MaybeMakeRoom` takes one.
+It stops when no dead end is left or no open position is accepted, and in the
+second case the last cut is undone, which is how a 7-room level, which cannot be
+all loops, comes out of it. `CloseLoops` then moves the farthest dead end into
+the one gap of any ring of seven rooms around an empty centre, up to ten passes,
+writing the state directly; it can leave an extra 2x2 block that
+`MaybeMakeRoom` would have refused. Nothing bounds a room's neighbours:
+`CheckNeighborCount` is in the binary with no caller. `GetDeadends`, which both
+call, also puts every refused position back on the open list. See
+`Generator.build`.
 
 ## The placement
 
@@ -170,7 +169,7 @@ class Generator:
     """`LevelGenerator`, over one-square rooms."""
 
     def __init__(self, num: int, rng: random.Random, min_finish_distance: int = 0,
-                 max_dead_ends: int | None = None):
+                 max_dead_ends: int = 0):
         self.rng = rng
         self.num = num
         self.max_squares = num // 10 + 1
@@ -210,10 +209,6 @@ class Generator:
         return sum(1 for (r, c) in rooms
                    if {(r + 1, c), (r, c + 1), (r + 1, c + 1)} <= rooms)
 
-    def check_neighbour_count(self) -> bool:
-        """`CheckNeighborCount`: no room may have four room-neighbours."""
-        return all(self.n_count(p) <= 3 for p in self.rooms())
-
     def adjacency(self) -> dict:
         rooms = set(self.rooms())
         return {p: [(p[0] + d[0], p[1] + d[1]) for d in DIRS
@@ -247,12 +242,18 @@ class Generator:
                 + 2.0 ** far * far + 2.0)
 
     def maybe_make_room(self, pos) -> bool:
-        """`MaybeMakeRoom`: commit the position, or refuse it for good."""
+        """`MaybeMakeRoom`: commit the position, or refuse it (`No`) until
+        `GetDeadends` puts it back.
+
+        Two checks and no more: `CalculateSquares` against `maxSquares`, and
+        `CheckMultiSquares`. `CheckNeighborCount` exists in the binary and has
+        no caller, so a room may have four room-neighbours; this port used to
+        apply it.
+        """
         self.state[pos] = YES
         ok = (self.calculate_squares() <= self.max_squares
               and all(self.squares_at(p) <= self.max_squares_at_once
-                      for p in self.rooms())
-              and self.check_neighbour_count())
+                      for p in self.rooms()))
         if not ok:
             self.state[pos] = NO
             return False
@@ -283,84 +284,103 @@ class Generator:
             self.maybe_make_room(self.rng.choices(open_positions, weights=weights)[0])
 
     def dead_ends(self) -> list:
-        """`GetDeadends`: rooms with exactly one room-neighbour."""
-        return [p for p in self.rooms() if self.n_count(p) == 1]
+        """`GetDeadends`: rooms with exactly one room-neighbour, farthest first.
+
+        The walk over the grid has a side effect the rest of the generator
+        leans on: every position `MaybeMakeRoom` refused (`No`) goes back to
+        `Maybe` and onto the open positions, so a refusal is only final until
+        the next call. `Never` stays. The list is sorted by `RoomNode.distance`,
+        largest first (`<GetDeadends>b__45_0`); `List.Sort` is an introsort,
+        and a stable sort stands in for it on ties.
+        """
+        for p, st in list(self.state.items()):
+            if st == NO:
+                self.state[p] = MAYBE
+        ends = [p for p in self.rooms() if self.n_count(p) == 1]
+        depth = self.distances_from(self.anchor())
+        return sorted(ends, key=lambda p: -depth.get(p, 0))
+
+    def open_positions(self) -> list:
+        """`openPositions`: positions beside a room that may become one."""
+        return [p for p, st in self.state.items()
+                if st == MAYBE and self.n_count(p) > 0]
 
     def close_loops(self) -> int:
-        """`CloseLoops`: give a dead end a second neighbour, up to ten passes.
+        """`CloseLoops`: move dead ends into the one gap of a ring of rooms.
 
-        A dead end is closed by making a room out of a free position that
-        touches both it and something else, so the limb becomes part of a
-        cycle. This is the counterpart of `Adjust`: between them a level ends
-        with no room that has fewer than two neighbours, which with
-        `CheckNeighborCount`'s ceiling of three is why a level reads as a web of
-        loops rather than as a tree of corridors. The game's own version is a
-        larger routine and its iteration cap of ten is the one thing about it
-        read directly.
+        For every position on the grid, the 3 x 3 block it is the top-left
+        corner of: when the centre has no room and exactly seven of the eight
+        cells around it do, the farthest dead end is taken out (`No`) and the
+        eighth cell becomes a room (`Yes`). The count does not change, and no
+        shape rule is checked on the way: the state is written directly. A
+        pass that moves something is followed by another, ten at most.
         """
-        added = 0
+        ring = ((0, 0), (0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1), (2, 2))
+        moved_total = 0
         for _ in range(10):
-            ends = self.dead_ends()
-            # Closing a loop adds a room, so it stops at the level's room count
-            # rather than overshooting it; `Adjust` is what trims, and it only
-            # cuts dead ends.
-            if not ends or len(self.rooms()) >= self.num:
+            moved = False
+            for p in list(self.state):
+                if self.state.get((p[0] + 1, p[1] + 1)) == YES:
+                    continue
+                cells = [(p[0] + dr, p[1] + dc) for dr, dc in ring]
+                gaps = [q for q in cells if self.state.get(q) != YES]
+                if len(gaps) != 1:
+                    continue
+                ends = self.dead_ends()
+                if not ends:
+                    continue
+                self.state[ends[0]] = NO
+                self.state[gaps[-1]] = YES
+                moved, moved_total = True, moved_total + 1
+            if not moved:
                 break
-            progress = False
-            for end in ends:
-                if len(self.rooms()) >= self.num:
-                    break
-                options = []
-                for d in DIRS:
-                    p = (end[0] + d[0], end[1] + d[1])
-                    if self.state.get(p, MAYBE) in (MAYBE, NO) and self.n_count(p) >= 2:
-                        options.append(p)
-                if options and self.maybe_make_room(self.rng.choice(options)):
-                    added += 1
-                    progress = True
-            if not progress:
-                break
-        return added
+        return moved_total
 
     def adjust(self) -> None:
-        """`Adjust`: cut dead ends, `deadends[0].state = Never`.
+        """`Adjust`: trade dead ends for rooms elsewhere until none is left.
 
-        With `maxDeadEnds` unrecovered (see the module docstring) the budget is
-        the room count instead: prune while the map is both over its count and
-        holding a dead end. A cut room becomes `Never`, so the map cannot regrow
-        the limb it just lost, which is what makes prune-and-regrow terminate.
+        While there are more dead ends than `maxDeadEnds` (0: the field is
+        never written), the farthest one becomes `Never`, every grid position
+        left touching no room is dropped from the grid, and a replacement room
+        goes on an open position drawn uniformly (`RND.Element`, not the
+        growth's weighted draw) through `MaybeMakeRoom`, retried until one is
+        accepted. So the count stays `num`. When the open positions run out the
+        last cut is undone and the loop ends; that is what keeps a small level,
+        which cannot be all loops, from failing.
         """
         while True:
             ends = self.dead_ends()
-            budget = (len(self.rooms()) - self.num if self.max_dead_ends is None
-                      else len(ends) - self.max_dead_ends)
-            if not ends or budget <= 0 or len(self.rooms()) <= 3:
+            if len(ends) <= self.max_dead_ends:
                 return
-            # The deepest first: a shallow dead end is likely to be the neck of
-            # something worth keeping.
-            depth = self.distances_from(self.anchor())
-            self.state[max(ends, key=lambda p: (depth.get(p, 0), p))] = NEVER
+            cut = ends[0]
+            self.state[cut] = NEVER
+            for p in list(self.state):
+                if self.n_count(p) == 0 and self.state[p] != YES:
+                    del self.state[p]
+            placed = False
+            while True:
+                options = self.open_positions()
+                if not options:
+                    break
+                if self.maybe_make_room(self.rng.choice(options)):
+                    placed = True
+                    break
+            if not placed:
+                self.state[cut] = YES
+                return
+            if not self.open_positions():
+                return
 
     def build(self) -> None:
-        """`Generate`'s growth phase: grow, `CloseLoops`, `Adjust`, repeat.
+        """`Generate`'s shape: grow to `num`, then `Adjust`, then `CloseLoops`.
 
-        The game runs the growth loop once and then `Adjust` and `CloseLoops`,
-        which between them change the room count -- `Adjust` cuts and
-        `CloseLoops` adds -- so the count and the dead-end rule cannot both be
-        satisfied in one pass. Repeating the three until they agree is this
-        port's reading; the alternative, that the game accepts whatever count
-        falls out, cannot be told apart from the outside because
-        `C_Levels.CalculateLevelsRoomsCount` is what the run actually reads.
+        Once each, in that order, as `LevelGenerator.Generate` calls them.
+        Both keep the count at `num`: `Adjust` replaces every room it cuts and
+        `CloseLoops` moves rooms rather than adding them.
         """
-        for _ in range(40):
-            self.grow(self.num)
-            self.close_loops()
-            self.adjust()
-            if len(self.rooms()) == self.num:
-                return
-            if not [p for p, s in self.state.items()
-                    if s == MAYBE and self.n_count(p) > 0]:
-                return
+        self.grow(self.num)
+        self.adjust()
+        self.close_loops()
 
     # -- the graph the placement rules read --------------------------------
     def articulation_points(self, adj) -> set:

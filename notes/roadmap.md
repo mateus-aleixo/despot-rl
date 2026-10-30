@@ -72,9 +72,9 @@ matching, and every constant either read from the shipped data or recorded in
 `sim/assumptions.py` as a choice.** That is checkable, and `tools/diff_core.py`
 already works to exactly this standard for the battle loop.
 
-Some constants will never be recovered: `maxDeadEnds`, `minFinishDistance`,
-whether a room may cover several squares, the anti-repeat weighting inside a
-quality. `sim/assumptions.py` is the honest boundary of the work, not a list
+Some constants will never be recovered: whether a room may cover several
+squares, the anti-repeat weighting inside a quality. (`maxDeadEnds` and
+`minFinishDistance`, once on this list, were both recovered.) `sim/assumptions.py` is the honest boundary of the work, not a list
 that eventually empties.
 
 ## The rule that makes completeness real
@@ -208,11 +208,13 @@ thrown away.
 - ~~**`InstantTransitions`**~~ **closed, 2026-10-30**: `M_GameData.instantTransitions`
   is false in every shipped ruleset, and the path it would switch on,
   `C_Rooms.InstantMove`, spends food through `C_Food.Move` exactly as a walk
-  does. Nothing to model. Still open: one more attempt at `maxDeadEnds` and
-  multi-square rooms. `minFinishDistance` is recovered. `maxDeadEnds` really is
-  0 (the struct is zeroed and the one delegate subscriber does not touch it), so
-  the next place to look is `LevelGenerator.Adjust` itself, and the room-list
-  order is in `CreateRooms`.
+  does. Nothing to model.
+- ~~**`maxDeadEnds`**~~ **Done, 2026-10-30.** It really is 0; what the port had
+  wrong was `Adjust`, which trades each cut dead end for a room on a uniformly
+  drawn open position, keeping the count, and stops when none is accepted
+  (undoing the last cut). `CloseLoops` moves dead ends into the gap of a ring
+  of seven rooms. Growth, `Adjust`, `CloseLoops` run once each. Still open:
+  multi-square rooms.
 
 **Boundary:** re-baseline random + heuristic over 240 seeds, squads cycled, then
 one sweep for the `to_boss` question, which is a genuine fork rather than a

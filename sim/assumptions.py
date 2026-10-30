@@ -126,23 +126,13 @@ class Assumptions:
     mana_per_damage_dealt: float = 0.5
     mana_per_damage_taken: float = 0.5
 
-    # `GenerationParams.maxDeadEnds`, the budget `LevelGenerator.Adjust` prunes
-    # dead ends down to. `C_Rooms.Generate` never writes the field, which reads
-    # as zero, and zero cannot be right: a map with no dead ends is a union of
-    # cycles, and an exhaustive search over 7-cell shapes finds none that also
-    # satisfies the neighbour ceiling of 3 and `maxSquares = 1` -- while level 1
-    # is exactly 7 rooms. `sim/mapgen.py` prunes only while the map is over its
-    # room count instead, which keeps the count exact and leaves the growth
-    # rule to decide how many dead ends survive (about 2.8 a map).
-    #
-    # The obvious writers are ruled out. The struct is zeroed with a `movups`
-    # over `rsp + 0x40`, which covers the field, and the one subscriber to
-    # `BeforeGenerationDelegate` is `C_RoomCountMutation.OnBeforeGeneration`,
-    # which adds to `num` and the shop counts and to nothing else. So the field
-    # really is 0, and what has to give is this port's reading of `Adjust`.
-    # Settle by: reading `LevelGenerator.Adjust` (off 0x674460) for whatever
-    # stops it short of zero dead ends.
-    map_max_dead_ends: int | None = None
+    # The order of positions in `openPositions` and on the grid. `Adjust` and
+    # `CloseLoops` draw from and walk them, and the sim keeps one dictionary
+    # in insertion order where the game keeps a list that positions leave and
+    # rejoin at the end; and `RoomNode.distance`, which orders the dead ends, is
+    # read here as the walk from the seed (or any room once the seed is cut).
+    # Settle by: reading `AddOpenPosition` and the writers of `distance`.
+    map_adjust_order_approximate: bool = True
 
     # Rooms covering more than one grid square. `maxSquares = num / 10 + 1` and
     # `maxSquaresAtOnce = 1 + (num >= 15)` are read as constraints on how many

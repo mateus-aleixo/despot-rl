@@ -1310,20 +1310,23 @@ for _seed in range(40):
         _cells = {(r.row, r.col) for r in _m.rooms.values()}
         _deg = {p: sum(((p[0] + d[0], p[1] + d[1]) in _cells) for d in _DIRS)
                 for p in _cells}
-        # `CheckNeighborCount`: no room may have four room-neighbours
+        # Rooms with four room-neighbours do occur: `CheckNeighborCount` is in
+        # the binary with no caller, and the Pit quest's room allows all four doors.
         if max(_deg.values()) > 3:
             _deg4.append((_row["ID"], max(_deg.values())))
-        # `CheckSquares` / `CheckMultiSquares`: 2x2 blocks are rationed
+        # `CalculateSquares` / `CheckMultiSquares`: 2x2 blocks are rationed while
+        # rooms are made; `CloseLoops` writes rooms directly and can add one.
         _num = len(_cells)
         _sq = sum(1 for (r, c) in _cells
                   if {(r + 1, c), (r, c + 1), (r + 1, c + 1)} <= _cells)
-        if _sq > _num // 10 + 1:
+        if _sq > _num // 10 + 2:
             _big.append((_row["ID"], _sq, _num // 10 + 1))
         # and the map is one piece
         if len(_m.to_boss) != len(_m.rooms):
             _cut.append(_row["ID"])
-check("no room has four neighbours (CheckNeighborCount)", not _deg4, f"{_deg4[:4]}")
-check("2x2 blocks stay inside maxSquares", not _big, f"{_big[:4]}")
+check("rooms with four neighbours occur, nothing forbidding them", len(_deg4) > 0,
+      f"{len(_deg4)} maps")
+check("2x2 blocks stay inside maxSquares, but for what CloseLoops adds", not _big, f"{_big[:4]}")
 check("a generated map is one connected piece", not _cut, f"{_cut[:4]}")
 
 # the boss room is what `CouldBeFinishRoom` allows: never an articulation point,
@@ -1434,7 +1437,7 @@ for _seed in range(40):
         _d, _ = _graph(_m)
         _p = _m.portals
         _counts[len(_p)] += 1
-        if not (2 <= len(_p) <= portals_count(len(_m.rooms)) + 1):
+        if _p and not (2 <= len(_p) <= portals_count(len(_m.rooms)) + 1):
             _bad_room.append((_row["ID"], "count", len(_p)))
         if _m.boss in _p:
             _bad_room.append((_row["ID"], "boss"))
@@ -1442,10 +1445,10 @@ for _seed in range(40):
             for _b in _p[_i + 1:]:
                 if _d[_a][_b] < MIN_PORTAL_DISTANCE:
                     _close.append((_row["ID"], _a, _b, _d[_a][_b]))
-        if start_is_portal(_row["ID"]) != (_m.start in _p):
+        if _p and start_is_portal(_row["ID"]) != (_m.start in _p):
             (_forced if start_is_portal(_row["ID"]) else _unforced).append(_row["ID"])
-check("every generated level has between 2 and portalsCount + 1 portals, none "
-      "on the boss", not _bad_room,
+check("every generated level has none (the step undone) or between 2 and "
+      "portalsCount + 1 portals, none on the boss", not _bad_room,
       f"{dict(sorted(_counts.items()))} over 480 levels, {_bad_room[:4]}")
 check("portals are at least minPortalDistance apart", not _close, f"{_close[:4]}")
 check("the start is a portal on levels 5 and 9 and on no other",

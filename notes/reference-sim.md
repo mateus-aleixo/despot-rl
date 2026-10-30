@@ -713,7 +713,10 @@ maxSquaresAtOnce`. Those two rations of 2x2 blocks are what keep the tenth power
 from filling in a rectangle, and they are why a level comes out a thin winding
 web rather than a blob: mean degree 2.17, about 2.8 dead ends, and no room with
 four neighbours (`CheckNeighborCount`). `Adjust` cuts dead ends and `CloseLoops`
-closes them into cycles. The boss room is what `CouldBeFinishRoom` allows --
+closes them into cycles. (Corrected 2026-10-30: `CheckNeighborCount` has no
+caller, so rooms with four neighbours are allowed and common, and `Adjust` and
+`CloseLoops` work differently from this description; see "The generator's last
+two steps" below.) The boss room is what `CouldBeFinishRoom` allows --
 never an articulation point, either a dead end or a room with exactly two
 neighbours -- chosen by `ChooseFinishRoom`'s average distance, with the start
 furthest from it and the shops spread by `ChooseDiversePositions`' relaxing
@@ -2401,3 +2404,41 @@ With the six controllers of levels 6 and 10 in, the same measurement reads the
 same, -0.121 [-0.286, +0.044], and it has to: with quests on, none of the 240
 heuristic runs reaches level 6. Those quests are held to the checks in
 `tools/validate_sim.py`, not to this number.
+
+## The generator's last two steps, read (2026-10-30)
+
+`LevelGenerator.Generate` grows the map once, until it holds `num` rooms, then
+calls `Adjust`, `CloseLoops`, `CreateRooms` and `InitRooms` once each, makes the
+secret rooms, and runs `PositionRooms`. The port had repeated grow, close and
+cut until the count came out right, on a reading of the two steps that was
+wrong in both directions.
+
+  * **`Adjust`** never shrinks the map. While there are more dead ends than
+    `maxDeadEnds`, which really is 0, it marks the farthest one `Never`
+    (`GetDeadends` sorts by `RoomNode.distance`, largest first), drops every
+    grid position left touching no room, and puts a replacement room on an
+    open position drawn uniformly (`RND.Element`, where growth draws by
+    weight), retrying through `MaybeMakeRoom` until one is accepted. When none
+    is, it undoes the last cut and stops. That last clause is how a 7-room
+    level, which cannot be all loops, comes through a target of zero.
+  * **`CloseLoops`** never adds a room either. For each grid position it looks
+    at the ring of eight cells around the cell diagonally below and right of
+    it; when that centre is empty and exactly seven of the eight are rooms, the
+    farthest dead end becomes `No` and the eighth cell becomes a room, written
+    directly with no shape check. It repeats while a pass moves something, ten
+    passes at most.
+  * **`GetDeadends`**, called by both, also turns every `No` position back to
+    `Maybe` and puts it on the open list, so a refusal by `MaybeMakeRoom` holds
+    only until the next call.
+  * **`CheckNeighborCount` has no caller**, direct or through a delegate (there
+    is no `Method$` entry for it), and `MaybeMakeRoom` checks only the two
+    2x2 rations. The port had applied a ceiling of three room-neighbours.
+    Without it most maps have a crossroads room (44 of 60 level-1 maps, 59 of
+    60 at level 12), which fits the Pit quest's room allowing doors on all
+    four sides.
+
+The count is now `num` on every map. Dead ends per level-1 map went from 2.25
+to 2.17, and about 2% of level-1 maps are now compact enough that
+`ChoosePortals` lands fewer than two portals and the step is undone. The
+heuristic reaches 3.237 on the new maps against 3.183 on the old, over the same
+240 seeds but unpaired (the maps differ), so nothing beyond noise.
