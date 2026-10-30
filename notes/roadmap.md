@@ -197,7 +197,10 @@ thrown away.
   `LayoutsByPack` layout with every enemy in its row's zone, where the sim drew
   any of 77 layouts with everyone in `e1`. Worth -0.263 [-0.439, -0.086] to the
   heuristic. `SpecialRoomLayouts.csv` waits on the quests.
-- **`InstantTransitions`**, and one more attempt at `maxDeadEnds` and
+- ~~**`InstantTransitions`**~~ **closed, 2026-10-30**: `M_GameData.instantTransitions`
+  is false in every shipped ruleset, and the path it would switch on,
+  `C_Rooms.InstantMove`, spends food through `C_Food.Move` exactly as a walk
+  does. Nothing to model. Still open: one more attempt at `maxDeadEnds` and
   multi-square rooms. `minFinishDistance` is recovered. `maxDeadEnds` really is
   0 (the struct is zeroed and the one delegate subscriber does not touch it), so
   the next place to look is `LevelGenerator.Adjust` itself, and the room-list
