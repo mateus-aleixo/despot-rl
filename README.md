@@ -9,9 +9,9 @@ a gap, the simulator follows the game's compiled code. What is still a guess is 
 
 ![A trained agent playing a run](docs/run.gif)
 
-*An agent from September 2026, before the fog of war was added, playing `Squad2` to level 6.
-The full run is in [`docs/run.mp4`](docs/run.mp4), rendered with
-[`tools/render_run.py`](tools/render_run.py).*
+*A PPO agent trained for 2M steps, playing `Squad2` to level 5 on seed 30185. It is one of
+its better runs: the agent averages about level 3. The full two-minute run is in
+[`docs/run.mp4`](docs/run.mp4), rendered with [`tools/render_run.py`](tools/render_run.py).*
 
 ## What is in it
 
@@ -67,7 +67,7 @@ also runs without it, about 140x slower per fight.
     pytest                           # about two minutes with data/
     pytest -m "not needs_data"       # what CI runs: no game data needed
     python rl/train.py --steps 2000000 --checkpoint-every 1000000 --seed 0
-    python tools/render_run.py --agent runs/<checkpoint>.pt --seed 30039
+    python tools/render_run.py --agent runs/<checkpoint>.pt --seed 30185
 
 ## Data
 

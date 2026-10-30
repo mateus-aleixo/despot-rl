@@ -57,11 +57,16 @@ KIND_COLOR = {
     "mutation": MUT,
     "mutation_shop": MUT,
     "talent_shop": (87, 182, 196),
+    "consumable_shop": (222, 140, 80),
+    "quest": (236, 214, 118),
+    "quest_extra": (150, 136, 74),
+    "secret": (120, 120, 140),
     "empty": (42, 48, 60),
 }
 KIND_GLYPH = {"start": "S", "fight": "", "boss": "B", "item_shop": "$",
               "food_shop": "F", "mutation": "*", "mutation_shop": "*",
-              "talent_shop": "T", "empty": ""}
+              "talent_shop": "T", "consumable_shop": "C", "quest": "!",
+              "quest_extra": "!", "secret": "?", "empty": ""}
 
 
 def font(size: int, bold: bool = False, mono: bool = False):
@@ -514,9 +519,9 @@ def encode(imgs, out: str, fps: int) -> int:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--agent", default="runs/shelf2m_described_s1.pt",
+    ap.add_argument("--agent", default="runs/fog2m_noboss_s1.pt",
                     help="checkpoint, or 'heuristic'")
-    ap.add_argument("--seed", type=int, default=30_001)
+    ap.add_argument("--seed", type=int, default=30_185)
     ap.add_argument("--out", default="docs/run.mp4")
     ap.add_argument("--hold", type=int, default=9,
                     help="frames a decision is held for")
