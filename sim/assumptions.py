@@ -224,6 +224,26 @@ class Assumptions:
     # in full.
     dialogs_single_choice_auto: bool = True
 
+    # Quests, where the port chooses (`sim/quests.py`). (1) The quest of a level
+    # is drawn uniformly from its shortlist; the game's `DynamicWeightedList`
+    # is static across the runs of one launch and biases against a quest drawn
+    # in an earlier run, which independent runs cannot carry. (2) The five
+    # Novices the Pit kills are the first five in squad order; the game kills
+    # whoever stands on the room's first five `guaranteedPositions`, which the
+    # dungeon placement decides and the sim does not model. (3) A quest
+    # companion (the Sci Zombie, the Rat) takes no experience and no items,
+    # and counts as a unit for food; `C_Team.GetExperience`'s eligibility and
+    # the trait `InitZombie` sets were not read. (4) A quest prop
+    # (`cube-part`, `rat-flute`) is a flag on the quest, since the sim has no
+    # inventory. (5) A human `ReplaceUnit` turns into the Zombie loses the item
+    # it held; `C_Player.DownGradeUnit` was not read for where it goes. (6) The
+    # controllers of the level 6 and level 10 quests are not ported: their
+    # rooms are placed, typed and fought, and their dialogs never run.
+    # Settle by: reading `C_UnitLayout`'s use of `guaranteedPositions`,
+    # `C_Team.GetExperience` and `C_Player.DownGradeUnit`, and porting the
+    # remaining seven controllers.
+    quests_partly_ported: bool = True
+
     # A fight is called a draw if neither side dies within this long. The game
     # has some real timeout or sudden-death rule.
     # Settle by: finding the fight timeout in the fight controller.

@@ -2193,3 +2193,147 @@ The heuristic takes it before anything else on a shelf. All fourteen consumables
 but `DamageAllEnemies`, which no Default level lists, now do what they do in
 the game. With them all, the shop is worth +0.692 [+0.569, +0.814] to the
 heuristic (`tools/consumable_value.py`, dialogs and pack layouts on).
+
+## Quests, the level-2 four implemented (2026-10-30)
+
+### Where the dialogs were
+
+The quest dialogs are in neither `dialogs.json` nor any table under the
+encrypted groups, and only four of their localization keys appear as string
+literals in the code. They are NodeCanvas `DialogueTree` graphs serialized into
+the quest prefabs, each a `DialogueTreeController` whose `_serializedGraph` is
+a JSON string inside a MonoBehaviour of `sharedassets2.assets` or
+`sharedassets3.assets`. The MonoBehaviours have no type trees (IL2CPP strips
+them), so `tools/dump_dialogue_trees.py` reads the string by hand after the
+fixed header and names each graph `<prefab root>.<GameObject>`. 34 come out;
+32 belong to the eleven quests (the Spider quest's keys say `Monster`), two to
+the despot's own dialogues. The same `CheckQuestStatus : DialogConditionTask`
+class in `dump.cs` is what pointed at NodeCanvas.
+
+A graph is walked as NodeCanvas walks it: an action node runs its action list
+and goes to its child, a condition node to its first child when the condition
+holds and its second when not, a statement to its child, and a
+multiple-choice node waits for the player. Every graph has node 0 as its only
+root, every condition node exactly two children, and no node more than three
+choices, so the existing `choose_0..3` actions cover them. Of the 31 action
+types only `SetStatus`, `ApplyOutcome`, `CallFunction` (and its
+`CallFunctionAndWaitForEvent` and generic forms) and `CheckEndGame` touch the
+game; the rest are camera, sound, animation and input. `ApplyOutcome(i)`
+applies `outcomes[i - 1]` through `C_Dialogs.ApplyEvents`, the event engine
+the level dialogs already use. `CheckQuestStatus` is an equality test whose
+unset parameter is 0 (Uninitialized), and `DeselectNovices` starts a UI
+coroutine and returns true.
+
+### Which quest, and when its dialog runs
+
+`DataLoaders.LevelData.Load` splits each `Levels.Quest` shortlist on commas into
+a `DynamicWeightedList<string>` (factor 2), keeps it in a static dictionary
+keyed by the shortlist's text, and draws one name per level into
+`M_LevelData.randomizedQuestNames`; `C_Levels.CreateQuestModel` writes that
+quest's row into the level data. The sim draws uniformly, the same reading the
+item shop's `DynamicWeightedList` gets: the list's bias works across the runs
+of one launch, which independent runs cannot carry.
+
+`V_Rooms.MoveCamera` calls `V_Quest.Launch` on every arrival in a room that has
+a `V_Quest`, and `Launch` runs the dialog `GetDialogIndex(room)` names, none at
+-1. Only the quest room gets the prefab: `TryGetPrefabName` answers for
+`model.room` alone. An extra room's dialog is started by the controller after
+its fight.
+
+### The map
+
+`C_Rooms.Generate` copies the quest's row into `GenerationParams`
+(`questCount` 1, `extraQuestRoomCount = ExtraRooms`, `secretRoomCount` = the
+row's flag plus `SecretRooms`, the allowed and guaranteed doors, and the
+`Quest` enum), and `PositionRooms` places the quest between the start and the
+shops:
+
+  * `ChooseQuestRoom`: an untyped room whose doors all lie in `Doors` and which
+    has every one of `GuaranteedDoors`, drawn uniformly, except that Flight's
+    list is sorted by `pos.x` and its leftmost room is taken. The room gets
+    `Quest` (512).
+  * `ChooseQuestExtraRoom`, once per extra room: untyped, not an articulation
+    point, a dead end or two neighbours, more than one room from the quest
+    room; uniform, except Flight takes the rightmost candidate and only when it
+    lies left of the quest room and at most three rows off. `QuestExtra`
+    (1024).
+  * `CountValidPaths(start, quest, QuestRoomCondition)` must be positive: some
+    simple path from the start reaches the quest room without stepping on the
+    boss or an extra room (`test type, 0x402`).
+
+Any of the three failing fails the generation, which is retried as before. All
+eleven quests place on every one of 40 seeds; Flight needs 5.7 attempts on
+average, the rest about one. `Direction` maps to the sim's (row, col) with Up a
+row less, since `RoomNode.GetName` prints `topBorder - pos.y`.
+
+### The rooms
+
+`C_GameMode.GenerateRoom` gives a quest room its `RoomParams` layout from
+`SpecialRoomLayouts.csv` and, only when the block has `Packs`, exactly that
+pack: the quest room never fights; the extra rooms of Sci (five level-3
+Zombies), Cube (six Daleks), Rat (four Mancracks) and SecretRoom (four
+FireHeads) do; Flight's and Bot's do not. `C_Rooms.CalculatePower` leaves both
+quest kinds out of its weight total, gives them an `expectedPower` of 0, pays a
+quest room nothing and an extra room the plain room's gold share (nothing for
+Flight and Bot).
+
+The fog had the rule half done: the walk-past reveal already skipped
+`QuestExtra`. The other half is `RoomTransition.CheckDirection`, which refuses a
+move into a room still at `Unknown`, so an extra room cannot be entered until
+the quest puts it on the map (`OnStatus(Accepted)` sets it to `Unexplored`).
+The sim had let a move go through any door, and the baseline walked into the
+Sci lab before meeting the scientist in 20 of 120 runs. The environment's
+neighbour block now shows a door into an unrevealed room as a door and nothing
+more.
+
+### The four of level 2
+
+  * **Pit** (`GetDialogIndex` 0 while Uninitialized or Accepted). Five Novices
+    (`classValue == 1`, a human holding nothing) jump for mutation 306; with
+    nobody else in the team there is no choice, all five die and
+    `CheckEndGame` ends the run. With company the player may let them jump or
+    stop them; "throw a couple of tokens" pays outcome 2, 30 gold, on every
+    branch but the jump.
+  * **Cube**: accepting reveals the extra room; winning it, or arriving in it
+    already won, while Accepted plays the extra dialog, which sets Acquired and
+    adds `cube-part`. Back in the quest room: 25 gold or mutation 328.
+  * **Sci**: the beginning offers two lines that both accept. In the lab, a win
+    while Accepted runs `Quest-two-units` (`ReplaceUnit`: `FindWeakestUnit`,
+    Novices before the armed, then by level and health or item quality and
+    cost, becomes a level-1 Zombie through `C_Player.DownGradeUnit`) or, with a
+    team of one, `Quest-one-unit` (`CreateZombie`). Back with the Zombie alive:
+    mutation 218 or 25 gold, and the Zombie leaves; dead, nothing. Unlike
+    Cube's, Sci's controller has no branch for a lab won before acceptance;
+    with `CheckDirection` that cannot happen by walking.
+  * **Rat**: accepting adds `rat-flute`; winning the extra room adds the Rat
+    (class 79, level 1) to the team and sets Acquired. Back with it: mutation
+    233 or 25 gold; without it, nothing.
+
+Nothing removes a companion at the level change: the Zombie and the Rat stay in
+the team until returned or killed.
+
+Nine of the eleven quest reward mutations are not modelled by the mutation
+layer (230 and 668 are, both level-6 rewards), all four of level 2 among them,
+so for now a level-2 mutation reward is a mutation that does nothing, and the
+baseline takes the gold. The level-6 and level-10 controllers are not ported: their rooms are
+placed, typed and fought, their dialogs never run.
+
+### What it is worth
+
+On the heuristic over 240 seeds from 30000, paired by seed, with the fast core
+(`tools/ablate.py quests_on`, and a third arm in which the baseline is told to
+follow the quests):
+
+    quests on, passed by, against off     -0.121 [-0.286, +0.044]
+    quests on, followed, against passed   -0.113 [-0.199, -0.026]
+
+The first is the map and the economy, and it does not clear zero. Its sign has
+a plain source in `CalculatePower`: a quest room takes a plain room out of the
+weight total while the level's Power stays `(num - 1) * PowerPerRoom`, so every
+remaining fight on a quest level is a little bigger. Deaths on level 2 went
+from 66 to 81 of 240. The second is the baseline walking to the lab and back
+for 25 or 30 gold and a mutation the sim does not model, and it loses, so the
+baseline's default is to answer a quest dialog when it walks into one and to go
+no further (`heuristic_action(quests="pass")`). Whether finishing a quest pays
+is left to the agent; once the four level-2 mutations are modelled it is worth
+measuring again.

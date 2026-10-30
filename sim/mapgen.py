@@ -91,10 +91,15 @@ A step that finds nothing fails the whole generation, and `C_Rooms.Generate`
 builds a new `LevelGenerator` with the same parameters and tries again, for as
 long as it takes. `generate` does the same.
 
+## Quests
+
+On a level with a quest, `PositionRooms` places it between the start and the
+shops; see `choose_quest_room`, `choose_quest_extra_room` and `quest_reachable`.
+A quest that does not fit fails the generation like any other step.
+
 ## What is still not ported
 
-`MaybeMakeSecretRoom`, quests (`ChooseQuestRoom`, `ChooseQuestExtraRoom`,
-`CountValidPaths`), `MaybeFlip` (a mirror, which changes nothing about the
+`MaybeMakeSecretRoom`, `MaybeFlip` (a mirror, which changes nothing about the
 graph) and multi-square rooms: a room here covers exactly one square, so
 `maxSquares` and `maxSquaresAtOnce` are read as constraints on the layout rather
 than as a budget for large rooms. `StatShops` is counted and left as a fight
@@ -127,8 +132,13 @@ TREASURE_ROOMS = (("StatShops", "talent_shop"),
 
 # `LevelGenerator.roomTypesWithNoPortal = 34307`, which is
 # `Start | Boss | Quest | QuestExtra | Secret`. Shops are not in it, so a shop can
-# carry a portal. Of the five, only the start and the boss are generated here.
-NO_PORTAL = frozenset({"start", "boss"})
+# carry a portal. Secret rooms are not generated here.
+NO_PORTAL = frozenset({"start", "boss", "quest", "quest_extra"})
+
+# `Direction` as a step in (row, col). The game's rows count down from the top
+# (`RoomNode.GetName` prints `topBorder - pos.y`), so `Up`, which is `y + 1` in
+# `DirectionExtensions.Neighbor`, is a row less here.
+DIRECTION_STEP = {"Right": (0, 1), "Left": (0, -1), "Up": (-1, 0), "Down": (1, 0)}
 
 # `C_Rooms.Generate` writes the literal 3 into `minPortalDistance`.
 MIN_PORTAL_DISTANCE = 3
@@ -466,7 +476,8 @@ def choose_portals(cells: list, kinds: dict, dist: dict, avg_distance: dict,
       1. With `forced_start`, the start room becomes a portal and is the first
          room chosen.
       2. The candidates are the dead ends that may carry a portal (anything but
-         the start and the boss here) at least one room from the finish.
+         the start, the boss and the quest rooms here) at least one room from
+         the finish.
       3. Too few of them, and the room list is sorted by average distance,
          largest first; either way it is walked to top the candidates up to
          `2 * count` with rooms that may carry a portal.
@@ -513,6 +524,85 @@ def choose_portals(cells: list, kinds: dict, dist: dict, avg_distance: dict,
     return portals if len(portals) >= 2 else []
 
 
+def directions(p, adj: dict) -> set:
+    """`RoomNode.neighborDirections`: which sides of `p` have a room."""
+    out = set()
+    for name, (dr, dc) in DIRECTION_STEP.items():
+        if (p[0] + dr, p[1] + dc) in adj:
+            out.add(name)
+    return out
+
+
+def choose_quest_room(cells: list, kinds: dict, adj: dict, quest: dict,
+                      rng: random.Random):
+    """`LevelGenerator.ChooseQuestRoom`, or None when nothing qualifies.
+
+    The candidates are the untyped rooms whose doors all lie in the quest's
+    `Doors` (`questRoomAllowedDoors`) and that have every one of its
+    `GuaranteedDoors`: the quest prefab only has doors on those sides. One is
+    drawn uniformly, except for `Flight`, whose list is sorted by `pos.x`
+    (`<ChooseQuestRoom>b__5_0`) and whose first entry, the leftmost room, is
+    taken.
+    """
+    allowed = set(quest.get("Doors") or [])
+    guaranteed = set(quest.get("GuaranteedDoors") or [])
+    pool = [p for p in cells if p not in kinds
+            and directions(p, adj) <= allowed and guaranteed <= directions(p, adj)]
+    if not pool:
+        return None
+    if quest.get("Name") == "Flight":
+        return min(pool, key=lambda p: p[1])
+    return rng.choice(pool)
+
+
+def choose_quest_extra_room(cells: list, kinds: dict, dist: dict, arts: set,
+                            n_count, quest_room, quest: dict, rng: random.Random):
+    """`LevelGenerator.ChooseQuestExtraRoom(questRoom)`, or None.
+
+    The candidates are the untyped rooms that are not articulation points, are
+    a dead end or have exactly two neighbours, and lie more than one room from
+    the quest room. One is drawn uniformly, except for `Flight`: its list is
+    sorted by `pos.x`, largest first (`<ChooseQuestExtraRoom>b__6_0`), and the
+    first entry is taken only when it lies left of the quest room and at most
+    three rows from it. The type is or-ed with `QuestExtra`, 1024.
+    """
+    pool = [p for p in cells if p not in kinds and p not in arts
+            and n_count(p) in (1, 2) and dist[p][quest_room] > 1]
+    if not pool:
+        return None
+    if quest.get("Name") == "Flight":
+        best = max(pool, key=lambda p: p[1])
+        if best[1] < quest_room[1] and abs(best[0] - quest_room[0]) <= 3:
+            return best
+        return None
+    return rng.choice(pool)
+
+
+def quest_reachable(adj: dict, start, quest_room, blocked: set) -> bool:
+    """`CountValidPaths(start, quest, QuestRoomCondition) > 0`.
+
+    `<CountValidPaths>g__Count|23_0` enumerates every simple path from the
+    start; one that reaches a neighbour of the quest room is counted when
+    `QuestRoomCondition` passes it, which is when no room on it carries `Boss`
+    or `QuestExtra` (`test type, 0x402`). Such a path exists exactly when the
+    quest room can be reached from the start without stepping on those rooms,
+    so a search answers it without the enumeration.
+    """
+    if start in blocked:
+        return False
+    seen, todo = {start}, [start]
+    while todo:
+        p = todo.pop()
+        for n in adj[p]:
+            if n == quest_room:
+                return True
+            if n in seen or n in blocked:
+                continue
+            seen.add(n)
+            todo.append(n)
+    return False
+
+
 def room_count(level_row: dict, rng: random.Random) -> int:
     """`num`, drawn inside the row's `MinRooms`..`MaxRooms`.
 
@@ -526,11 +616,11 @@ def room_count(level_row: dict, rng: random.Random) -> int:
 
 
 def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
-                   chip: str = "default") -> dict | None:
+                   chip: str = "default", quest: dict | None = None) -> dict | None:
     """`LevelGenerator.PositionRooms`, or None where the game's would fail.
 
-    See the module docstring for the order. Quests are not generated, so the
-    two quest choosers between the start and the shops are skipped.
+    See the module docstring for the order. `quest` is the level's quest row
+    with its `Name` (`sim/quests.py`), or None on a level without one.
     """
     cells = gen.rooms()
     adj = gen.adjacency()
@@ -575,6 +665,24 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
     if level >= 2:
         extras[start] = ("item_shop",)
 
+    # The quest, when the level has one: its room, its extra rooms, and a way
+    # from the start to it that passes neither the boss nor an extra room.
+    quest_room, quest_extras = None, []
+    if quest:
+        quest_room = choose_quest_room(cells, kinds, adj, quest, rng)
+        if quest_room is None:
+            return None
+        kinds[quest_room] = "quest"
+        for _ in range(int(quest.get("ExtraRooms") or 0)):
+            extra = choose_quest_extra_room(cells, kinds, dist, arts, gen.n_count,
+                                            quest_room, quest, rng)
+            if extra is None:
+                return None
+            kinds[extra] = "quest_extra"
+            quest_extras.append(extra)
+        if not quest_reachable(adj, start, quest_room, {boss, *quest_extras}):
+            return None
+
     # The shop type with more rooms is spread first; item shops on a tie.
     shops = [(kind, int(level_row.get(column) or 0)) for column, kind in TYPED_ROOMS]
     if shops[0][1] < shops[1][1]:
@@ -615,10 +723,13 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
             "start": name(start),
             "boss": name(boss),
             "portals": [name(p) for p in portals],
-            "extras": {name(p): e for p, e in extras.items()}}
+            "extras": {name(p): e for p, e in extras.items()},
+            "quest_room": name(quest_room) if quest_room is not None else None,
+            "quest_extras": [name(p) for p in quest_extras]}
 
 
-def generate(level_row: dict, rng: random.Random, chip: str = "default") -> dict:
+def generate(level_row: dict, rng: random.Random, chip: str = "default",
+             quest: dict | None = None) -> dict:
     """One level, as `position_rooms` returns it.
 
     The room count is drawn once and kept across attempts: `C_Rooms.Generate`
@@ -631,7 +742,7 @@ def generate(level_row: dict, rng: random.Random, chip: str = "default") -> dict
         gen.build()
         if len(gen.rooms()) < 3:
             continue
-        level = position_rooms(gen, level_row, rng, chip)
+        level = position_rooms(gen, level_row, rng, chip, quest)
         if level is not None:
             return level
     raise RuntimeError(f"no level placed for row {level_row.get('ID')} "

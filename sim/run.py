@@ -160,9 +160,9 @@ UNKNOWN, UNEXPLORED, EXPLORED, CURRENT = 0, 1, 2, 4
 
 # What the reveal skips. The neighbour walk tests `bt eax, 0xa` on the type and
 # jumps past the room when the bit is set: bit 10 is `RoomType.QuestExtra =
-# 1024`, so an extra quest room is never revealed by walking next to it. No kind
-# here is generated yet, and the entry is what makes the rule right when they
-# are.
+# 1024`, so an extra quest room is never revealed by walking next to it, and a
+# room still at `UNKNOWN` cannot be walked into (see `legal_actions`). Accepting
+# the quest is what puts it on the map (`sim/quests.py`).
 NEVER_REVEALED = frozenset({"quest_extra"})
 
 
@@ -265,6 +265,9 @@ class RoomMap:
         self.to_boss = self._distances(self.boss)
         self.current: str | None = None
         self.known_to_boss: dict[str, int] = {}
+        # The quest's rooms on a generated level, see `sim/quests.py`.
+        self.quest_room: str | None = None
+        self.quest_extras: list[str] = []
         # The portals on the player's map, in the order they came onto it. See
         # `revealed_portals`.
         self._seen_portals: list[str] = []
@@ -287,16 +290,20 @@ class RoomMap:
 
     @classmethod
     def generate(cls, level_row: dict, rng: random.Random,
-                 chip: str = "default") -> "RoomMap":
+                 chip: str = "default", quest: dict | None = None) -> "RoomMap":
         """The level the row asks for: see `sim/mapgen.py` for what is the
-        game's and what is not."""
+        game's and what is not. `quest` is the level's quest row, see
+        `sim/quests.py`."""
         from .mapgen import generate as _generate
-        spec = _generate(level_row, rng, chip)
+        spec = _generate(level_row, rng, chip, quest)
         extras = spec.get("extras") or {}
         rooms = {rid: Room(id=rid, row=r, col=c, kind=kind,
                            extras=tuple(extras.get(rid, ())))
                  for rid, (r, c, kind) in spec["rooms"].items()}
-        return cls(rooms, spec["start"], spec["boss"], spec.get("portals"))
+        out = cls(rooms, spec["start"], spec["boss"], spec.get("portals"))
+        out.quest_room = spec.get("quest_room")
+        out.quest_extras = list(spec.get("quest_extras") or [])
+        return out
 
     def _distances(self, source: str, known_only: bool = False) -> dict[str, int]:
         import collections
@@ -580,6 +587,10 @@ class Human:
     # a level or an item keeps the share, which is why this is a share and not
     # a number of hit points.
     hp: float = 1.0
+    # A unit of a fixed class that a quest put in the team: the Sci quest's
+    # Zombie, the Rat quest's Rat. Not a human: it holds no item, is not a
+    # Novice, and fights as its own `Units.json` row. None for a human.
+    cls: str | None = None
 
 
 def squad_names(tables: dict) -> list[str]:
@@ -704,19 +715,26 @@ class RunState:
     _last_layout: int | None = None
     # A DejaVu's save, see `dejavu_save`.
     _dejavu: dict | None = None
+    # The level's quest controller (`sim/quests.py`), None on a level without
+    # one, and the quest dialog on screen, which is modal like a level dialog.
+    quest: Any = None
+    quest_dialog: Any = None
+    # Off plays a run with no quests: no quest rooms on the map at all, for
+    # measuring what they change.
+    quests_on: bool = True
 
     # -- setup -------------------------------------------------------------
     @classmethod
     def new(cls, tables: dict, seed: int = 0,
             squad_name: str | None = None, chip: str = "default",
-            dialogs: bool = True) -> "RunState":
+            dialogs: bool = True, quests: bool = True) -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
         squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
                  food=Food.from_game(game), squad=squad, rng=rng, chip=chip,
-                 dialogs_on=dialogs)
-        st.rooms = RoomMap.generate(st.level_row, rng, chip)
+                 dialogs_on=dialogs, quests_on=quests)
+        st.generate_level()
         st.room = st.rooms.start
         st.rooms.set_current(st.room)
         # Level 1 opens the same way every later level does: see `next_level`.
@@ -729,6 +747,23 @@ class RunState:
         # opens with a dialog as every later one does.
         st.start_level_dialog()
         return st
+
+    def generate_level(self) -> None:
+        """Draw the level's quest, then build its map around it.
+
+        `LevelData.Load` draws every level's quest when the data loads and
+        `C_Rooms.Generate` reads it from the level data, so the quest is fixed
+        before the map is built and the map is built to fit it.
+        """
+        from .quests import draw_quest, make_quest
+        name = draw_quest(self.level_row, self.rng) if self.quests_on else None
+        self.quest = make_quest(self.tables, name)
+        self.quest_dialog = None
+        self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip,
+                                      self.quest.spec if self.quest else None)
+        if self.quest is not None:
+            self.quest.room = self.rooms.quest_room
+            self.quest.extras = list(self.rooms.quest_extras)
 
     @property
     def level_row(self) -> dict:
@@ -744,7 +779,9 @@ class RunState:
         ubc = units_by_class(self.tables)
         specs = []
         for h in self.squad:
-            if h.item:
+            if h.cls:
+                specs.append(self.companion_spec(h))
+            elif h.item:
                 specs.append(build_player_squad(self.tables, [(h.item, h.level)])[0])
             else:
                 specs.append(build_unit(ubc, "Novice", h.level, name="Novice"))
@@ -785,7 +822,7 @@ class RunState:
 
     def _specs_key(self) -> tuple:
         """What the squad's resolved specs depend on, for the cache below."""
-        return (tuple((h.item, h.level) for h in self.squad),
+        return (tuple((h.item, h.level, h.cls) for h in self.squad),
                 self.food.hunger_level if self.food else 0,
                 len(self.mutations))
 
@@ -821,7 +858,20 @@ class RunState:
         `Levels.json` sizes a room by the same statistic, so this over the room
         budget is a like-for-like readiness ratio.
         """
-        return sum(self.item_power(h.item, h.level) for h in self.squad)
+        return sum(self.companion_spec(h).power if h.cls else self.item_power(h.item, h.level)
+                   for h in self.squad)
+
+    def companion_spec(self, h: Human) -> UnitSpec:
+        """A quest companion as the unit its class row at its level makes."""
+        meta = self.tables["Meta"]["Classes"]
+        size = int((meta.get(h.cls) or {}).get("Size") or 1)
+        return build_unit(units_by_class(self.tables), h.cls, h.level, name=h.cls,
+                          size=size)
+
+    def make_companion(self, cls: str, level: int = 1) -> Human:
+        """A unit of `cls` for a quest to put in the team (`C_Player.CreateUnit`
+        or `DownGradeUnit` with that class)."""
+        return Human(item=None, level=int(level), cls=cls)
 
     # -- the room-weighted economy (`C_Rooms.CalculatePower`) --------------
     # Which level-row multiplier weights a room of each kind. The three treasure
@@ -846,10 +896,13 @@ class RunState:
 
         The start room carries none: `CalculatePower` subtracts 2 from the room
         count for the start and the boss, and then adds the boss back in with
-        `BossMult`, so the room the squad opens on is the only one with no
-        enemies and no gold in it.
+        `BossMult`, so the room the squad opens on has no enemies and no gold
+        in it. The quest rooms carry none either: the total subtracts
+        `questCount` and `extraQuestRoomCount` as well, and the per-room loop
+        gives both kinds an `expectedPower` of 0 (an extra room's gold is the
+        exception, see `room_gold`).
         """
-        if kind == "start":
+        if kind in ("start", "quest", "quest_extra"):
             return 0.0
         lvl = self.level_row
         return float(lvl.get(self.ROOM_MULT.get(kind, "DefaultMult")) or 0.0)
@@ -920,6 +973,14 @@ class RunState:
         plain rooms, which is the opposite of the flat `GoldPerRoom` this used
         to pay.
         """
+        if room_kind_ == "quest_extra":
+            # `CalculatePower` leaves both quest kinds out of its weight total
+            # and pays a quest room nothing; an extra room is paid the plain
+            # room's share, except on Flight and Bot (`quest == 9 or 11`).
+            if self.quest is None or self.quest.name in ("Flight", "Bot"):
+                return 0.0
+            total = float(self.level_row.get("GoldPerRoom") or 0.0) * (len(self.rooms.rooms) - 1)
+            return total * float(self.level_row.get("DefaultMult") or 0.0) / self.level_weight
         return self.room_share("GoldPerRoom", room_kind_)
 
     # -- experience --------------------------------------------------------
@@ -1109,11 +1170,13 @@ class RunState:
         dropping the item on someone does, and a policy that buys at a loss
         should be charged for it.
         """
-        if not self.squad:
+        humans = [i for i, h in enumerate(self.squad) if not h.cls]
+        if not humans:
             return None
-        gains = [self.item_power(name, h.level) - self.item_power(h.item, h.level)
-                 for h in self.squad]
-        return max(range(len(gains)), key=lambda i: (gains[i], -i))
+        gains = {i: self.item_power(name, self.squad[i].level)
+                 - self.item_power(self.squad[i].item, self.squad[i].level)
+                 for i in humans}
+        return max(humans, key=lambda i: (gains[i], -i))
 
     # -- enemies -----------------------------------------------------------
     def _eligible_packs(self, want: str) -> list[list[dict]]:
@@ -1389,12 +1452,19 @@ class RunState:
     def legal_actions(self) -> list[tuple]:
         if self.finished:
             return []
+        if self.quest_dialog is not None:
+            return [("choose", i) for i in self.quest_dialog.options(self)]
         if self.dialog is not None:
             return [("choose", i) for i in self._dialog_engine().legal(self.dialog)]
         acts: list[tuple] = []
         here = self.rooms.rooms[self.room]
         if self.food.can_move(self.feed_cost):
-            acts += [("move", rid) for rid in self.rooms.doors(self.room)]
+            # `RoomTransition.CheckDirection` wants the door open and the room
+            # behind it off `Unknown`. Entering a room reveals every neighbour
+            # but a quest's extra room, so that is the one door this holds shut
+            # until the quest puts the room on the map.
+            acts += [("move", rid) for rid in self.rooms.doors(self.room)
+                     if self.rooms.rooms[rid].state != UNKNOWN]
         # A teleport is not a move and costs no food. `C_Food.Move` has two
         # callers, the walk through a door (`RoomTransition.OnTransitBlocked`)
         # and `C_Rooms.InstantMove`; the minimap click that teleports
@@ -1488,7 +1558,13 @@ class RunState:
         result: dict = {"action": kind}
 
         if kind == "choose":
-            if self.dialog is not None:
+            if self.quest_dialog is not None:
+                i = int(arg or 0)
+                if i in self.quest_dialog.options(self):
+                    result["quest"] = self.quest_dialog.stem
+                    self.quest_dialog.choose(self, i)
+                    self._settle_quest_dialog()
+            elif self.dialog is not None:
                 engine = self._dialog_engine()
                 i = int(arg or 0)
                 if i in engine.legal(self.dialog):
@@ -1717,6 +1793,33 @@ class RunState:
             self.gold += self.room_gold(room.kind)
         if first_visit and room.cleared and room.kind == "boss":
             self.win_level()
+        # `V_Rooms.MoveCamera` launches the room's quest on every arrival, and
+        # the quest controllers watch the extra rooms' fights.
+        if self.quest is not None and not self.finished:
+            stem = self.quest.arrive(self, rid, first_visit, result.get("won", True))
+            if stem is not None:
+                self.open_quest_dialog(stem)
+
+    def open_quest_dialog(self, stem: str) -> None:
+        """Start a quest dialog and walk it to its first real choice."""
+        from .quests import TreeRun, trees
+        if stem not in trees():
+            return
+        self.quest_dialog = TreeRun(self.quest, stem)
+        self.quest_dialog.advance(self)
+        self._settle_quest_dialog()
+
+    def _settle_quest_dialog(self) -> None:
+        """Take a choice that is the only one shown, and drop a dialog that has
+        ended, the way `_settle_dialog` does for the level dialogs."""
+        run = self.quest_dialog
+        while run is not None and not run.closed:
+            options = run.options(self)
+            if len(options) != 1:
+                break
+            run.choose(self, options[0])
+        if run is not None and (run.closed or not run.options(self)):
+            self.quest_dialog = None
 
     def win_level(self) -> None:
         """`C_Levels.WinLevel`, which `C_Fight.AfterFight` calls on a boss win.
@@ -1969,7 +2072,11 @@ class RunState:
         no_hunger = bool(self.armed.pop("anti_hunger", False))
         allies = self.armed.pop("allies", [])
         specs = self.specs(no_hunger=no_hunger)
-        enemies = self.enemy_specs(room.kind)
+        quest_layout = None
+        if room.kind in ("quest", "quest_extra"):
+            enemies, quest_layout = self.quest_enemies(room)
+        else:
+            enemies = self.enemy_specs(room.kind)
         if not specs:
             self.finished, self.won = True, False
             return {"won": False, "reason": "no squad"}
@@ -1985,6 +2092,8 @@ class RunState:
         by_id = {lay.id: lay for lay in layouts}
         own = self.pack_layout(pack_id) if self.pack_layouts else None
         layout = by_id.get(own) if own is not None else None
+        if quest_layout is not None:
+            layout = quest_layout
         if layout is None:
             layout = layouts[self.rng.randrange(len(layouts))]
             zones = []
@@ -2051,6 +2160,40 @@ class RunState:
 
         return self._after_fight(team0[:n_humans], team1, res, room)
 
+    def quest_enemies(self, room: Room) -> tuple[list, Any]:
+        """A quest room's own pack and layout, from the quest's `RoomParams`.
+
+        `C_GameMode.GenerateRoom` gives the room `RoomParams[name].Layout` from
+        `SpecialRoomLayouts.csv` and, when the block has `Packs`, creates
+        exactly that pack (`EnemyPacks.Create`); with no `Packs` the room has
+        nothing to fight. Every shipped quest pack has `Min == Max`.
+        """
+        if self.quest is None:
+            return [], None
+        key = "room" if room.kind == "quest" else "extra"
+        params = (self.quest.spec.get("RoomParams") or {}).get(key) or {}
+        packs = params.get("Packs") or []
+        if not packs:
+            return [], None
+        ubc = units_by_class(self.tables)
+        meta = self.tables["Meta"]["Classes"]
+        out: list = []
+        zones: list = []
+        for row in packs:
+            cls = row.get("Class")
+            if cls not in ubc:
+                continue
+            size = int((meta.get(cls) or {}).get("Size") or 1)
+            unit = build_unit(ubc, cls, int(row.get("Level") or 1), name=cls, size=size)
+            lo, hi = int(row.get("Min") or 1), int(row.get("Max") or 1)
+            n = lo if hi <= lo else self.rng.randint(lo, hi)
+            out += [unit] * n
+            zones += [row.get("Zone") or "e1"] * n
+        self._last_pack = (packs[0].get("ID"), zones)
+        layouts = parse_room_layouts(self.tables.get("SpecialRoomLayouts") or "")
+        layout = next((lay for lay in layouts if lay.id == params.get("Layout")), None)
+        return out, layout
+
     def pack_layout(self, pack_id) -> int | None:
         """The layout `LayoutsByPack` gives a pack, or None."""
         for row in self.tables.get("LayoutsByPack") or []:
@@ -2105,7 +2248,9 @@ class RunState:
         # resolves first and the levels land after, which is the one place the
         # timing differs.
         exp = sum(a.spec.exp_reward for a in team1 if not a.alive)
-        levels = self.gain_experience(exp, targets=kept)
+        # A quest companion is not levelled: its class has rows only at the
+        # levels the quest creates it at (see `sim/assumptions.py`).
+        levels = self.gain_experience(exp, targets=[h for h in kept if not h.cls])
 
         self.squad = kept + reserve
         won = res.winner == 0
@@ -2120,7 +2265,7 @@ class RunState:
             return
         self.level += 1
         self.level_won = False
-        self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip)
+        self.generate_level()
         self.room = self.rooms.start
         self.rooms.set_current(self.room)
         # `C_BossVisionMutation.OnNewLevel` fires here, on the new level, and

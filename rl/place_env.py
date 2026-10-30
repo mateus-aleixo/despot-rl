@@ -93,6 +93,12 @@ def sample_scenarios(tables: dict, n: int = 200, seed: int = 0,
         captured: list[Scenario] = []
 
         def capture(grid, layout, specs, rng, enemies):
+            from rl.placement import frontline_placement
+            # A quest room fights in a `SpecialRoomLayouts` layout, which a
+            # scenario cannot name by its index into `RoomLayouts`; it is placed
+            # and not captured.
+            if id(layout) not in index_of:
+                return frontline_placement(grid, layout, specs, rng, enemies)
             captured.append(Scenario(
                 level=st.level,
                 layout_index=index_of[id(layout)],
@@ -101,7 +107,6 @@ def sample_scenarios(tables: dict, n: int = 200, seed: int = 0,
                 enemy_xy=[(a.x, a.y) for a in enemies],
                 mutations=list(st.mutations),
             ))
-            from rl.placement import frontline_placement
             return frontline_placement(grid, layout, specs, rng, enemies)
 
         st.placement_policy = capture

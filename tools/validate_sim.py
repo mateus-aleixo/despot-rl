@@ -2216,6 +2216,256 @@ _st11.next_level()
 check("a new level grants no free food",
       _st11.food.amount == 3.0 and _st11.level == 2, f"{_st11.food.amount}")
 
+# -- quests ------------------------------------------------------------------
+print("\n== quests ==")
+import sim.quests as _Q
+from sim.mapgen import DIRECTION_STEP as _STEP
+from sim.run import UNKNOWN as _UNKNOWN
+from sim.run import Human as _QH
+
+
+def _quest_level(name, seed=0, squad=None):
+    """A run put on level 2 with the quest `name`, standing in the start room."""
+    st = RunState.new(_STRICT, seed=seed)
+    st.level = {"Sci": 2, "Pit": 2, "Cube": 2, "Rat": 2, "Reaper": 6, "SecretRoom": 6,
+                "Spider": 6, "Bot": 6, "Nurgle": 10, "Flight": 10, "Sword": 10}[name]
+    draw = _Q.draw_quest
+    _Q.draw_quest = lambda row, rng: name
+    try:
+        st.generate_level()
+    finally:
+        _Q.draw_quest = draw
+    st.room = st.rooms.start
+    st.rooms.set_current(st.room)
+    st.rooms.rooms[st.room].cleared = True
+    if squad is not None:
+        st.squad = squad
+    return st
+
+
+def _walk_in(st, rid, talk=True):
+    """Arrive in `rid` the way a move does, without the food or the adjacency.
+    A dialog that opens is answered with its first choice each time, unless
+    `talk` is off, which leaves it on screen."""
+    res = {}
+    st._arrive(rid, res)
+    if talk:
+        while st.quest_dialog is not None and st.legal_actions():
+            st.apply(st.legal_actions()[0])
+    return res
+
+
+def _sides(rooms, rid):
+    r = rooms[rid]
+    taken = {(x.row, x.col) for x in rooms.values()}
+    return {d for d, (dr, dc) in _STEP.items() if (r.row + dr, r.col + dc) in taken}
+
+
+# The level's quest is drawn from its shortlist, and every name on it comes up.
+_drawn = collections.Counter(RunState.new(_STRICT, seed=s).tables and
+                             _Q.draw_quest(next(r for r in _STRICT["Levels"] if r["ID"] == 2),
+                                           random.Random(s)) for s in range(400))
+check("level 2 draws each of its four quests",
+      set(_drawn) == {"Sci", "Pit", "Cube", "Rat"} and min(_drawn.values()) > 70, f"{dict(_drawn)}")
+check("levels without a shortlist have no quest",
+      all(_Q.draw_quest(r, random.Random(0)) is None for r in _STRICT["Levels"]
+          if r["ID"] not in (2, 6, 10)))
+
+# Placement: the quest room's doors, the extra rooms' shape, the path from the
+# start, and no portal on any of them.
+_bad = []
+for _name in ("Sci", "Pit", "Cube", "Rat", "Reaper", "SecretRoom", "Spider", "Bot",
+              "Nurgle", "Flight", "Sword"):
+    _spec = _Q.quest_spec(_STRICT, _name)
+    for _s in range(12):
+        _st = _quest_level(_name, seed=_s)
+        _rm = _st.rooms
+        _qr = _rm.quest_room
+        _sides_q = _sides(_rm.rooms, _qr)
+        if not (_sides_q <= set(_spec.get("Doors") or [])
+                and set(_spec.get("GuaranteedDoors") or []) <= _sides_q):
+            _bad.append((_name, _s, "doors", _sides_q))
+        if len(_rm.quest_extras) != int(_spec.get("ExtraRooms") or 0):
+            _bad.append((_name, _s, "extras"))
+        _dq = _rm._distances(_qr)
+        for _x in _rm.quest_extras:
+            if _dq[_x] <= 1 or len(_rm.doors(_x)) not in (1, 2):
+                _bad.append((_name, _s, "extra shape", _x))
+            if _name == "Flight":
+                _xr, _qq = _rm.rooms[_x], _rm.rooms[_qr]
+                if not (_xr.col < _qq.col and abs(_xr.row - _qq.row) <= 3):
+                    _bad.append((_name, _s, "flight extra", _x))
+        if any(_rm.is_portal(r) for r in [_qr] + _rm.quest_extras):
+            _bad.append((_name, _s, "portal"))
+        # a way in from the start past neither the boss nor an extra room
+        _block = {_rm.boss, *_rm.quest_extras}
+        _seen_q, _todo = {_rm.start}, [_rm.start]
+        _reach = False
+        while _todo:
+            _p = _todo.pop()
+            for _n in _rm.doors(_p):
+                if _n == _qr:
+                    _reach = True
+                elif _n not in _seen_q and _n not in _block:
+                    _seen_q.add(_n)
+                    _todo.append(_n)
+        if not _reach:
+            _bad.append((_name, _s, "path"))
+check("every quest's rooms sit where ChooseQuestRoom and ChooseQuestExtraRoom put them",
+      not _bad, f"{_bad[:4]}")
+
+# The economy: quest rooms carry no weight, a quest room pays nothing, an extra
+# room pays the plain share (nothing on Flight and Bot) and fights its own pack.
+_qc = _quest_level("Cube", seed=3)
+_plain = sum(1 for r in _qc.rooms.rooms.values()
+             if r.kind not in ("start", "quest", "quest_extra"))
+check("quest rooms are left out of CalculatePower's weights",
+      _qc.room_mult("quest") == 0.0 and _qc.room_mult("quest_extra") == 0.0)
+_gold_x = _qc.room_gold("quest_extra")
+_want_x = (float(_qc.level_row["GoldPerRoom"]) * (len(_qc.rooms.rooms) - 1)
+           * float(_qc.level_row["DefaultMult"]) / _qc.level_weight)
+check("a quest room pays nothing and an extra room the plain share",
+      _qc.room_gold("quest") == 0.0 and abs(_gold_x - _want_x) < 1e-6, f"{_gold_x:.2f}")
+check("Flight's and Bot's extra rooms pay nothing",
+      _quest_level("Flight", seed=1).room_gold("quest_extra") == 0.0
+      and _quest_level("Bot", seed=1).room_gold("quest_extra") == 0.0)
+_cx = _qc.rooms.rooms[_qc.rooms.quest_extras[0]]
+_ens, _lay = _qc.quest_enemies(_cx)
+check("the extra room fights its own pack in its own layout",
+      len(_ens) == 6 and all(e.name == "Dalek" for e in _ens) and _lay is not None
+      and _lay.id == "cube-quest-extra", f"{len(_ens)} {_lay.id if _lay else None}")
+check("the quest room has nothing to fight",
+      _qc.quest_enemies(_qc.rooms.rooms[_qc.rooms.quest_room]) == ([], None))
+
+# The fog: walking past an extra room does not reveal it; accepting does.
+_qr_room = _qc.rooms.rooms[_qc.rooms.quest_room]
+for _n in _qc.rooms.doors(_cx.id):
+    _qc.rooms.set_current(_n)
+check("walking next to an extra room leaves it off the map", _cx.state == _UNKNOWN)
+_qc.room = _qc.rooms.doors(_cx.id)[0]
+_qc.rooms.rooms[_qc.room].cleared = True
+check("and its door does not let the squad in (CheckDirection wants it off Unknown)",
+      ("move", _cx.id) not in _qc.legal_actions())
+_qc.rooms.set_current(_qc.rooms.start)
+_qc.room = _qc.rooms.start
+_walk_in(_qc, _qc.rooms.quest_room)
+check("the Cube quest is accepted in its room and reveals the extra room",
+      _qc.quest.status == _Q.ACCEPTED and _cx.state != _UNKNOWN and _qc.quest_dialog is None,
+      f"status {_qc.quest.status}")
+
+# Cube, through: the part on a won extra room, then the choice.
+_strong = [_QH(item="broadsword", level=5) for _ in range(6)]
+_qc.squad = [dataclasses.replace(h) for h in _strong]
+_walk_in(_qc, _cx.id)
+check("winning the extra room hands over the cube part",
+      _cx.cleared and _qc.quest.status == _Q.ACQUIRED and "cube-part" in _qc.quest.items,
+      f"status {_qc.quest.status}")
+_g0 = _qc.gold
+_walk_in(_qc, _qc.rooms.quest_room, talk=False)
+_opts = _qc.legal_actions()
+check("back with the part, the quest room asks: tokens or the secret",
+      _opts == [("choose", 0), ("choose", 1)], f"{_opts}")
+_qc.apply(("choose", 0))
+check("tokens pay outcome 1, 25 gold, and finish the quest",
+      _qc.gold == _g0 + 25 and _qc.quest.status == _Q.FINISHED
+      and "cube-part" not in _qc.quest.items, f"{_qc.gold - _g0}")
+_walk_in(_qc, _qc.rooms.quest_room)
+check("a finished Cube quest says nothing more", _qc.quest_dialog is None)
+
+# Pit: five Novices and nobody else jump and the run ends; with someone else
+# they jump and the Pit pays mutation 306; tokens are 30 gold.
+_qp = _quest_level("Pit", seed=2, squad=[_QH(item=None) for _ in range(5)])
+_walk_in(_qp, _qp.rooms.quest_room)
+check("five Novices alone jump into the Pit and the run is lost",
+      _qp.finished and not _qp.won and not _qp.squad)
+_qp = _quest_level("Pit", seed=2,
+                   squad=[_QH(item=None) for _ in range(5)] + [_QH(item="broadsword")])
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+_opts = _qp.legal_actions()
+_qp.apply(("choose", 0))
+check("five Novices with company: letting them go buys mutation 306",
+      _opts == [("choose", 0), ("choose", 1)] and len(_qp.squad) == 1
+      and any(m.get("ID") == 306 for m in _qp.mutations)
+      and _qp.quest.status == _Q.FINISHED, f"{len(_qp.squad)} left")
+_qp = _quest_level("Pit", seed=2, squad=[_QH(item="broadsword") for _ in range(3)])
+_g0 = _qp.gold
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+_qp.apply(("choose", 1))
+check("without five Novices, tokens thrown come back as 30 gold",
+      _qp.gold == _g0 + 30 and _qp.quest.status == _Q.FINISHED, f"{_qp.gold - _g0}")
+_qp = _quest_level("Pit", seed=2, squad=[_QH(item="broadsword") for _ in range(3)])
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+_qp.apply(("choose", 0))
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+check("going to look for Novices leaves the Pit waiting",
+      _qp.quest.status == _Q.ACCEPTED and _qp.legal_actions() == [("choose", 0), ("choose", 1)])
+
+# Sci: the lab's fight turns the weakest human into a level-1 Zombie, and the
+# scientist pays for it alive.
+_qs = _quest_level("Sci", seed=4, squad=[dataclasses.replace(h) for h in _strong]
+                   + [_QH(item=None, level=1)])
+_walk_in(_qs, _qs.rooms.quest_room)
+_qs_ok = _qs.quest.status == _Q.ACCEPTED
+_weak = _qs.squad[-1]
+_walk_in(_qs, _qs.quest.extras[0])
+_z = [h for h in _qs.squad if h.cls == "Zombie"]
+check("the Sci lab turns the weakest human into a level-1 Zombie",
+      _qs_ok and _qs.quest.status == _Q.ACQUIRED and len(_z) == 1 and _z[0].level == 1
+      and all(h is not _weak for h in _qs.squad) and len(_qs.squad) == 7,
+      f"{[(h.item, h.cls) for h in _qs.squad]}")
+_g0 = _qs.gold
+_walk_in(_qs, _qs.rooms.quest_room, talk=False)
+_qs.apply(("choose", 1))
+check("the scientist takes the Zombie and pays 25 gold",
+      _qs.gold == _g0 + 25 and not any(h.cls for h in _qs.squad)
+      and _qs.quest.status == _Q.FINISHED)
+_qs = _quest_level("Sci", seed=4, squad=[dataclasses.replace(h) for h in _strong])
+_walk_in(_qs, _qs.quest.extras[0])
+_walk_in(_qs, _qs.rooms.quest_room)
+_walk_in(_qs, _qs.quest.extras[0])
+check("a lab won before the quest was accepted never gives a Zombie",
+      _qs.quest.status == _Q.ACCEPTED and not any(h.cls for h in _qs.squad))
+_qs = _quest_level("Sci", seed=4, squad=[_QH(item="broadsword", level=5)])
+_walk_in(_qs, _qs.rooms.quest_room)
+_walk_in(_qs, _qs.quest.extras[0])
+check("alone, the squad gets a new Zombie instead",
+      len(_qs.squad) == 2 and _qs.squad[1].cls == "Zombie" and _qs.quest.status == _Q.ACQUIRED)
+_qs.squad = [h for h in _qs.squad if not h.cls]
+_g0 = _qs.gold
+_walk_in(_qs, _qs.rooms.quest_room)
+check("with the Zombie dead, the scientist pays nothing",
+      _qs.gold == _g0 and _qs.quest.status == _Q.FINISHED and _qs.quest_dialog is None)
+
+# Rat: the flute on accepting, the Rat on the lab's win, the reward for it alive.
+_qr = _quest_level("Rat", seed=5, squad=[dataclasses.replace(h) for h in _strong])
+_walk_in(_qr, _qr.rooms.quest_room)
+check("accepting the Rat quest hands over the flute",
+      _qr.quest.status == _Q.ACCEPTED and "rat-flute" in _qr.quest.items)
+_walk_in(_qr, _qr.quest.extras[0])
+check("winning the Rat's room adds the Rat to the team",
+      _qr.quest.status == _Q.ACQUIRED and sum(1 for h in _qr.squad if h.cls == "Rat") == 1)
+_g0 = _qr.gold
+_walk_in(_qr, _qr.rooms.quest_room, talk=False)
+_opts = _qr.legal_actions()
+_qr.apply(("choose", 1))
+check("the trumpeter takes the Rat back and pays 25 gold",
+      _opts == [("choose", 0), ("choose", 1)] and _qr.gold == _g0 + 25
+      and not any(h.cls for h in _qr.squad) and _qr.quest.status == _Q.FINISHED
+      and "rat-flute" not in _qr.quest.items)
+
+# A companion is no human: no item goes to it, and it fights as its own row.
+_qz = _quest_level("Sci", seed=4, squad=[_QH(item=None, cls="Zombie")])
+check("a companion takes no item", _qz.best_item_target("broadsword") is None)
+check("a companion fights as its class row",
+      _qz.specs()[0].name == "Zombie" and _qz.specs()[0].health > 0)
+
+# The quests switch: off generates the same levels with no quest at all.
+_qo = RunState.new(_STRICT, seed=7, quests=False)
+_qo.next_level()
+check("quests off leaves level 2 without a quest or its rooms",
+      _qo.quest is None and not any(r.kind in ("quest", "quest_extra")
+                                    for r in _qo.rooms.rooms.values()))
+
 print("\n== progression ==")
 from sim.data import items_by_quality as _by_quality
 from sim.run import MAX_UNIT_LEVEL as _MAX_LV

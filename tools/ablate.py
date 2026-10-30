@@ -2,8 +2,9 @@
 
 The switches are the faithful behaviours that kept their old form for exactly
 this: `carry_hp` (wounds between fights), `pack_layouts` (each pack in its own
-layout, by zone) and `dialogs_on` (the level-entry dialogs). The heuristic plays
-the same seeds with the switch on and off.
+layout, by zone), `dialogs_on` (the level-entry dialogs) and `quests_on` (the
+quests, their rooms included). The heuristic plays the same seeds with the
+switch on and off.
 
 This is a check that a feature changes something, not a re-baseline. RL numbers
 are taken at a batch boundary; see `notes/roadmap.md`.
@@ -21,12 +22,14 @@ from rl.env import DespotRunEnv
 from rl.heuristic import heuristic
 from sim.data import load_ruleset
 
-SWITCHES = ("carry_hp", "pack_layouts", "dialogs_on")
+SWITCHES = ("carry_hp", "pack_layouts", "dialogs_on", "quests_on")
 
 
 def play(env, seed, switch, value):
     if switch == "dialogs_on":
         env.dialogs = value
+    if switch == "quests_on":
+        env.quests = value
     obs, info = env.reset(seed=seed)
     setattr(env.state, switch, value)
     mask = info["action_mask"]

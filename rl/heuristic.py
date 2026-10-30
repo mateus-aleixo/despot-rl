@@ -23,7 +23,7 @@ USELESS_TO_BASELINE = ("unmodelled", "teleport", "reroll")
 
 
 def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
-                     upgrade: str = "last"):
+                     upgrade: str = "last", quests: str = "pass"):
     """Take what a room offers, otherwise head for the boss.
 
     At an item shop the order is an item, then experience, then a shop upgrade.
@@ -52,6 +52,11 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     upgrading pays at all, separately from whether an agent has learned to do
     it -- a trained agent that never upgrades is only a mistake if upgrading is
     worth something.
+
+    `quests` is the same kind of switch for the level's quest: `"pass"` (the
+    default) answers a quest dialog when the squad walks into one and goes no
+    further out of its way, `"follow"` walks to the extra room and back for the
+    reward. See `_quest_target` for why the default is the first.
     """
     legal = list(st.legal_actions() if legal is None else legal)
     if not legal:
@@ -63,7 +68,8 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
 
     # A dialog is modal: the only legal actions are its choices.
     if kinds.get("choose"):
-        return max(kinds["choose"], key=lambda a: (_choice_value(st, a[1]), -a[1]))
+        value = _quest_choice_value if st.quest_dialog is not None else _choice_value
+        return max(kinds["choose"], key=lambda a: (value(st, a[1]), -a[1]))
 
     # Consumables. Sell what the sim gives no effect, heal a badly wounded
     # squad, bring back the dead lying here, and call reserves at once.
@@ -149,6 +155,23 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     known = st.rooms.known_to_boss
     far = max(known.values(), default=1)
     moves = kinds.get("move", [])
+    # `quests="follow"`: an accepted quest sends the squad to its extra room,
+    # and an acquired one back to the quest room for the reward. See
+    # `_quest_target`. Off by default, because it was measured to lose: on 240
+    # seeds following cost -0.113 [-0.199, -0.026] levels against passing the
+    # quests by, for 25 or 30 gold and a mutation the sim does not model yet.
+    target = _quest_target(st) if quests == "follow" else None
+    if target is not None and moves:
+        to = st.rooms._distances(target, known_only=True)
+        here_d = to.get(st.room)
+        # Only on a larder that pays for the walk there: a side trip on an
+        # empty one strands a squad too small to sacrifice from.
+        affordable = (here_d is not None
+                      and st.food.amount >= st.feed_cost * here_d)
+        nearer = [a for a in moves if affordable
+                  and to.get(a[1], here_d) < here_d]
+        if nearer:
+            return nearer[0]
     # A teleport costs no food, so on equal terms it would win every time and
     # two cleared portals would trade the squad back and forth for ever. It is
     # taken only when it reaches something: a room nobody has entered, a room
@@ -235,6 +258,62 @@ def _choice_value(st: RunState, index: int) -> float:
         value += sum(w / total * sum(_event_value(e) for e in o.get("events") or [])
                      for w, o in zip(weights, outs))
     return value
+
+
+def _quest_choice_value(st: RunState, index: int) -> float:
+    """A quest choice's worth to the baseline, from what the branch would do.
+
+    The outcomes it applies, valued as the dialog events are, except that a
+    mutation the sim does not model is worth nothing to it; a quest kept open
+    (Accepted) a little, for what finishing it may pay; and a Novice the Pit
+    takes as much as a human costs. Guesses, not measurements, like
+    `_EVENT_GOLD`.
+    """
+    run = st.quest_dialog
+    outcomes = st.quest.spec.get("outcomes") or []
+    value = 0.0
+    for kind, arg in run.preview(st, index):
+        if kind == "outcome" and 1 <= int(arg) <= len(outcomes):
+            for e in outcomes[int(arg) - 1]:
+                if e.get("className") == "GiveMutation":
+                    m = st.mutation_by_id(int((e.get("parameters") or {}).get("id") or 0))
+                    if m is not None and st.mutation_effect(m)["implemented"]:
+                        value += _EVENT_GOLD["GiveMutation"]
+                else:
+                    value += _event_value(e)
+        elif kind == "status" and arg == 1:
+            value += 5.0
+        elif kind == "call" and arg == "KillNovices":
+            value -= 5 * _EVENT_GOLD["GiveUnit"]
+    return value
+
+
+def _quest_target(st: RunState) -> str | None:
+    """Where the level's quest wants the squad, if the baseline follows it.
+
+    An accepted quest wants its extra room while that room still has something
+    to give: Cube and Rat hand it over whenever the room is visited after the
+    quest was accepted, Sci only after a fight there. The baseline goes only
+    when the room's pack is no stronger than the squad by the game's Power
+    statistic, the same readiness test the item rule uses; that threshold is a
+    guess. An acquired quest wants the quest room.
+    """
+    q = st.quest
+    if q is None or q.room is None or type(q).__name__ == "InertQuest":
+        return None
+    if q.status == 4:
+        return q.room
+    if q.status != 1 or not q.extras:
+        return None
+    rid = q.extras[0]
+    room = st.rooms.rooms[rid]
+    if q.name == "Sci" and room.cleared:
+        return None
+    if not room.cleared:
+        enemies, _ = st.quest_enemies(room)
+        if sum(e.power for e in enemies) > st.squad_power():
+            return None
+    return rid
 
 
 def _worth_teleporting(st: RunState, rid: str, known: dict, far: int,

@@ -163,12 +163,21 @@ thrown away.
   `ChangeLevel`. The run stays on the level after the boss until it takes the
   pipe (`descend`), and every boss room but the last has a free three-slot
   consumable shop.
-- **Quests.** Eleven in `Quests.json`, each with `Doors`, `ExtraRooms`,
-  `RoomParams` (a named `Layout`, directional priorities,
-  `guaranteedPositions`) and per-quest fields. `C_Rooms.CreateQuest`, the
-  `QuestStatus` lifecycle, the per-level shortlist (levels 2, 6 and 10 only),
-  and `questCount` / `extraQuestRoomCount` / `questRoomAllowedDoors` /
-  `questRoomGuaranteedDoors`. Settles whether a quest room fights.
+- **Quests.** Partly done, 2026-10-30. Every quest's rooms are placed
+  (`ChooseQuestRoom`, `ChooseQuestExtraRoom`, `CountValidPaths`), typed, paid
+  and fought as the game does; the dialogs are the NodeCanvas trees
+  `tools/dump_dialogue_trees.py` pulls out of `sharedassets2/3.assets`, run by
+  `sim/quests.py`; the four level-2 controllers (Pit, Sci, Cube, Rat) are
+  ported, with their companions (the Zombie, the Rat). A quest room never
+  fights; an extra room fights its own pack in its `SpecialRoomLayouts` layout.
+  `RoomTransition.CheckDirection` turned out to refuse moves into `Unknown`
+  rooms, which the sim had allowed. Worth -0.121 [-0.286, +0.044] to the
+  heuristic, which passes quests by (following them cost it -0.113). Details in
+  `notes/reference-sim.md`. Still open: the seven controllers of levels 6 and
+  10 (Reaper, SecretRoom, Spider, Bot; Nurgle with its second level, Flight,
+  Sword), the secret room (`MaybeMakeSecretRoom`, `secretRoomCount`), the
+  level-2 reward mutations (306, 218, 328, 233), and the placement layer's
+  `guaranteedPositions`.
 - ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26
   of their event types, plus consumable 13; `DejaVu` still open. Worth +0.196
   [+0.021, +0.370] levels to the heuristic, and choosing well +0.154 over
@@ -196,7 +205,7 @@ thrown away.
 - ~~**Layouts.**~~ **Done, 2026-10-30**, for the packs: each fights in its one
   `LayoutsByPack` layout with every enemy in its row's zone, where the sim drew
   any of 77 layouts with everyone in `e1`. Worth -0.263 [-0.439, -0.086] to the
-  heuristic. `SpecialRoomLayouts.csv` waits on the quests.
+  heuristic. `SpecialRoomLayouts.csv` landed with the quests.
 - ~~**`InstantTransitions`**~~ **closed, 2026-10-30**: `M_GameData.instantTransitions`
   is false in every shipped ruleset, and the path it would switch on,
   `C_Rooms.InstantMove`, spends food through `C_Food.Move` exactly as a walk
