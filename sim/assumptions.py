@@ -147,15 +147,18 @@ class Assumptions:
 
     # How a shelf is drawn, beyond what `MUTATION_SHOP` settles (the shelf of 3,
     # one take, two rerolls are read out of `C_Room..ctor`). The game's pool is
-    # per mutation *and per class*: `C_Mutations.OnLevelChange` builds
-    # `_availableClasses`, a list of classes for every mutation id, filtered by
-    # the player's unlocks (`Stats.MutationUnlocker.GetMutationState`), and a
-    # shelf reserves an (id, class) pair. The port draws whole definitions by id,
-    # treats every mutation as unlocked, excludes ids the run holds or another
-    # shelf shows, and draws a shelf when the shop is first entered rather than
-    # when the level is built. In Default the last of these changes nothing,
-    # since no level has two mutation sources.
-    # Settle by: reading `C_Mutations.TryGetTreasureParameters` (off 0x65b310).
+    # per mutation *and per class*, and that part is ported: an offer is one
+    # (id, class) pair (`RunState.draw_mutation`). What stays assumed: every
+    # mutation is unlocked (`Stats.MutationUnlocker.GetMutationState` filters
+    # the pool by the player's save), the treasure kind drawn first
+    # (`GetElementUsingHistory<string>` over the level's treasures) is always
+    # the shop's own, a dialog's `GiveMutation` picks its class the way a shelf
+    # does, and a shelf is drawn when the shop is first entered rather than
+    # when the level is built. In Default the last changes nothing, since no
+    # level has two mutation sources.
+    # Settle by: reading `MutationUnlocker.GetMutationState` against a save,
+    # the treasure-kind draw in `TryGetTreasureParameters` and
+    # `C_GiveMutationEvent.Apply`.
     mutation_pool_by_id_all_unlocked: bool = True
 
     # The order among equal keys in `LevelGenerator`'s sorts. `ChoosePortals`

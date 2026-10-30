@@ -161,6 +161,34 @@ def mutation_params(m: dict) -> dict[str, Any]:
         for i in range(1, 9) if m.get(f"Param{i}Name")})
 
 
+# `Const.UpgradedClassValues`, built in `Const..cctor` as Class 2 to 11: the
+# classes a "random" mutation can be offered for.
+UPGRADED_CLASSES = ("Tank", "Warrior", "Dodger", "Monk", "Medic", "Thrower",
+                    "Shooter", "Cultist", "Mage", "Scientist")
+
+
+def offer_classes(row: dict) -> list[str]:
+    """`C_Mutations.ExtractClasses`: the classes a mutation row can be offered
+    for, each its own (id, class) pair.
+
+    "all" is the single pair `Class.Empty`, which covers every unit; "random"
+    is every class in `UPGRADED_CLASSES`; a comma list is its classes; a name
+    is itself. `Class` is not a flags enum, so an offered mutation carries one
+    class and covers that class alone.
+    """
+    spec = str(row.get("Class") or "All").strip()
+    if spec.lower() == "all":
+        return ["All"]
+    if spec.lower() == "random":
+        return list(UPGRADED_CLASSES)
+    return [c.strip() for c in spec.split(",") if c.strip()]
+
+
+def for_class(row: dict, cls: str) -> dict:
+    """A mutation as it is offered and held: its row with its one class."""
+    return {**row, "Class": cls}
+
+
 def by_id(tables: dict) -> dict[int, dict]:
     return {m["ID"]: m for m in tables["SimpleMutations"]}
 

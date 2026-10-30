@@ -361,9 +361,7 @@ class Engine:
                 amount *= max(1, len(st.squad))
             st.gain_experience(amount)
         elif cls == "GiveMutation":
-            m = st.mutation_by_id(int(_num(p.get("id"), v)))
-            if m is not None:
-                st.mutations.append(m)
+            st.give_mutation(int(_num(p.get("id"), v)))
         elif cls == "GiveItem":
             st.give_item(str(p.get("item")))
         elif cls == "RemoveItem":

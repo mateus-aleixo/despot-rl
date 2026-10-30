@@ -687,6 +687,10 @@ class RunState:
     # where a slot has been bought out.
     shop_level: int = 1
     offer: list[str | None] = field(default_factory=list)
+    # How often each (mutation id, class) pair has been drawn this run:
+    # `M_Mutations.pickCountByIdAndClass`, the history `draw_mutation` weighs
+    # against.
+    mutation_picks: dict = field(default_factory=dict)
     # How often each item has been drawn this run, per quality: the
     # `pickCount`s of `M_ItemData.weightedTemplatesByQuality`, which
     # `RootLoader.LoadData` rebuilds for every new game. See `roll_item`.
@@ -929,7 +933,7 @@ class RunState:
         Stat by stat and relative, from `sim.mutations.effect_on` -- see there
         for why this is not a Power delta.
         """
-        key = (self._specs_key(), mutation.get("ID"))
+        key = (self._specs_key(), mutation.get("ID"), mutation.get("Class"))
         hit = self._mutation_cache.get(key)
         if hit is None:
             from .mutations import effect_on
@@ -1877,7 +1881,7 @@ class RunState:
             pool = self.mutation_pool() if (here.stock or 0) > 0 else []
             if pool:
                 here.stock -= 1
-                m = self.rng.choice(pool)
+                m = self.draw_mutation(pool)
                 self.mutations.append(m)
                 result["mutation"] = m["Name"]
 
@@ -2057,31 +2061,73 @@ class RunState:
         else:
             room.stock = 0
 
-    def mutation_pool(self, besides: Room | None = None) -> list[dict]:
-        """What a shelf or a shrine can draw from on this level.
+    def mutation_pool(self, besides: Room | None = None) -> list[tuple]:
+        """What a shelf or a shrine can draw from on this level, as
+        (row, class) pairs.
 
-        `C_Mutations.OnLevelChange` rebuilds the available mutations for the
-        level and then reserves every one the run already holds and every one
-        already on a shelf in the level's shops, and `ReserveMutation` takes a
-        reserved mutation out of the pool. So nothing the run holds is offered
-        again, and two shelves on one level never show the same mutation.
-        `besides` is the shelf being drawn for, which does not count against
-        itself: `Roll` unreserves the old shelf before drawing the new one.
+        `C_Mutations.OnLevelChange` gives every mutation the level offers its
+        classes (`offer_classes`), one pair each, and reserves every pair the
+        run already holds and every pair already on a shelf in the level's
+        shops. So a mutation can come back for another class, but never for
+        one it is held or shown for. `besides` is the shelf being drawn for,
+        which does not count against itself: `Roll` unreserves the old shelf
+        before drawing the new one.
         """
-        from .mutations import offered_at_level
-        taken = {m.get("ID") for m in self.mutations}
+        from .mutations import offer_classes, offered_at_level
+        taken = {(m.get("ID"), m.get("Class")) for m in self.mutations}
         for room in self.rooms.rooms.values():
             if room is besides or not room.offer_mutations:
                 continue
-            taken.update(m.get("ID") for m in room.offer_mutations if m is not None)
-        return [m for m in offered_at_level(self.tables, self.level)
-                if m.get("ID") not in taken]
+            taken.update((m.get("ID"), m.get("Class"))
+                         for m in room.offer_mutations if m is not None)
+        return [(m, c) for m in offered_at_level(self.tables, self.level)
+                for c in offer_classes(m) if (m.get("ID"), c) not in taken]
+
+    def draw_mutation(self, pool: list) -> dict | None:
+        """`C_Mutations.TryGetTreasureParameters`' pick: one pair off `pool`.
+
+        `WeightedList.GetElementUsingHistory` with factor 2 against the run's
+        `pickCountByIdAndClass`: each pair weighs `1 / 2^(picks - fewest
+        picks)` and the pick is counted, shown or bought alike. Uniform over
+        pairs before any pick, so a mutation offered for ten classes turns up
+        ten times as often as one offered for every unit at once. The offer
+        is the row with its one class (`for_class`).
+        """
+        from .mutations import for_class
+        if not pool:
+            return None
+        counts = [self.mutation_picks.get((row.get("ID"), cls), 0) for row, cls in pool]
+        low = min(counts)
+        row, cls = self.rng.choices(pool, weights=[1.0 / 2.0 ** (c - low) for c in counts])[0]
+        key = (row.get("ID"), cls)
+        self.mutation_picks[key] = self.mutation_picks.get(key, 0) + 1
+        return for_class(row, cls)
 
     def draw_mutations(self, room: Room) -> list:
-        """`C_MutationShop.CreateMutations`: a fresh shelf of `ShowCount`."""
+        """`C_MutationShop.CreateMutations`: a fresh shelf of `ShowCount`,
+        no pair twice (`exclude`), the same mutation for two classes allowed."""
         pool = self.mutation_pool(besides=room)
         show = int(MUTATION_SHOP["ShowCount"])
-        return self.rng.sample(pool, min(show, len(pool))) if pool else []
+        out: list = []
+        while pool and len(out) < show:
+            m = self.draw_mutation(pool)
+            out.append(m)
+            pool = [(r, c) for r, c in pool if (r.get("ID"), c) != (m["ID"], m["Class"])]
+        return out
+
+    def give_mutation(self, mid: int) -> dict | None:
+        """A mutation handed over by id (a dialog's `GiveMutation`), for one of
+        its classes not already held, drawn the way a shelf draws."""
+        from .mutations import offer_classes
+        row = self.mutation_by_id(mid)
+        if row is None:
+            return None
+        held = {(m.get("ID"), m.get("Class")) for m in self.mutations}
+        m = self.draw_mutation([(row, c) for c in offer_classes(row)
+                                if (row.get("ID"), c) not in held])
+        if m is not None:
+            self.mutations.append(m)
+        return m
 
     # -- consumables --------------------------------------------------------
     @property

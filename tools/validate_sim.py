@@ -507,6 +507,41 @@ print(f"      {_mt} definitions: " + ", ".join(
     f"{k} {v}" for k, v in sorted(_mc['by_kind'].items(), key=lambda x: -x[1])))
 print(f"      handled {_mh}/{_mt} = {_mh/_mt*100:.0f}%  (mutations are mostly bespoke)")
 
+# An offer is one (id, class) pair (`C_Mutations.ExtractClasses`,
+# `TryGetTreasureParameters`): "All" is the one pair that covers every unit,
+# "Random" any of the ten upgraded classes, a list any one of its classes.
+from sim.mutations import UPGRADED_CLASSES as _UPG
+from sim.mutations import offer_classes as _offer_classes
+check("a mutation is offered per class: All once, Random ten ways, a list per entry",
+      _offer_classes({"Class": "All"}) == ["All"]
+      and _offer_classes({"Class": "Random"}) == list(_UPG) and len(_UPG) == 10
+      and _offer_classes({"Class": "Warrior,Tank"}) == ["Warrior", "Tank"])
+from sim.run import RunState as _RS
+_rp = _RS.new(_STRICT, seed=8)
+_rp.level = 5
+_pool5 = _rp.mutation_pool()
+_multi = next(r for r, c in _pool5 if len(_offer_classes(r)) > 1)
+_two = _offer_classes(_multi)[:2]
+_rp.mutations = [dict(_multi, Class=_two[0])]
+_after = {(r["ID"], c) for r, c in _rp.mutation_pool()}
+check("a held pair is not offered again, the same mutation for another class is",
+      (_multi["ID"], _two[0]) not in _after and (_multi["ID"], _two[1]) in _after)
+_shelf = _rp.draw_mutations(next(iter(_rp.rooms.rooms.values())))
+check("a shelf shows single-class offers, no pair twice",
+      all("," not in m["Class"] and m["Class"] != "Random" for m in _shelf)
+      and len({(m["ID"], m["Class"]) for m in _shelf}) == len(_shelf), f"{len(_shelf)}")
+# the history: two pairs, drawn in turn far more than by chance
+_ra = _RS.new(_STRICT, seed=9)
+_duo = [(_multi, _two[0]), (_multi, _two[1])]
+_seq = [_ra.draw_mutation(_duo)["Class"] for _ in range(200)]
+_gap, _widest = 0, 0
+for _c in _seq:
+    _gap += 1 if _c == _two[0] else -1
+    _widest = max(_widest, abs(_gap))
+check("the pair draw weighs history: two pairs never drift far apart "
+      "(a fair coin's widest gap over 200 draws is about 17)",
+      _widest <= 6, f"widest gap {_widest}")
+
 check("mutations are offered per level", len(offered_at_level(_STRICT, 1)) > 0
       and len(offered_at_level(_STRICT, 12)) > len(offered_at_level(_STRICT, 1)),
       f"L1 {len(offered_at_level(_STRICT, 1))}, L12 {len(offered_at_level(_STRICT, 12))}")

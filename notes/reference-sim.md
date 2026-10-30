@@ -2649,3 +2649,34 @@ a fight" half of the description. `RunState.feed_cost` runs the compositor and
 `apply_to_specs` the slow. Implemented against not: -0.003 [-0.009, +0.003]
 over 2400 seeds from 40000, 283 runs ending with it.
 
+## A mutation is offered for one class (2026-10-30)
+
+`Class` is not a flags enum, and `M_Mutation` carries one `_classValue`. What
+the rows' `Class` strings mean is `C_Mutations.ExtractClasses`: "all" adds
+`Class.Empty`, which every unit matches; "random" adds every class in
+`Const.UpgradedClassValues` (Tank to Scientist, ten, built in `Const..cctor`);
+a comma list adds its classes; a name adds itself. `OnLevelChange` keeps that
+list per mutation the level offers (filtered by the save's unlocks), and
+`TryGetTreasureParameters` draws an (id, class) pair from what is not
+reserved, through `WeightedList.GetElementUsingHistory` with factor 2 against
+`M_Mutations.pickCountByIdAndClass`, and writes the class into the offer.
+`C_MutationShop.CreateMutations` excludes the shelf's own pairs, so one
+mutation can sit on a shelf twice for two classes. Held and shown pairs are
+reserved, the mutation itself is not.
+
+So a row listing seven classes is not a buff to seven classes: it is seven
+offers, each for one of them, and seven times as likely to come up as a row
+for every unit. A "random" row is ten such offers. The port had drawn whole
+rows uniformly by id and applied a listed row to every class in it, and
+re-drew a "random" row's class at every fight.
+
+`RunState.mutation_pool` now lists pairs, `draw_mutation` draws one with the
+history weights and counts it, shelves and shrines both draw that way, and an
+offer is its row with its one class, so everything downstream (the specs, the
+agents, the shelf description) reads a single class as it already could. A
+dialog's `GiveMutation` takes the same draw over the mutation's own pairs.
+
+At level 5 the 98 mutations on offer are 316 pairs, and a shelf comes out 96%
+single-class. On the heuristic over 2400 seeds from 40000, against the id-level
+draw: -0.018 [-0.065, +0.028], mutations held 2.61 against 2.66 a run.
+
