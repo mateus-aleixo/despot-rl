@@ -2402,14 +2402,17 @@ Doctor for 35 gold or mutation 668. So all eleven controllers are ported.
 
 ### What it is worth
 
-On the heuristic over 240 seeds from 30000, paired by seed, with the fast core
-(`tools/ablate.py quests_on`, and a third arm in which the baseline is told to
-follow the quests):
+On the heuristic, paired by seed, with the fast core (`tools/ablate.py
+quests_on`, and a third arm in which the baseline is told to follow the
+quests), first over 240 seeds from 30000 and then, with every quest in, over
+2400 seeds from 40000:
 
-    quests on, passed by, against off     -0.121 [-0.286, +0.044]
-    quests on, followed, against passed   -0.113 [-0.199, -0.026]
+                                          240 from 30000           2400 from 40000
+    quests on, passed by, against off     -0.121 [-0.286, +0.044]  -0.072 [-0.124, -0.020]
+    quests on, followed, against passed   -0.113 [-0.199, -0.026]  -0.028 [-0.049, -0.007]
 
-The first is the map and the economy, and it does not clear zero. Its sign has
+The first is the map and the economy; on 240 seeds it did not clear zero, on
+2400 it does, at about half the size. Its sign has
 a plain source in `CalculatePower`: a quest room takes a plain room out of the
 weight total while the level's Power stays `(num - 1) * PowerPerRoom`, so every
 remaining fight on a quest level is a little bigger. Deaths on level 2 went
@@ -2424,6 +2427,17 @@ With the six controllers of levels 6 and 10 in, the same measurement reads the
 same, -0.121 [-0.286, +0.044], and it has to: with quests on, none of the 240
 heuristic runs reaches level 6. Those quests are held to the checks in
 `tools/validate_sim.py`, not to this number.
+
+**240 seeds is too few at this size.** With the secret room and the
+generator's direction order in, seeds 30000 to 30239 read -0.358
+[-0.515, -0.202], a jump that sent this looking for a bug. There was none: the
+2400 seeds from 40000 read -0.072 [-0.124, -0.020], their ten 240-seed windows
+spread from 0.000 to -0.154, and the old direction order on the same 2400
+reads -0.056 [-0.109, -0.003], so the order changes nothing measurable and the
+30000 window simply sits low on this effect (every quest measurement taken on
+it has). Playing the two arms alternately rather than one after the other
+gives the same levels, so no state leaks between episodes.
+`tools/ablate.py --jobs 8` runs the 2400 in about a minute.
 
 ## The generator's last two steps, read (2026-10-30)
 

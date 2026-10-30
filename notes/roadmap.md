@@ -173,9 +173,10 @@ thrown away.
   `sim/quests.py`; Pit, Sci, Cube, Rat, Reaper, Spider, Bot, Nurgle (into its
   second level), Flight, Sword and SecretRoom are ported, with their
   companions (Zombie, Rat, Bot, TalkingSword). `RoomTransition.CheckDirection` turned out to
-  refuse moves into `Unknown` rooms, which the sim had allowed. Worth -0.121
-  [-0.286, +0.044] to the heuristic, which passes quests by (following them
-  cost it -0.113). Details in `notes/reference-sim.md`. Still open: the
+  refuse moves into `Unknown` rooms, which the sim had allowed. Worth -0.072
+  [-0.124, -0.020] to the heuristic over 2400 seeds, which passes quests by
+  (following them costs it -0.028 [-0.049, -0.007] more; the first 240-seed
+  reading, -0.121 and -0.113, sat low). Details in `notes/reference-sim.md`. Still open: the
   level-2 reward mutations (306, 218, 328, 233, Batch 2's mutation work) and
   the placement layer's `guaranteedPositions`.
 - ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26

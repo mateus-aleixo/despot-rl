@@ -157,9 +157,9 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     moves = kinds.get("move", [])
     # `quests="follow"`: an accepted quest sends the squad to its extra room,
     # and an acquired one back to the quest room for the reward. See
-    # `_quest_target`. Off by default, because it was measured to lose: on 240
-    # seeds following cost -0.113 [-0.199, -0.026] levels against passing the
-    # quests by, for 25 or 30 gold and a mutation the sim does not model yet.
+    # `_quest_target`. Off by default, because it was measured to lose: on
+    # 2400 seeds following cost -0.028 [-0.049, -0.007] levels against passing
+    # the quests by, for 25 or 30 gold and a mutation the sim does not model yet.
     target = _quest_target(st) if quests == "follow" else None
     if target is not None and moves:
         to = st.rooms._distances(target, known_only=True)
