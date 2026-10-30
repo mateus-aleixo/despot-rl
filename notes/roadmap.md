@@ -132,7 +132,10 @@ thrown away.
   `--lights-on` is the control it needs and it exists now: it reveals the whole
   level at an unchanged `obs_dim`, so the pre-fog observation is an arm rather
   than a code change. The other two candidates are a few lines from here, one
-  dropping the two boss features and one dropping the frontier.
+  dropping the two boss features and one dropping the frontier. **Measured at
+  the boundary, 2026-10-30**: twelve seeds at 2M per arm, and the boss
+  distance bought nothing (`noboss` +0.153 [-0.012, +0.318] against the
+  shipped arm, +0.102 [+0.016, +0.189] at 1M), so `noboss` ships now.
 - ~~**Portals.**~~ **Done, 2026-10-29**, and with them the rest of
   `PositionRooms`. `portalsCount = num / 7 + 1`, `minPortalDistance = 3` and
   `minFinishDistance = num / 6 + 2` are all written by `C_Rooms.Generate`, so
@@ -176,9 +179,11 @@ thrown away.
   refuse moves into `Unknown` rooms, which the sim had allowed. Worth -0.072
   [-0.124, -0.020] to the heuristic over 2400 seeds, which passes quests by
   (following them costs it -0.028 [-0.049, -0.007] more; the first 240-seed
-  reading, -0.121 and -0.113, sat low). Details in `notes/reference-sim.md`. Still open: the
-  level-2 reward mutations (306, 218, 328, 233, Batch 2's mutation work) and
-  the placement layer's `guaranteedPositions`.
+  reading, -0.121 and -0.113, sat low). Details in `notes/reference-sim.md`. The
+  level-2 reward mutations (218 CastSpeed, 233 CSRange, 306 ClassSkill, 328
+  CSTauntTime) moved to Batch 2 with the other mutations that have no handler,
+  and which Novices the Pit takes (the room's `guaranteedPositions`) stays an
+  assumption (`quests_partly_ported`) for Batch 4's audit.
 - ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26
   of their event types, plus consumable 13 (`DejaVu` followed, see Consumables). Worth +0.196
   [+0.021, +0.370] levels to the heuristic, and choosing well +0.154 over
@@ -223,7 +228,9 @@ thrown away.
 
 **Boundary:** re-baseline random + heuristic over 240 seeds, squads cycled, then
 one sweep for the `to_boss` question, which is a genuine fork rather than a
-feature.
+feature. **Done, 2026-10-30**: random 1.235, heuristic 3.350 over 2400 seeds
+from 40000 (240 proved too few for effects under a fifth of a level), and the
+fork sweep above. Both are in `notes/rl.md`.
 
 # Batch 2 — the battle layer, complete
 
@@ -239,7 +246,9 @@ against Batch 1's baseline.
   `sim/battle.py` and the Rust core.
 - **The 28 mutation names with no handler**, of 101 shipped. 259 of 1,094 offers
   are implemented, which is what caps the shelf at +0.13 and therefore caps
-  every mutation result in `notes/rl.md`.
+  every mutation result in `notes/rl.md`. Start with the four level-2 quest
+  rewards (218, 233, 306, 328): while they do nothing, the heuristic takes the
+  gold those quests offer instead.
 - **An audit of the 79 that do have handlers.** Three read the wrong key and did
   nothing while counting as implemented (`vampirism` reading `percent` where the
   rows say `value`, then `ExplodeProjectile`, then `EventualKnockback`). There
@@ -296,19 +305,18 @@ on.
 
 ## Where the next session picks up
 
-State at the close of 2026-09-02: nothing running, `main` clean and pushed,
-`room-fights` merged. Baselines on the current environment are **random 1.429,
-heuristic 3.946** over 240 seeds with the squads cycled; the best trained agent
-is `roomfight4m_long_s9` at 4.600 against an arm mean of 3.918, which is a draw
-with the heuristic rather than a win.
+State at the close of 2026-10-30: Batch 1 is done and merged into `main`.
+Baselines are **random 1.235, heuristic 3.350** over 2400 seeds from 40000.
+PPO at 2M loses to the heuristic by 0.6 to 0.8 levels and was still improving
+from 1M to 2M, so the next agent sweep should run to 4M at least. **Start Batch
+2** with the mutations that have no handler, the four level-2 quest rewards
+first, then the `C_Fight` escalation schedule.
 
 The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
-**stopped part-way and its checkpoints deleted**. Do not look for its results.
-Re-run it after Batch 1 if the question still matters; it will have to be
-re-trained against the new interface anyway.
+**stopped part-way and its checkpoints deleted** on 2026-09-02. Re-run it if
+the question still matters; it has to be trained against the new interface.
 
-**Start with Batch 1**, and inside it start with the two things that unblock the
-rest:
+How Batch 1 started, for the record:
 
 1. ~~Locate the dialog table.~~ **Done, 2026-09-02.** It is
    `EncryptedMainGroup/dialogs.json`, beside `DB/` rather than inside it, which
@@ -338,8 +346,8 @@ Tools that did not exist before this session and are worth knowing about:
 
 ## Tests and CI
 
-Done 2026-10-04 (commits `2423de8`, `0a51096`). `tests/` holds 160 tests that need no
-game data, and GitHub Actions builds the Rust core and runs them on every push:
+Done 2026-10-04 (commits `2423de8`, `0a51096`). `tests/` holds the tests that need no
+game data (172 tests in all on 2026-10-30, the two validate suites included), and GitHub Actions builds the Rust core and runs them on every push:
 pathfinding against a reference Dijkstra, ORCA's no-collision guarantee, the
 behaviour-tree node semantics, the ruleset layering on a synthetic metadata tree,
 level-generation invariants, Rijndael at Nb=4 against the FIPS-197 vectors, and the

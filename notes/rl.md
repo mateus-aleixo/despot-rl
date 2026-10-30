@@ -2651,3 +2651,22 @@ them, since an arm comparison taken before the budget is spent can still turn
 (the 2026-08-31 lesson). Size the next sweep at 4M at least. These numbers
 belong to 534e0b9's environment, and the mutation work merged after it moves
 the game, so re-baseline before comparing anything against them.
+
+### The batch-1 boundary, 2026-10-30
+
+Batch 1 is closed. The shipped observation is now the fork's `noboss` arm: the
+boss-distance entries are held at zero unless `boss_distance=True`
+(`--boss-distance`), and the `fog` sweep in `tools/sweep_arms.py` names the
+flag on its other arms, so it still grades each agent on the vector it trained
+on. 455 observations and 44 actions, as before.
+
+Baselines at the merge, `tools/baseline.py` over 2400 seeds from 40000, squads
+cycled, frontline placement, Rust core:
+
+    random     1.235 [1.218, 1.252]   (sd 0.425)
+    heuristic  3.350 [3.303, 3.397]   (sd 1.173)
+
+At 534e0b9 the same seeds gave 1.253 and 3.358; the mutation work merged since
+moved neither by a resolvable amount. The heuristic by squad runs from 3.03
+(Squad6) to 3.74 (Squad2), and its runs end on level 2 to 5 in 2306 of 2400,
+never past level 6. These are the numbers Batch 2 measures against.
