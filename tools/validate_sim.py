@@ -555,6 +555,19 @@ _rich = _rs.specs_cached()[0].damage
 check("a run's own purse switches HoboFury, cache and all", _poor == _rich + 30.0,
       f"{_poor} at 3 gold, {_rich} at 50")
 
+# Intelligence (289: +50%, every class) composes the unit's experience: a
+# gain of g lands as 1.5 g, bought or earned.
+_ri = _RS.new(_STRICT, seed=6)
+_ri.squad = [_ri.squad[0]]
+_ri.squad[0].experience, _ri.squad[0].level = 0.0, 1
+_ri.gain_experience(4.0)
+_plain_exp = _ri.squad[0].experience
+_ri.squad[0].experience, _ri.squad[0].level = 0.0, 1
+_ri.mutations = [next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 289)]
+_ri.gain_experience(4.0)
+check("Intelligence turns 4 experience into 6", _plain_exp == 4.0
+      and abs(_ri.squad[0].experience - 6.0) < 1e-9, f"{_ri.squad[0].experience}")
+
 # and it becomes a castable action instead
 _rngM = random.Random(2)
 _monks = build_player_squad(_STRICT, [("gloves", 1)] * 3)      # Monk class

@@ -62,7 +62,6 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "ChanceIncrease": Handler(UNIMPLEMENTED, note="raises another mutation's chance"),
     "PassiveStun": Handler(PASSIVE, note="on-attack stun"),
     "UnderFeed": Handler(UNIMPLEMENTED, note="food economy"),
-    "Intelligence": Handler(UNIMPLEMENTED, note="mana economy"),
     "ManaBreak": Handler(PASSIVE, note="mana burn on hit"),
     "RailProjectile": Handler(UNIMPLEMENTED, note="piercing projectile"),
     "RubberProjectile": Handler(UNIMPLEMENTED, note="bouncing projectile"),
@@ -77,6 +76,8 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     # Stat bonuses that follow the run: see `apply_to_specs`.
     "HungerFury": Handler(PASSIVE, note="stat bonus by hunger level"),
     "HoboFury": Handler(PASSIVE, note="stat bonus while the purse is nearly empty"),
+    # Run layer: `RunState.gain_experience` applies it.
+    "Intelligence": Handler(PASSIVE, note="more experience per gain"),
     "CSRange": Handler(UNIMPLEMENTED, note="class-skill range"),
     "ChainLightning": Handler(UNIMPLEMENTED, note="chaining projectile"),
     "PlagueAntiHeal": Handler(UNIMPLEMENTED, note="swaps the Medic class skill"),

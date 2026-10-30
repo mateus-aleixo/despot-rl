@@ -1098,12 +1098,42 @@ class RunState:
         share = amount / len(group)
         gained = 0
         for h in group:
-            h.experience += share
+            h.experience += self.experience_gain(h, share)
             while h.level < MAX_UNIT_LEVEL and h.experience >= self.max_experience(h.level):
                 h.experience -= self.max_experience(h.level)
                 h.level += 1
                 gained += 1
         return gained
+
+    def experience_gain(self, h: Human, gain: float) -> float:
+        """What `gain` experience comes to for `h`, through the held
+        Intelligence mutations.
+
+        `C_IntelligenceMutation.Modify(coming, current)` sits on each covered
+        unit's experience: a rise of `g` becomes `g * (1 + value / 100)` when
+        `percentage` (the model's default) and `g + value` otherwise, never
+        below zero, so bought experience grows as well as earned. A "Random"
+        class is the one `mutation_effect` shows for the mutation, drawn from
+        the squad's classes off the mutation's id: the run layer has no
+        offered class to keep (see `mutation_pool_by_id_all_unlocked`).
+        """
+        from .mutations import applies_to, mutation_params
+        smart = [m for m in self.mutations if m["Name"] == "Intelligence"]
+        if not smart or gain <= 0.0:
+            return gain
+        cls = h.cls or self.item_class(h.item)
+        for m in smart:
+            random_class = None
+            if m.get("Class") == "Random":
+                classes = sorted({x.cls or self.item_class(x.item) for x in self.squad})
+                random_class = random.Random(int(m.get("ID") or 0)).choice(classes)
+            if not applies_to(m, cls, None, random_class):
+                continue
+            p = mutation_params(m)
+            value = float(p.get("value") or 0.0)
+            pct = str(p.get("percentage", "true")).lower() == "true"
+            gain = max(0.0, gain * (1.0 + value / 100.0) if pct else gain + value)
+        return gain
 
     # -- the item shop -----------------------------------------------------
     @property

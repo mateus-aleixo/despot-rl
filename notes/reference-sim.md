@@ -2625,3 +2625,14 @@ unimplemented: -0.006 [-0.012, +0.001], with 293 runs ending holding one of
 them. The heuristic takes a shelf's implemented mutation that covers most of
 the squad, so these displace other picks about as often as they help.
 
+**Intelligence** (289: +50% for every class; 270: +100% for a random one),
+filed under "mana economy" until now, composes `M_Unit._experience` (static
++0x138): `C_IntelligenceMutation.Modify(comingExp, currentExp)` turns a rise
+of `g` into `g * (1 + value / 100)` (`percentage`, true by default) or
+`g + value`, never below zero, for units of the mutation's class. Bought
+experience goes through the same property, so it grows too.
+`RunState.experience_gain` applies it per human. The random class is the one
+the shelf description draws off the mutation's id, since the sim keeps no
+offered class (`mutation_pool_by_id_all_unlocked`). Implemented against not:
+-0.003 [-0.007, +0.000] over 2400 seeds from 40000, 102 runs ending with it.
+
