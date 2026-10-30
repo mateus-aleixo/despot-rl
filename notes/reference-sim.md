@@ -654,7 +654,8 @@ saying *when* the shop refills a bought-out slot. It is modelled as one free
 refill of empty slots the first time you enter a shop room, tracked per room so
 that leaving and coming back is not a free reroll. And within one quality the
 game draws from a `DynamicWeightedList` with factor 2, which biases against
-repeating a recent draw; the sim draws uniformly.
+repeating a recent draw; the sim draws uniformly. (Read and modelled since,
+see "The anti-repeat weighting, read (2026-10-30)" below.)
 
 The pool itself is measured, not assumed: `M_Item.neverGiven` comes from
 `Meta.Items[name].NeverGiven`, true for exactly six rows (plant-leaf, leaflet,
@@ -2268,9 +2269,9 @@ coroutine and returns true.
 a `DynamicWeightedList<string>` (factor 2), keeps it in a static dictionary
 keyed by the shortlist's text, and draws one name per level into
 `M_LevelData.randomizedQuestNames`; `C_Levels.CreateQuestModel` writes that
-quest's row into the level data. The sim draws uniformly, the same reading the
-item shop's `DynamicWeightedList` gets: the list's bias works across the runs
-of one launch, which independent runs cannot carry.
+quest's row into the level data. The sim draws uniformly. The list's bias works
+across the runs of one launch, which independent runs cannot carry; within one
+run each shortlist is drawn from once, so the bias never acts inside a run.
 
 `V_Rooms.MoveCamera` calls `V_Quest.Launch` on every arrival in a room that has
 a `V_Quest`, and `Launch` runs the dialog `GetDialogIndex(room)` names, none at
@@ -2511,3 +2512,36 @@ to 2.17, and about 2% of level-1 maps are now compact enough that
 `ChoosePortals` lands fewer than two portals and the step is undone. The
 heuristic reaches 3.237 on the new maps against 3.183 on the old, over the same
 240 seeds but unpaired (the maps differ), so nothing beyond noise.
+
+## The anti-repeat weighting, read (2026-10-30)
+
+`DynamicWeightedList<T>` is the only weighted list in the game with a memory,
+and it has two users: `M_ItemData.weightedTemplatesByQuality`, one list per
+item quality, and `LevelData`'s static `questLists`, one per quest shortlist.
+
+  * **Its weights.** `WeightedList.PopulateEntity` gives each entry
+    `GetWeight(element)`, or 1 when no weight function is passed, and
+    `ItemData.Load` passes none, so a quality's items start equal.
+    `DynamicWeightedList.GetElement(index)` (the virtual override) adds one to
+    the entry's `pickCount` and calls `AdjustWeights`, which rewrites every
+    weight as `1 / powf(factor, pickCount - minPickCount)` and rebuilds the
+    cumulative sums. `factor` is the constructor's 2. The weight function's
+    values are gone after the first pick, which matters only for a list built
+    with one; neither user is.
+  * **The draw.** `GetRandomIndex` takes `rnd.NextDouble() * totalSum` and
+    binary-searches the cumulative sums. `C_ItemShop.Roll` draws the quality
+    from `weightedQualities`, a plain `WeightedList<int>` (its weights stay the
+    shop level's probabilities), then the index from the quality's list, then
+    calls the list's own `GetElement(index)`, so every item the shop shows is
+    a pick, bought or not. Both draws use the current room's `rnd`.
+  * **Its lifetime.** `ItemData.Load` builds new lists each time
+    `RootLoader.LoadData` runs, and `Loader._NewGame` calls that, so the item
+    history is the run's. The quest lists are static and outlive the run.
+
+So the shop cycles through a quality: an item shown k more times than the
+least-shown one in its quality is drawn at `2^-k` of that one's weight. The sim
+keeps `RunState.item_picks` and draws with those weights (`item_weights`).
+Against a uniform draw inside the quality, on the heuristic over 2400 seeds
+from 40000, it is worth -0.005 [-0.035, +0.025]: fidelity with nothing
+measurable behind it, as expected of a rule that only reorders which of ten
+equally priced items of a quality turns up.

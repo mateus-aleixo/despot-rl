@@ -57,10 +57,10 @@ Read off the binary (`C_ItemShop`, `CS_Units.LevelUp`, `C_Team.GetExperience`,
     which is why the first item shop is the run's first real decision. See
     `starting_squad`.
 
-Two things here are not measured and are marked as such: which slot the shop
+One thing here is not measured and is marked as such: which slot the shop
 refills and when (modelled as: empty slots refill free the first time you enter
-a shop room), and the anti-repeat weighting inside one quality
-(`DynamicWeightedList`, factor 2), which is modelled as a uniform draw.
+a shop room). The anti-repeat weighting inside one quality, which used to be
+the second, is read and modelled: see `RunState.roll_item`.
 """
 from __future__ import annotations
 
@@ -687,6 +687,10 @@ class RunState:
     # where a slot has been bought out.
     shop_level: int = 1
     offer: list[str | None] = field(default_factory=list)
+    # How often each item has been drawn this run, per quality: the
+    # `pickCount`s of `M_ItemData.weightedTemplatesByQuality`, which
+    # `RootLoader.LoadData` rebuilds for every new game. See `roll_item`.
+    item_picks: dict = field(default_factory=dict)
     # The low level of the hierarchy. Called as
     #   policy(grid, layout, specs, rng) -> [(row, col), ...]
     # one cell per spec. None means the default spread over the player zone.
@@ -1194,9 +1198,16 @@ class RunState:
     def roll_item(self) -> str | None:
         """One slot: draw a quality by weight, then an item of that quality.
 
-        The game draws the item from a `DynamicWeightedList` with factor 2,
-        which biases against repeating what it just gave you. That bias is not
-        modelled; the draw here is uniform inside the quality.
+        `C_ItemShop.Roll` takes the quality from `weightedQualities`, a plain
+        `WeightedList<int>` whose weights stay the shop level's
+        probabilities, and the item from that quality's
+        `DynamicWeightedList<JToken>` (`ItemData.Load` builds one per quality
+        with no weight function, so every item starts at 1, and factor 2). It
+        draws the index and then calls the list's own `GetElement(index)`,
+        which counts the pick and runs `AdjustWeights`: every item's weight
+        becomes `1 / 2^(picks - fewest picks in the quality)`. So an item the
+        shop has shown is half as likely next time as one it has shown less,
+        whether or not it was bought, for the rest of the run.
         """
         weights = self.quality_weights()
         if not weights:
@@ -1205,7 +1216,21 @@ class RunState:
         qualities = sorted(weights)
         q = self.rng.choices(qualities, weights=[weights[x] for x in qualities])[0]
         names = pool.get(q) or []
-        return self.rng.choice(names) if names else None
+        if not names:
+            return None
+        picks = self.item_picks.setdefault(q, {})
+        pick = self.rng.choices(names, weights=self.item_weights(q, names))[0]
+        picks[pick] = picks.get(pick, 0) + 1
+        return pick
+
+    def item_weights(self, quality: int, names: list[str]) -> list[float]:
+        """`DynamicWeightedList.AdjustWeights` over one quality's items:
+        `1 / factor^(pickCount - minPickCount)`, factor 2. The shipped weight
+        function is none, so before any pick every item weighs 1, which the
+        same formula gives."""
+        picks = self.item_picks.get(quality, {})
+        fewest = min((picks.get(n, 0) for n in names), default=0)
+        return [1.0 / 2.0 ** (picks.get(n, 0) - fewest) for n in names]
 
     def item_cost(self, name: str) -> float:
         """What the shop charges: the item's own `Cost`.

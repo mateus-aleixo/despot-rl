@@ -2748,6 +2748,26 @@ _st4.shop_level = 1
 _drawn1 = {_ITEMS[_st4.roll_item()]["Quality"] for _ in range(200)}
 check("a level-1 shop never draws above quality 2", _drawn1 <= {1, 2}, f"{sorted(_drawn1)}")
 
+# Inside a quality the draw is `DynamicWeightedList` with factor 2: every item
+# starts at weight 1, and each pick halves an item's weight against the
+# least-picked one, so over a run the shop cycles through a quality's items.
+_st6 = RunState.new(_STRICT, seed=13)
+_q1 = _by_quality(_STRICT)[1]
+_st6.item_picks = {1: {_q1[0]: 2, _q1[1]: 1}}
+_w = _st6.item_weights(1, _q1)
+check("an item picked k times more than the least-picked weighs 1 / 2^k",
+      _w[0] == 0.25 and _w[1] == 0.5 and all(x == 1.0 for x in _w[2:]), f"{_w[:3]}")
+_st6.item_picks, _st6.shop_level = {}, 1
+for _ in range(300):
+    _st6.roll_item()
+_spread = {q: max(c.get(n, 0) for n in _by_quality(_STRICT)[q])
+           - min(c.get(n, 0) for n in _by_quality(_STRICT)[q])
+           for q, c in _st6.item_picks.items()}
+check("every roll is a pick, and 300 of them leave a quality's counts within 6 "
+      "(a uniform draw spreads them about 15 apart)",
+      sum(sum(c.values()) for c in _st6.item_picks.values()) == 300
+      and max(_spread.values()) <= 6, f"{_spread}")
+
 # never-given items are quest props with no stats; the shop must not sell them
 check("the shop never offers a NeverGiven item",
       not ({"plant-leaf", "leaflet", "cube-part", "comic-book", "rat-flute",

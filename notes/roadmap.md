@@ -72,9 +72,9 @@ matching, and every constant either read from the shipped data or recorded in
 `sim/assumptions.py` as a choice.** That is checkable, and `tools/diff_core.py`
 already works to exactly this standard for the battle loop.
 
-Some constants will never be recovered: the anti-repeat weighting inside a
-quality. (`maxDeadEnds`, `minFinishDistance` and whether a room may cover
-several squares, once on this list, were all recovered.) `sim/assumptions.py` is the honest boundary of the work, not a list
+Some constants will never be recovered. (`maxDeadEnds`, `minFinishDistance`,
+whether a room may cover several squares and the anti-repeat weighting inside
+a quality, once on this list, were all recovered.) `sim/assumptions.py` is the honest boundary of the work, not a list
 that eventually empties.
 
 ## The rule that makes completeness real
