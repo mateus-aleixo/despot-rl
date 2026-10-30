@@ -184,7 +184,9 @@ thrown away.
   events, the gates that fill `enableds` and `hiddens`, and the choice itself as
   an action in the observation. `unlocks` is unused in the shipped file, so skip
   it. Note the second entry point: consumable ID 10 fires `Dialog.DejaVu`.
-- ~~**Consumables.**~~ **Done, 2026-10-29**, eleven of the fourteen: they are
+- ~~**Consumables.**~~ **Done, 2026-10-29**; Event and DejaVu followed on
+  2026-10-30, so thirteen of the fourteen (DamageAllEnemies is on no Default
+  list). The first pass, eleven of the fourteen: they are
   live in every Default run, from the boss rooms. Two carried, free to take,
   5 gold to sell; heals, the cleaner, reserves, resurrection, teleport,
   AntiHunger and reroll modelled. DejaVu and Event wait on dialogs;

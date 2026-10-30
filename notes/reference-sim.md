@@ -2165,3 +2165,31 @@ The packs' own rooms are harder for this squad than a random room was; why has
 not been measured. `tools/ablate.py` is the general form of `tools/hp_cost.py`, for any of the
 `RunState` switches that keep an old behaviour for measuring (`carry_hp`,
 `pack_layouts`, `dialogs_on`).
+
+## DejaVu, the fourteenth consumable (2026-10-30)
+
+`C_DejaVuConsumable` is never used by hand. `Take` enables it, and `Enable`
+saves the run (`PrepareData`), subscribes to `C_Session.OnLoss`, and saves again
+whenever a level starts while it is carried. `OnLoss` catches the loss and opens
+the `DejaVu` dialog ("Now let's backstep a bit and imagine you NOT losing all
+your puny humans"), whose one choice fires the `DejaVu` event, and `Use` loads
+the save with `Loader.LoadGameFromData`. So it is a second life: a wipe while
+carrying one goes back to the last save.
+
+The sim keeps the save in `RunState.dejavu_save` and rewinds in
+`dejavu_rewind` on a wipe (not on its own stranded rule, which the game does
+not have). Two choices, both in `sim/assumptions.py`: the DejaVu is spent by the
+rewind, and the random stream keeps running rather than being rewound with the
+rest. The second matters: with the stream rewound a deterministic policy replays
+the level move for move and dies in the same place, which a reloaded game does
+not do (`notes/rust-core.md`, a 1e-4 nudge flips one fight in twelve). On the
+heuristic over 240 seeds, with the stream rewound the DejaVu fired in 91 runs
+and the mean moved only from 3.300 to 3.317 (unpaired, against the run before
+DejaVu was modelled); with it kept, 96 rewinds and
+
+    DejaVu on against off, paired  +0.071 [+0.034, +0.107]
+
+The heuristic takes it before anything else on a shelf. All fourteen consumables
+but `DamageAllEnemies`, which no Default level lists, now do what they do in
+the game. With them all, the shop is worth +0.692 [+0.569, +0.814] to the
+heuristic (`tools/consumable_value.py`, dialogs and pack layouts on).

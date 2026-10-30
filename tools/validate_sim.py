@@ -1927,9 +1927,24 @@ _give(_rr, 14)
 _rr.apply(("use_consumable", 0))
 check("a Reroll rolls the item shop for free",
       _rr.gold == _g1 and len(_rr.offer) == len(_before_offer), f"{_before_offer} -> {_rr.offer}")
-check("every consumable but DejaVu and DamageAllEnemies has an effect",
+check("every consumable but DamageAllEnemies has an effect",
       {c["Name"] for c in _STRICT["Consumables"] if _fam(c) == "unmodelled"}
-      == {"DejaVu", "DamageAllEnemies"})
+      == {"DamageAllEnemies"})
+
+# DejaVu: taken, it saves; a wipe while it is carried rewinds to the save
+_dj = _won_boss(40)
+_dj.ensure_stock(_dj.rooms.rooms[_dj.room])
+_dj.rooms.rooms[_dj.room].consumable_offer = [_cons_rows[10]]
+_dj.apply(("take_consumable", 0))
+_dj_n, _dj_gold = len(_dj.squad), _dj.gold
+_dj.squad = []
+_rw = _dj.apply(("buy_human", None))
+check("a wipe with a DejaVu carried rewinds to its save",
+      _rw.get("dejavu") and not _dj.finished and len(_dj.squad) == _dj_n
+      and _dj.gold == _dj_gold and not _dj.holds_dejavu(), f"{_rw}")
+_dj.squad = []
+_dj.apply(("buy_human", None))
+check("and a second wipe ends the run", _dj.finished and not _dj.won)
 
 # -- layouts: the pack chooses the room ------------------------------------------
 from sim.data import parse_room_layouts as _prl

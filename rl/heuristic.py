@@ -17,8 +17,8 @@ from sim.run import MAX_UNIT_LEVEL, RunState, consumable_family
 
 # What the baseline takes from a consumable shop, best first, and what it sells
 # on sight: the consumables it has no rule for, five gold each.
-TAKE_ORDER = ("heal_one", "heal_all", "resurrection", "reserve_humans",
-              "reserve_ally", "cleaner", "anti_hunger")
+TAKE_ORDER = ("dejavu", "heal_one", "heal_all", "resurrection", "reserve_humans",
+              "reserve_ally", "cleaner", "anti_hunger", "event")
 USELESS_TO_BASELINE = ("unmodelled", "teleport", "reroll")
 
 
@@ -76,7 +76,7 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     for k, fam in held.items():
         if ((fam == "heal_one" and min(hp) < 0.5)
                 or (fam == "heal_all" and sum(hp) / len(hp) < 0.7)
-                or fam in ("resurrection", "reserve_humans", "reserve_ally")):
+                or fam in ("resurrection", "reserve_humans", "reserve_ally", "event")):
             return ("use_consumable", k)
     # The boss room once won: take what the shop shows while there is room,
     # most useful first, then go down the pipe.

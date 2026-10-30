@@ -216,8 +216,10 @@ class Assumptions:
     # player to place. (5) The pool draw is uniform over the dialogs that can
     # start; `M_Dialog.weight` is unset in the shipped file. (6) Text
     # interpolation is ignored, except where a variable also counts something
-    # (`numberOfUnitsToGive`, `itemCost`, `foodToRemove`). (7) `DejaVu`, the
-    # rewind after a wipe, is not modelled.
+    # (`numberOfUnitsToGive`, `itemCost`, `foodToRemove`). (7) A `DejaVu`
+    # rewind spends the DejaVu (whether `PrepareData`'s save still carries it
+    # was not read) and keeps the random stream running, since a reloaded
+    # game does not replay its fights bit for bit.
     # Settle by: reading `C_Dialogs.Choose`, `GiveItem.Apply` and `RemoveUnit.Apply`
     # in full.
     dialogs_single_choice_auto: bool = True

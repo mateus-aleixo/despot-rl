@@ -130,9 +130,9 @@ def consumable_family(row: dict) -> str:
     allies when it does not (`Kinds.TeamMember = 64`, and `C_Team.AfterFight`
     removes temporary units). `Event` opens a pool dialog
     (`C_EventConsumable.Use` calls `C_Levels.StartDialog`). `DejaVu` is a
-    second life, a rewind to a save after a wipe, and `DamageAllEnemies` is on
-    no Default level's list, so those two are carried and sold but have no
-    effect here.
+    second life, never used by hand: see `RunState.dejavu_save`.
+    `DamageAllEnemies` is on no Default level's list, so it is carried and
+    sold but has no effect here.
     """
     name = row.get("Name")
     if name == "Heal":
@@ -142,12 +142,13 @@ def consumable_family(row: dict) -> str:
         return "reserve_humans" if "TeamMember" in kind else "reserve_ally"
     return {"RoomCleaner": "cleaner", "Resurrection": "resurrection",
             "Teleport": "teleport", "AntiHunger": "anti_hunger",
-            "Reroll": "reroll", "Event": "event"}.get(name, "unmodelled")
+            "Reroll": "reroll", "Event": "event",
+            "DejaVu": "dejavu"}.get(name, "unmodelled")
 
 
 CONSUMABLE_FAMILIES = ("heal_one", "heal_all", "cleaner", "reserve_humans",
                        "reserve_ally", "resurrection", "teleport", "anti_hunger",
-                       "reroll", "event", "unmodelled")
+                       "reroll", "event", "dejavu", "unmodelled")
 
 # `RoomState`, straight from the enum. `C_Rooms.SetCurrent` is the only thing
 # that writes it, and the disassembly says exactly what it writes: the room being
@@ -701,6 +702,8 @@ class RunState:
     # layout the last fight was fought in.
     _last_pack: tuple | None = None
     _last_layout: int | None = None
+    # A DejaVu's save, see `dejavu_save`.
+    _dejavu: dict | None = None
 
     # -- setup -------------------------------------------------------------
     @classmethod
@@ -1294,6 +1297,56 @@ class RunState:
         if not self.squad:
             self.finished, self.won = True, False
 
+    # -- DejaVu ---------------------------------------------------------------
+    _NOT_SAVED = ("tables", "_power_cache", "_specs_cache", "_mutation_cache",
+                  "_pack_cache", "_food_packs", "placement_policy", "_dejavu")
+
+    def dejavu_save(self) -> None:
+        """`C_DejaVuConsumable.PrepareData`: save the run, for a rewind.
+
+        The controller saves when the consumable is taken and again whenever
+        a level starts while it is held, subscribes to `C_Session.OnLoss`, and
+        on a wipe opens the `DejaVu` dialog, whose one choice loads the save
+        (`Loader.LoadGameFromData`). Rows from the tables are shared, not
+        copied: nothing writes to them.
+        """
+        import copy
+        memo = {id(self.tables): self.tables}
+        for m in self.mutations:
+            memo[id(m)] = m
+        for c in self.consumables:
+            memo[id(c.row)] = c.row
+        state = {k: v for k, v in self.__dict__.items() if k not in self._NOT_SAVED}
+        self._dejavu = copy.deepcopy(state, memo)
+
+    def holds_dejavu(self) -> bool:
+        return any(consumable_family(c.row) == "dejavu" for c in self.consumables)
+
+    def dejavu_rewind(self) -> bool:
+        """A wipe with a DejaVu carried: back to its save, the DejaVu spent.
+
+        Whether the reloaded save still carries the DejaVu is not read
+        (`sim/assumptions.py`); it is taken out, so it saves one run once. The
+        random stream is not rewound with the rest: a reloaded game does not
+        replay its fights bit for bit (`notes/rust-core.md` measured a 1e-4
+        nudge flipping one fight in twelve), and rewinding it would make a
+        deterministic policy die in the same place again.
+        """
+        if self._dejavu is None or not self.holds_dejavu():
+            return False
+        import copy
+        save, self._dejavu = self._dejavu, None
+        rng = self.rng
+        self.__dict__.update(copy.deepcopy(save, {id(self.tables): self.tables}))
+        self.rng = rng
+        for c in list(self.consumables):
+            if consumable_family(c.row) == "dejavu":
+                self.consumables.remove(c)
+                break
+        self.finished, self.won = False, False
+        self.log.append("dejavu")
+        return True
+
     def item_class(self, item: str | None) -> str:
         """The class a human holding `item` fights as; a bare one is a Novice."""
         if not item:
@@ -1584,6 +1637,9 @@ class RunState:
                 self.consumables.append(
                     Consumable(row=row, charges=int(row.get("Count") or 1)))
                 result["consumable"] = row.get("Name")
+                # `C_DejaVuConsumable.Take` enables it with a fresh save.
+                if consumable_family(row) == "dejavu":
+                    self.dejavu_save()
         elif kind == "use_consumable":
             k = int(arg or 0)
             here = self.rooms.rooms[self.room]
@@ -1606,6 +1662,9 @@ class RunState:
 
         if not self.squad:
             self.finished, self.won = True, False
+            # `C_DejaVuConsumable.OnLoss` catches the loss and rewinds.
+            if self.dejavu_rewind():
+                result["dejavu"] = True
         elif self.stranded():
             # Soft-locked: no food, no moves in reserve, and too small a squad
             # to sacrifice from, so `M_Food.canMove` is false and the run
@@ -2087,5 +2146,8 @@ class RunState:
         # for a level is bought from its shops, and this was handing over up to
         # 250 free food a level, which is 40 rooms for a six-human squad.
         #
-        # `ChangeLevel` ends in `C_Levels.StartDialog`.
+        # A DejaVu carried saves again as the level starts, then `ChangeLevel`
+        # ends in `C_Levels.StartDialog`.
+        if self.holds_dejavu():
+            self.dejavu_save()
         self.start_level_dialog()
