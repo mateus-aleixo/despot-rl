@@ -903,6 +903,19 @@ _ci = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 215]
 _t0c, _t1c, _bc = _mut_fight([221])
 _before = [e[0] for e in _t0c[0].evasions]
 _boost(_t0c[0], _bonuses(_ci, _t0c[0].spec.cls))
+# Underdog (259: +10 armour per enemy beyond the squad's count) at fight start.
+from sim.mutations import underdog as _underdog
+_ud = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 259]
+_t0u, _t1u, _bu = _mut_fight([], n=4, foes=6)
+_a0 = _t0u[0].armor
+_underdog(_t0u, len(_t1u), _ud)
+_a1 = _t0u[0].armor
+_t0e, _t1e, _be = _mut_fight([], n=4, foes=4)
+_underdog(_t0e, len(_t1e), _ud)
+check("Underdog: 4 against 6 is +20 armour each, 4 against 4 nothing",
+      abs(_a1 - _a0 - 20.0) < 1e-9 and abs(_t0e[0].armor - _a0) < 1e-9,
+      f"{_a0} -> {_a1}, even {_t0e[0].armor}")
+
 check("ChanceIncrease turns a 35% evasion into 40.25%",
       _before == [35.0] and abs(_t0c[0].evasions[0][0] - 40.25) < 1e-9,
       f"{_before} -> {[e[0] for e in _t0c[0].evasions]}")

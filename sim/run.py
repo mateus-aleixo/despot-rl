@@ -2361,10 +2361,12 @@ class RunState:
             team0 = deploy(grid, layout, fielded, 0, "p", rng)
         apply_class_skills(self.tables, team0)
         if self.mutations:
-            from .mutations import apply_to_agents, boost_agent_chances, chance_bonuses
+            from .mutations import (apply_to_agents, boost_agent_chances,
+                                    chance_bonuses, underdog)
             apply_to_agents(team0, self.mutations, rng)
             for agent in team0:
                 boost_agent_chances(agent, chance_bonuses(self.mutations, agent.spec.cls))
+            underdog(team0, len(team1), self.mutations)
         # Wounds carry over: each unit starts the fight with the share of its
         # health it ended the last one with. `team0` starts with the squad's
         # first `n_humans` humans, in order; allies arrive whole.

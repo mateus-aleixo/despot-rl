@@ -2694,3 +2694,13 @@ mutation's own skill takes the bonus twice is open
 (`chance_increase_applies_once`). Implemented against not: -0.000
 [-0.004, +0.003] over 2400 seeds from 40000, 190 runs ending with one.
 
+**Underdog** (259: +10 armour for each enemy beyond the squad's count).
+`C_UnderdogMutation.OnFightBegin` takes the enemy team's unit count less the
+squad's and, when that `diff` is positive, gives every unit an "Underdog"
+`StatBonus` of `amount * diff * coefficient` (the model's `coefficient`
+defaults to 1), flat. `underdog` does the same once the fight's agents are
+built, on their specs, which both engines read. No heuristic run over the
+2400 seeds holds it (it is offered from level 5), so the measurement against
+not, +0.000, says nothing about its worth; `tools/validate_sim.py` holds it to
+the arithmetic.
+

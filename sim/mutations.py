@@ -60,6 +60,8 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "BeforeFightSummon": Handler(UNIMPLEMENTED, note="summons before the fight starts"),
     "FearsomeAttack": Handler(PASSIVE, note="on-attack fear"),
     "ChanceIncrease": Handler(PASSIVE, note="raises every chance its units carry"),
+    # At fight start, against the enemy count: `underdog`.
+    "Underdog": Handler(PASSIVE, note="armour per enemy beyond the squad's count"),
     "PassiveStun": Handler(PASSIVE, note="on-attack stun"),
     "ManaBreak": Handler(PASSIVE, note="mana burn on hit"),
     "RailProjectile": Handler(UNIMPLEMENTED, note="piercing projectile"),
@@ -89,7 +91,6 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "DeferredDamage": Handler(UNIMPLEMENTED, note="delayed damage pool"),
     "RandomDamage": Handler(UNIMPLEMENTED, note="damage variance"),
     "MedicRetreat": Handler(UNIMPLEMENTED, note="repositioning"),
-    "Underdog": Handler(UNIMPLEMENTED, note="scales with squad deficit"),
     "Shield": Handler(UNIMPLEMENTED, note="absorb pool"),
     "Tank": Handler(UNIMPLEMENTED, note="mutation form of the Tank skill"),
     "Fireball": Handler(UNIMPLEMENTED, note="bespoke projectile"),
@@ -567,6 +568,30 @@ def boost_agent_chances(agent, bonuses) -> None:
         agent.resurrect = (boost_chance(c, bonuses), hp, pct)
     for attr in ("on_attack", "on_damaged", "on_cast"):
         setattr(agent, attr, [(n, _boost_hook(n, p, bonuses)) for n, p in getattr(agent, attr)])
+
+
+def underdog(team0: list, n_enemies: int, mutations: list[dict]) -> None:
+    """`C_UnderdogMutation.OnFightBegin`, once the fight's agents are built.
+
+    With `diff` the enemy team's unit count less the squad's, a positive
+    `diff` gives every covered unit an "Underdog" `StatBonus` of
+    `amount * diff * coefficient`, flat, on the row's stat (Armor; the
+    model's `coefficient` defaults to 1). The units counted are the ones in
+    the fight at its start, summoned allies included.
+    """
+    diff = n_enemies - len(team0)
+    if diff <= 0:
+        return
+    for m in mutations:
+        if m["Name"] != "Underdog":
+            continue
+        p = mutation_params(m)
+        bonus = {"stat": p.get("stat") or "Armor",
+                 "value": param(p, "amount") * diff * param(p, "coefficient", default=1.0),
+                 "percentage": "false"}
+        for a in team0:
+            if applies_to(m, a.spec.cls):
+                a.spec = apply_stat_bonus(a.spec, bonus)
 
 
 def status_stats(params: dict, numbered: bool = False) -> tuple:
