@@ -98,7 +98,7 @@ UNLIMITED_ROLLS = 90
 CONSUMABLE_SLOTS = 2
 
 # A consumable shop's shelf, `C_Room..ctor`: `quantity = 2 + (~type & 1)`, so
-# three in a boss room and two in a start room.
+# three in a boss room and two in a start room (the long-run reward's).
 CONSUMABLE_SHELF = 3
 
 
@@ -295,12 +295,13 @@ class RoomMap:
 
     @classmethod
     def generate(cls, level_row: dict, rng: random.Random,
-                 chip: str = "default", quest: dict | None = None) -> "RoomMap":
+                 chip: str = "default", quest: dict | None = None,
+                 long_run_reward: bool = False) -> "RoomMap":
         """The level the row asks for: see `sim/mapgen.py` for what is the
         game's and what is not. `quest` is the level's quest row, see
-        `sim/quests.py`."""
+        `sim/quests.py`; `long_run_reward` makes the start a consumable shop."""
         from .mapgen import generate as _generate
-        spec = _generate(level_row, rng, chip, quest)
+        spec = _generate(level_row, rng, chip, quest, long_run_reward)
         extras = spec.get("extras") or {}
         rooms = {rid: Room(id=rid, row=r, col=c, kind=kind,
                            extras=tuple(extras.get(rid, ())))
@@ -751,18 +752,30 @@ class RunState:
     # after-fight dialog, which its controller creates once the fight that the
     # before-fight dialog started is over.
     quest_queue: list = field(default_factory=list)
+    # The persistent `longRunReward` flag as this run found it. `C_Levels.
+    # WinLevel` sets it when level 4 is won in Default, and `C_Rooms.Generate`
+    # reads it once, on level 1 in Default under any chip but `crazy`: it sets
+    # `GenerationParams.longRunReward`, which makes the start room a consumable
+    # shop, and clears the flag. So a run that beats level 4 opens the next one
+    # with a two-slot consumable shop. Carrying it between runs is the
+    # environment's business (`DespotRunEnv(long_run_reward="carry")`).
+    long_run_reward: bool = False
+    # Whether this run has set the flag for the next one.
+    long_run_reward_earned: bool = False
 
     # -- setup -------------------------------------------------------------
     @classmethod
     def new(cls, tables: dict, seed: int = 0,
             squad_name: str | None = None, chip: str = "default",
-            dialogs: bool = True, quests: bool = True) -> "RunState":
+            dialogs: bool = True, quests: bool = True,
+            long_run_reward: bool = False) -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
         squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
                  food=Food.from_game(game), squad=squad, rng=rng, chip=chip,
-                 dialogs_on=dialogs, quests_on=quests)
+                 dialogs_on=dialogs, quests_on=quests,
+                 long_run_reward=long_run_reward)
         st.generate_level()
         st.room = st.rooms.start
         st.rooms.set_current(st.room)
@@ -796,12 +809,34 @@ class RunState:
         self.quest_queue = []
         self.prev_room = None
         self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip,
-                                      self.quest.spec if self.quest else None)
+                                      self.quest.spec if self.quest else None,
+                                      self.long_run_reward_used and self.level == 1)
         if self.quest is not None:
             self.quest.room = self.rooms.quest_room
             self.quest.extras = list(self.rooms.quest_extras)
             if hasattr(self.quest, "secret"):
                 self.quest.secret = (self.rooms.secret_rooms or [None])[0]
+
+    @property
+    def long_run_reward_used(self) -> bool:
+        """Whether `C_Rooms.Generate` takes the flag: Default (the only mode
+        here) and any chip but `crazy`, which leaves it set for a later run."""
+        return self.long_run_reward and self.chip != "crazy"
+
+    def consumable_shelf(self, room: Room) -> int:
+        """How many slots the consumable shop open in `room` has, 0 if none.
+
+        `C_Room..ctor` builds one in a room typed `ConsumableShop`, with
+        `quantity = 2 + (~type & 1)`. Every boss but the last is one, open once
+        the boss is dead (`C_Room.AfterFight`). A start room the long-run
+        reward typed is one too, open at construction, and two slots wide
+        because `Start` is bit 1.
+        """
+        if room.kind == "boss" and self.level_won:
+            return CONSUMABLE_SHELF
+        if room.has("consumable_shop") and room.cleared:
+            return CONSUMABLE_SHELF - 1
+        return 0
 
     @property
     def level_row(self) -> dict:
@@ -1571,10 +1606,10 @@ class RunState:
         # room to carry it.
         if open_ and here.kind == "boss" and self.level_won:
             acts.append(("descend", None))
-            if len(self.consumables) < CONSUMABLE_SLOTS:
-                for i, c in enumerate(here.consumable_offer or []):
-                    if c is not None:
-                        acts.append(("take_consumable", i))
+        if open_ and self.consumable_shelf(here) and len(self.consumables) < CONSUMABLE_SLOTS:
+            for i, c in enumerate(here.consumable_offer or []):
+                if c is not None:
+                    acts.append(("take_consumable", i))
         # What the run carries can be used where its controller allows, and
         # sold anywhere for `Rooms.Shops.Consumables.SellCost`.
         for k, c in enumerate(self.consumables):
@@ -1751,7 +1786,7 @@ class RunState:
             here = self.rooms.rooms[self.room]
             shelf = here.consumable_offer or []
             i = int(arg or 0)
-            if (self.level_won and here.kind == "boss" and 0 <= i < len(shelf)
+            if (self.consumable_shelf(here) and 0 <= i < len(shelf)
                     and shelf[i] is not None
                     and len(self.consumables) < CONSUMABLE_SLOTS):
                 row = shelf[i]
@@ -1899,6 +1934,10 @@ class RunState:
         fell, which skipped the boss room's consumable shop and any walk back
         to a shop with the boss's gold.
         """
+        # On level 4 in Default it also sets the persistent flag behind the
+        # next run's `longRunReward`, see `long_run_reward`.
+        if self.level == 4:
+            self.long_run_reward_earned = True
         if self.level >= len(self.tables["Levels"]):
             self.finished, self.won = True, True
             return
@@ -1933,8 +1972,8 @@ class RunState:
         if room.has("item_shop") and not room.refilled:
             room.refilled = True
             self.refill_offer()
-        if room.kind == "boss" and self.level_won and room.consumable_offer is None:
-            room.consumable_offer = self.draw_consumables(CONSUMABLE_SHELF)
+        if room.consumable_offer is None and self.consumable_shelf(room):
+            room.consumable_offer = self.draw_consumables(self.consumable_shelf(room))
         if room.kind == "mutation_shop":
             if room.offer_mutations is None:
                 room.takes_left = int(MUTATION_SHOP["BuyCount"])
@@ -2045,7 +2084,7 @@ class RunState:
             return here.cleared and (
                 here.has("item_shop") or here.kind == "food_shop"
                 or (here.kind == "mutation_shop" and here.takes_left > 0)
-                or (here.kind == "boss" and self.level_won
+                or (self.consumable_shelf(here) > 0
                     and here.consumable_offer is not None))
         return False
 
@@ -2118,8 +2157,8 @@ class RunState:
             here.food_stock = determine_quantities(sizes, costs, self.food_shop_budget)
         elif here.kind == "mutation_shop":
             here.offer_mutations = self.draw_mutations(here)
-        elif here.kind == "boss":
-            here.consumable_offer = self.draw_consumables(CONSUMABLE_SHELF)
+        elif self.consumable_shelf(here):
+            here.consumable_offer = self.draw_consumables(self.consumable_shelf(here))
 
     def clean_room(self, room: Room) -> dict:
         """A RoomCleaner on a room that has not fought: `C_Room.AfterFight(true)`

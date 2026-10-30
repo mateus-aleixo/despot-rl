@@ -115,7 +115,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  blind_squad: bool = False,
                  lights_on: bool = False,
                  dialogs: bool = True,
-                 quests: bool = True):
+                 quests: bool = True,
+                 long_run_reward: bool | str = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -171,6 +172,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.dialogs = dialogs
         # The quests, likewise: off generates every level without one.
         self.quests = quests
+        # The persistent flag a won level 4 leaves for the next run (see
+        # `RunState.long_run_reward`): False never sets it, which is a fresh
+        # save and keeps every seed's run independent of the episodes before
+        # it; True sets it on every run; "carry" keeps it between episodes the
+        # way the game's save does, so an episode that beats level 4 opens the
+        # next one with a consumable shop.
+        self.long_run_reward = long_run_reward
+        self._long_run_flag = False
         # "flat": +10 a level. "rising": +10 x the level reached, so the fifth
         # level is worth five times the first. Levels get exponentially harder
         # (a room is 800 Power at level 1 and 24,600 by level 6) while a flat
@@ -481,7 +490,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             carried[base + 1] = min(1.0, c.charges / 3.0)
             carried[base + 2 + CONSUMABLE_FAMILIES.index(consumable_family(c.row))] = 1.0
         on_shelf = np.zeros(CONSUMABLE_SHELF * (1 + fams), dtype=np.float32)
-        if room_now.kind == "boss" and st.level_won:
+        if st.consumable_shelf(room_now):
             st.ensure_stock(room_now)
             for i, row in enumerate((room_now.consumable_offer or [])[:CONSUMABLE_SHELF]):
                 if row is None:
@@ -701,9 +710,16 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             self._seed = seed
         self.squad_name = (self.squad if self.squad is not None
                            else self.squads[self._seed % len(self.squads)])
+        if self.long_run_reward == "carry":
+            prev = getattr(self, "state", None)
+            flag = self._long_run_flag or bool(prev and prev.long_run_reward_earned)
+        else:
+            flag = bool(self.long_run_reward)
         self.state = RunState.new(self.tables, seed=self._seed,
                                   squad_name=self.squad_name, dialogs=self.dialogs,
-                                  quests=self.quests)
+                                  quests=self.quests, long_run_reward=flag)
+        # `C_Rooms.Generate` clears the flag when it takes it.
+        self._long_run_flag = flag and not self.state.long_run_reward_used
         self.state.use_fast_core = self.fast_core
         if self.placement_policy is not None:
             self.state.placement_policy = self.placement_policy

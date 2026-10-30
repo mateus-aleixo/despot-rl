@@ -710,7 +710,8 @@ def room_count(level_row: dict, rng: random.Random) -> int:
 
 def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
                    chip: str = "default", quest: dict | None = None,
-                   secret_rooms: list | None = None) -> dict | None:
+                   secret_rooms: list | None = None,
+                   long_run_reward: bool = False) -> dict | None:
     """`LevelGenerator.PositionRooms`, or None where the game's would fail.
 
     See the module docstring for the order. `quest` is the level's quest row
@@ -759,6 +760,11 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
     # standing in an item shop.
     if level >= 2:
         extras[start] = ("item_shop",)
+    # `cmp byte [params.longRunReward], 0` then `or 0x4000`: the long-run
+    # reward makes the start a consumable shop as well. `C_Rooms.Generate`
+    # sets that field only on level 1, see `RunState.long_run_reward`.
+    if long_run_reward:
+        extras[start] = extras.get(start, ()) + ("consumable_shop",)
 
     # The quest, when the level has one: its room, its extra rooms, and a way
     # from the start to it that passes neither the boss nor an extra room.
@@ -849,7 +855,7 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
 
 
 def generate(level_row: dict, rng: random.Random, chip: str = "default",
-             quest: dict | None = None) -> dict:
+             quest: dict | None = None, long_run_reward: bool = False) -> dict:
     """One level, as `position_rooms` returns it.
 
     The room count is drawn once and kept across attempts: `C_Rooms.Generate`
@@ -868,7 +874,8 @@ def generate(level_row: dict, rng: random.Random, chip: str = "default",
             secret = gen.make_secret_rooms(count)
             if secret is None:
                 continue
-        level = position_rooms(gen, level_row, rng, chip, quest, secret)
+        level = position_rooms(gen, level_row, rng, chip, quest, secret,
+                               long_run_reward)
         if level is not None:
             return level
     raise RuntimeError(f"no level placed for row {level_row.get('ID')} "

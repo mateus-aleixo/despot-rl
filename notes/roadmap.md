@@ -202,7 +202,10 @@ thrown away.
   AntiHunger and reroll modelled. DejaVu and Event wait on dialogs;
   DamageAllEnemies is on no Default list. Worth +0.721 [+0.597, +0.844] levels
   to the heuristic. Open: the placement stage, where the game lets a cleaner be
-  used after the pack is on screen (`sim/assumptions.py`).
+  used after the pack is on screen (`sim/assumptions.py`). The long-run reward
+  (a won level 4 makes the next run's start a two-slot consumable shop) is in
+  since 2026-10-30: +0.147 [+0.090, +0.205] on a run that has it, off by
+  default in the env, "carry" for the save's behaviour.
 - ~~**Layouts.**~~ **Done, 2026-10-30**, for the packs: each fights in its one
   `LayoutsByPack` layout with every enemy in its row's zone, where the sim drew
   any of 77 layouts with everyone in `e1`. Worth -0.263 [-0.439, -0.086] to the

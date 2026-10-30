@@ -1826,6 +1826,45 @@ for _ in range(30):
     _again += sum(1 for c in _bs.rooms.rooms[_bs.room].consumable_offer if c["ID"] in _carried_ids)
 check("nothing the run carries is on a shelf", _again == 0)
 
+# The long-run reward: `C_Levels.WinLevel` on level 4 sets a persistent flag,
+# and the next run's level-1 `C_Rooms.Generate` takes it and makes the start
+# room `Start | ConsumableShop`, two slots wide.
+_lr = RunState.new(_STRICT, seed=34, long_run_reward=True)
+_lr_start = _lr.rooms.rooms[_lr.rooms.start]
+_lr_takes = [a for a in _lr.legal_actions() if a[0] == "take_consumable"]
+check("the long-run reward opens level 1 in a two-slot consumable shop",
+      _lr_start.has("consumable_shop") and _lr.room == _lr.rooms.start
+      and _lr_takes == [("take_consumable", 0), ("take_consumable", 1)]
+      and {c["ID"] for c in _lr_start.consumable_offer} <= _lvl1, f"{_lr_takes}")
+_lr.apply(("take_consumable", 1))
+check("and what it shows is free to take", len(_lr.consumables) == 1
+      and _lr_start.consumable_offer[1] is None)
+_plain = RunState.new(_STRICT, seed=34)
+check("a run without it opens with no shop and the same map",
+      not any(a[0] == "take_consumable" for a in _plain.legal_actions())
+      and not _plain.rooms.rooms[_plain.rooms.start].has("consumable_shop")
+      and set(_plain.rooms.rooms) == set(_lr.rooms.rooms))
+_crazy = RunState.new(_STRICT, seed=34, chip="crazy", long_run_reward=True)
+check("the crazy chip leaves the flag for a later run",
+      not _crazy.long_run_reward_used
+      and not _crazy.rooms.rooms[_crazy.rooms.start].has("consumable_shop"))
+_lr.level = 2
+_lr.generate_level()
+check("only level 1 gets it", not _lr.rooms.rooms[_lr.rooms.start].has("consumable_shop"))
+_w3, _w4 = _won_boss(35, level=3), _won_boss(35, level=4)
+check("winning level 4 sets the flag for the next run, level 3 does not",
+      _w4.long_run_reward_earned and not _w3.long_run_reward_earned)
+from rl.env import DespotRunEnv as _Env
+_ce = _Env(tables=_STRICT, long_run_reward="carry", quests=False, dialogs=False)
+_ce.reset(seed=36)
+_c0 = _ce.state.long_run_reward
+_ce.state.long_run_reward_earned = True
+_ce.reset(seed=37)
+_c1 = _ce.state.long_run_reward
+_ce.reset(seed=38)
+check("the env carries it to the next episode only, the way the save does",
+      not _c0 and _c1 and not _ce.state.long_run_reward)
+
 
 def _give(s, cid):
     s.consumables = [_Cons(row=_cons_rows[cid], charges=int(_cons_rows[cid]["Count"]))]

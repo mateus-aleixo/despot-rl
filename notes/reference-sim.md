@@ -1910,6 +1910,7 @@ still open.
   likely place). **The note above that consumables cannot be reached in Default
   play rested on `InitShop` alone and is open again.**
 - With `longRunReward` set, the level-1 start room is a `ConsumableShop` too.
+  (Modelled since, see "The long-run reward" under the boss room section.)
 - The quest choosers between the start and the shops, the secret-room branch of
   the portal step, and Arcade's own predicates for the finish and the start.
 
@@ -2080,6 +2081,36 @@ seeds with `take_consumable` struck out:
 
 Most of that is healing: with wounds carried between fights, a free heal in
 every boss room is the only routine way to get health back.
+
+### The long-run reward (2026-10-30)
+
+`C_Levels.WinLevel` checks `M_Levels.currentLevel == 4` and the mode, and in
+Default it sets `M_PersistentData._longRunReward`, a saved flag, to true.
+`C_Rooms.Generate` reads it back when it fills `GenerationParams`: in Default,
+on level 1 (`params.level == 1`), with any chip but `crazy` (an inlined string
+compare), a set flag sets `params.longRunReward` and is written back to false.
+`ChooseStartRoom` then ors `ConsumableShop` (0x4000) into the start room, and
+`C_Room..ctor` builds the shop with `2 + (~type & 1)` = 2 slots, since `Start`
+is bit 1, open from construction. So a run that beats level 4 opens the next
+one standing in a two-slot consumable shop, drawn from level 1's list, and the
+reward is spent.
+
+In the sim, `RunState.long_run_reward` is the flag as the run found it,
+`win_level` on level 4 sets `long_run_reward_earned`, and the boss room's shop
+code now asks `consumable_shelf(room)`, which answers for either shop. Carrying
+the flag between runs is the environment's: `DespotRunEnv(long_run_reward=...)`
+is False by default (a fresh save, and every seed's run independent of the
+episodes before it), True for every run, or "carry" for the save's behaviour.
+
+`tools/ablate.py long_run_reward --seeds 2400 --start 40000 --fast --jobs 8`:
+
+    with the reward     3.363  (sd 1.117)
+    without             3.216  (sd 1.157)
+    paired +0.147 [+0.090, +0.205], better on 915 of 2400, worse on 748
+
+The heuristic beats level 4 in 16% of runs (384 of 2400), so under "carry" a
+heuristic player would hold the reward about one run in six and gain about
++0.02 levels from it on average.
 
 ## The level-entry dialogs, implemented (2026-10-30)
 

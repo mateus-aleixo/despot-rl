@@ -3,7 +3,9 @@
 The switches are the faithful behaviours that kept their old form for exactly
 this: `carry_hp` (wounds between fights), `pack_layouts` (each pack in its own
 layout, by zone), `dialogs_on` (the level-entry dialogs) and `quests_on` (the
-quests, their rooms included). The heuristic plays the same seeds with the
+quests, their rooms included). `long_run_reward` is the other way round: on
+gives every run the reward a won level 4 leaves for the next one, which the
+environment leaves off by default. The heuristic plays the same seeds with the
 switch on and off.
 
 This is a check that a feature changes something, not a re-baseline. RL numbers
@@ -30,7 +32,7 @@ from rl.env import DespotRunEnv
 from rl.heuristic import heuristic
 from sim.data import load_ruleset
 
-SWITCHES = ("carry_hp", "pack_layouts", "dialogs_on", "quests_on")
+SWITCHES = ("carry_hp", "pack_layouts", "dialogs_on", "quests_on", "long_run_reward")
 
 
 def play(env, seed, switch, value):
@@ -38,6 +40,8 @@ def play(env, seed, switch, value):
         env.dialogs = value
     if switch == "quests_on":
         env.quests = value
+    if switch == "long_run_reward":
+        env.long_run_reward = value
     obs, info = env.reset(seed=seed)
     setattr(env.state, switch, value)
     mask = info["action_mask"]
