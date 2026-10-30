@@ -61,6 +61,10 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
         kinds.setdefault(a[0], []).append(a)
     here = st.rooms.rooms[st.room]
 
+    # A dialog is modal: the only legal actions are its choices.
+    if kinds.get("choose"):
+        return max(kinds["choose"], key=lambda a: (_choice_value(st, a[1]), -a[1]))
+
     # Consumables. Sell what the sim gives no effect, heal a badly wounded
     # squad, bring back the dead lying here, and call reserves at once.
     held = {a[1]: consumable_family(st.consumables[a[1]].row)
@@ -181,6 +185,56 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     # end a run that is going nowhere.
     rest = [a for a in legal if a[0] != "teleport"] or legal
     return rng.choice(rest) if rng is not None else rest[0]
+
+
+# What a dialog event is worth to the baseline, in gold. Guesses, not
+# measurements: a mutation or an item about a shop item's price, a human about
+# what the shop charges plus what they carry, food at its shop rate, and a
+# wound or an ambush as a loss.
+_EVENT_GOLD = {"GiveMutation": 10.0, "GiveItem": 15.0, "GiveUnit": 8.0,
+               "CloneUnit": 8.0, "RemoveUnit": -15.0, "Ambush": -10.0}
+
+
+def _event_value(e: dict) -> float:
+    cls, p = e.get("className"), e.get("parameters") or {}
+
+    def amount(default=0.0):
+        try:
+            return float(p.get("amount", default))
+        except (TypeError, ValueError):
+            return default
+
+    if cls in ("PlusGold",):
+        return amount(10.0)
+    if cls == "MinusGold":
+        return -amount(5.0)
+    if cls == "PlusFood":
+        return amount() / 4.0
+    if cls == "MinusFood":
+        return -amount(5.0) / 4.0
+    if cls == "GiveExperience":
+        return amount() / 100.0
+    if cls == "RemoveHealth":
+        return -float(p.get("percent") or 0.0) / 5.0
+    if cls == "GiveUnit":
+        return _EVENT_GOLD["GiveUnit"] * max(1, len(p.get("classes") or [None]))
+    return _EVENT_GOLD.get(cls, 0.0)
+
+
+def _choice_value(st: RunState, index: int) -> float:
+    """A choice's expected worth, one node deep, by outcome weight."""
+    d = st.dialog
+    choice = (d.node.get("choices") or [])[index]
+    if str(choice.get("link")) == "#":
+        return -1.0                      # back to the start: a loop
+    value = sum(_event_value(e) for e in choice.get("events") or [])
+    outs = choice.get("outcomes") or []
+    if outs:
+        weights = [float(o.get("weight") or 1.0) for o in outs]
+        total = sum(weights)
+        value += sum(w / total * sum(_event_value(e) for e in o.get("events") or [])
+                     for w, o in zip(weights, outs))
+    return value
 
 
 def _worth_teleporting(st: RunState, rid: str, known: dict, far: int,

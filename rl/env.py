@@ -38,6 +38,8 @@ except ImportError:  # the env is usable without gymnasium installed
     spaces = None
 
 from sim.data import load_ruleset
+from sim.dialogs import MAX_CHOICES as DIALOG_CHOICES
+from sim.dialogs import decision_nodes, pool as dialog_pool
 from sim.mapgen import portals_count
 from sim.run import (CONSUMABLE_FAMILIES, CONSUMABLE_SHELF, CONSUMABLE_SLOTS,
                      EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
@@ -66,7 +68,8 @@ NON_MOVE_ACTIONS = (tuple(f"buy_item_{i}" for i in range(SHOP_SLOTS))
                        "reroll_mutations", "descend")
                     + tuple(f"take_consumable_{i}" for i in range(CONSUMABLE_SHELF))
                     + tuple(f"use_consumable_{i}" for i in range(CONSUMABLE_SLOTS))
-                    + tuple(f"sell_consumable_{i}" for i in range(CONSUMABLE_SLOTS)))
+                    + tuple(f"sell_consumable_{i}" for i in range(CONSUMABLE_SLOTS))
+                    + tuple(f"choose_{i}" for i in range(DIALOG_CHOICES)))
 ROOM_KINDS = ("start", "fight", "boss", "item_shop", "food_shop", "mutation",
               "mutation_shop", "talent_shop", "empty")
 
@@ -102,7 +105,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  blind_shelf: bool = False,
                  squad: str | None = None,
                  blind_squad: bool = False,
-                 lights_on: bool = False):
+                 lights_on: bool = False,
+                 dialogs: bool = True):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -153,6 +157,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # `to_boss` fork to the batch-1 boundary; this is the control that lets
         # it be run as arms rather than as a code change.
         self.lights_on = lights_on
+        # The level-entry dialogs. Off is a run without them, which exists to
+        # measure what they change and for checks of other mechanics.
+        self.dialogs = dialogs
         # "flat": +10 a level. "rising": +10 x the level reached, so the fifth
         # level is worth five times the first. Levels get exponentially harder
         # (a room is 800 Power at level 1 and 24,600 by level 6) while a flat
@@ -194,6 +201,13 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.item_class = {i["Name"]: i["Class"] for i in self.tables["Items"]}
         self.item_quality = {i["Name"]: int(i.get("Quality") or 1)
                              for i in self.tables["Items"]}
+
+        # Every dialog node that shows two or more choices, for the one-hot that
+        # says which question is on screen. The player reads the text; this is
+        # the same information as a fixed index, and the choice index means the
+        # same button every time that node comes up.
+        self.dialog_nodes = {key: i for i, key in
+                             enumerate(decision_nodes(dialog_pool(self.tables)))}
 
         self.state: RunState | None = None
         self.steps = 0
@@ -451,6 +465,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             1.0 if room_now.corpses else 0.0,
         ], dtype=np.float32)
 
+        # The dialog on screen, if any: a flag and which decision node it is at.
+        talk = np.zeros(1 + len(self.dialog_nodes), dtype=np.float32)
+        if st.dialog is not None:
+            talk[0] = 1.0
+            i = self.dialog_nodes.get((st.dialog.name, st.dialog.path))
+            if i is not None:
+                talk[1 + i] = 1.0
+
         # Which squad this run is playing. The policy has to know: the eight
         # differ in size, in whether they field a frontline and in whether they
         # field anything ranged, and a two-unit squad pays half the food a
@@ -464,7 +486,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             np.asarray(level_view, dtype=np.float32),
             np.asarray(comp, dtype=np.float32),
             here_kind, shelf, larder, shelf_m, around, who,
-            carried, on_shelf, waiting,
+            carried, on_shelf, waiting, talk,
         ]).astype(np.float32)
 
     @staticmethod
@@ -546,7 +568,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             return ("buy_food", int(name.rsplit("_", 1)[1]))
         if name.startswith("buy_mutation_"):
             return ("buy_mutation", int(name.rsplit("_", 1)[1]))
-        for family in ("take_consumable", "use_consumable", "sell_consumable"):
+        for family in ("take_consumable", "use_consumable", "sell_consumable", "choose"):
             if name.startswith(family + "_"):
                 return (family, int(name.rsplit("_", 1)[1]))
         return (name, None)
@@ -578,7 +600,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             if slot >= MUTATION_SLOTS:
                 return None
             kind = f"buy_mutation_{slot}"
-        if kind in ("take_consumable", "use_consumable", "sell_consumable"):
+        if kind in ("take_consumable", "use_consumable", "sell_consumable", "choose"):
             kind = f"{kind}_{int(arg or 0)}"
             if kind not in NON_MOVE_ACTIONS:
                 return None
@@ -607,7 +629,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.squad_name = (self.squad if self.squad is not None
                            else self.squads[self._seed % len(self.squads)])
         self.state = RunState.new(self.tables, seed=self._seed,
-                                  squad_name=self.squad_name)
+                                  squad_name=self.squad_name, dialogs=self.dialogs)
         self.state.use_fast_core = self.fast_core
         if self.placement_policy is not None:
             self.state.placement_policy = self.placement_policy

@@ -169,7 +169,11 @@ thrown away.
   `QuestStatus` lifecycle, the per-level shortlist (levels 2, 6 and 10 only),
   and `questCount` / `extraQuestRoomCount` / `questRoomAllowedDoors` /
   `questRoomGuaranteedDoors`. Settles whether a quest room fights.
-- **Dialogs.** `C_Levels.StartDialog` fires one on every level change, drawn
+- ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26
+  of their event types, plus consumable 13; `DejaVu` still open. Worth +0.196
+  [+0.021, +0.370] levels to the heuristic, and choosing well +0.154 over
+  random. Details in `notes/reference-sim.md`. The original plan follows.
+  `C_Levels.StartDialog` fires one on every level change, drawn
   without replacement, with `M_Dialog`'s `choices`, branching `outcomes` and
   `M_Event[]`. **The agent currently makes zero choices per level transition
   where a player makes one.** The table is **found**: it is

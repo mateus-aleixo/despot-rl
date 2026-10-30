@@ -2077,3 +2077,62 @@ seeds with `take_consumable` struck out:
 
 Most of that is healing: with wounds carried between fights, a free heal in
 every boss room is the only routine way to get health back.
+
+## The level-entry dialogs, implemented (2026-10-30)
+
+`sim/dialogs.py` runs the 46 dialogs of `Game.Dialogs` from
+`EncryptedMainGroup/dialogs.json`. What was read for it, beyond the schema
+section earlier in this file:
+
+- **The draw.** `C_Levels.StartDialog` loops over random picks from the pool,
+  asks `C_Dialogs.StartDialog` to start each, and removes only the one that
+  starts. A dialog whose gates fail stays in the pool for a later level. It
+  runs on every level change, the first included, since `C_Session.Begin`
+  calls `ChangeLevel`.
+- **The gates.** `C_Dialogs.PrepareEvents(M_Dialog)` walks each choice's
+  outcomes and prepares their events with the choice index as `num`, folding
+  `C_Event.GetEnabledState` into `enableds` and `hiddens`. So a choice is gated
+  by what it leads to: `MinusGold` is a `CheckGold`, which is why "buy for 5"
+  greys out on a short purse. The body's own gates decide whether the dialog
+  starts (`Stores` needs 5 gold, `Mushrooms` 20 food). Events are prepared in
+  order and `DefineVariables` defines while preparing, so a node can define a
+  variable and test it (`OneHandBandit`'s `robotsGold`).
+- **Links** name a path in the localization-key scheme; a path that ends on a
+  choice with several outcomes means taking that choice again, which is how
+  `RedStringsBar` and `OneHandBandit` loop back to a coin flip. `#` is the body.
+- **The events.** `GetNames` picks random units into the dialog's `units`,
+  which `RemoveUnit`, `CloneUnit` and `RemoveHealth` act on by 1-based `id`;
+  `RemoveHealth` multiplies health by `1 - percent / 100`, every unit when it
+  names none; `RemoveItem` is `C_Player.DownGradeUnit` and leaves the item's
+  cost in `itemCost`; `HasSlot` counts the team's cells against 49; `Ambush`
+  resets the current room's `fightResult` and closes its doors, so the start
+  room's pack attacks (and `CalculatePower` gives a start room `ItemsMult` of
+  Power, though no gold). A `MinusFood` with no amount spends the dialog's own
+  `CheckFood` amount. `GiveUnit` gives `numberOfUnitsToGive` units when the
+  dialog defines it (`Reproductor`: half the team).
+- **Consumable 13**, `Event`, opens a pool dialog (`C_EventConsumable.Use`
+  calls `C_Levels.StartDialog`). `DejaVu` (10) is a rewind to a save after a
+  wipe and is still not modelled.
+
+In the run, a dialog is modal: while one is open the only legal actions are
+`("choose", i)`. Nodes with a single choice are taken without spending a step.
+The env has four `choose` actions and the observation a flag plus a one-hot over
+the 69 decision nodes; `obs_dim` 281 to 356, actions 39 to 43. The heuristic
+takes the choice with the best expected immediate value, one node deep, in
+guessed gold equivalents (`rl/heuristic.py`, `_EVENT_GOLD`).
+
+A random walk of every dialog from varied states runs each to its end with no
+error; 44 of the 46 change gold, food, the squad, the mutations or the items on
+some path. `tools/dialog_value.py --seeds 240 --fast`:
+
+    no dialogs         3.367  (sd 1.080)
+    heuristic chooses  3.562  (sd 1.146)   5.03 dialog choices a run
+    random choices     3.408  (sd 1.162)
+
+    dialogs, heuristic against none     +0.196 [+0.021, +0.370]
+    choosing, heuristic against random  +0.154 [+0.012, +0.296]
+
+The no-dialog arm reproduces `tools/consumable_value.py`'s 3.367 to the last
+digit, which is the check that turning the dialogs off leaves the rest alone.
+The choice matters: about five decisions a run, worth a sixth of a level
+between a rough heuristic and a coin.

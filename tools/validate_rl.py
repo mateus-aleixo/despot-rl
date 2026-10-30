@@ -82,7 +82,7 @@ print("\n== teleports ==")
 from sim.run import UNEXPLORED, UNKNOWN
 from rl.env import MOVES, TELEPORT_SLOTS
 
-_te = DespotRunEnv(tables=TABLES)
+_te = DespotRunEnv(tables=TABLES, dialogs=False)
 for _seed in range(200):
     _te.reset(seed=_seed)
     # level 1 is 7 rooms and always holds exactly two portals; level 2 holds
@@ -143,6 +143,7 @@ def snapshot(st):
     return (st.level, st.room, st.gold, st.food.amount, st.food.hunger_level,
             st.food.moves_left, len(st.squad), len(st.mutations),
             st.shop_level, tuple(st.offer), st.level_won,
+            (st.dialog.name, st.dialog.path, st.dialog.steps) if st.dialog else None,
             tuple((c.name, c.charges) for c in st.consumables),
             tuple(sorted((k, str(v)) for k, v in st.armed.items())),
             tuple((h.item, h.level, round(h.experience, 6), round(h.hp, 6))

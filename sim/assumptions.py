@@ -207,6 +207,21 @@ class Assumptions:
     # `C_Room.CreateCorpse` and `C_AntiHungerConsumable.WaitExpire`.
     consumables_used_before_entering: bool = True
 
+    # Dialogs, where the port chooses. (1) A node with a single choice is taken
+    # without spending a policy step; no information is lost, the game only
+    # waits for a click. (2) A dialog closes after 40 choices, since
+    # `GuidingStone` can loop back to its start for ever. (3) A dialog's
+    # `RemoveUnit` never removes the last human. (4) `GiveItem` goes to the
+    # human who gains most, as a bought item does; the game hands it to the
+    # player to place. (5) The pool draw is uniform over the dialogs that can
+    # start; `M_Dialog.weight` is unset in the shipped file. (6) Text
+    # interpolation is ignored, except where a variable also counts something
+    # (`numberOfUnitsToGive`, `itemCost`, `foodToRemove`). (7) `DejaVu`, the
+    # rewind after a wipe, is not modelled.
+    # Settle by: reading `C_Dialogs.Choose`, `GiveItem.Apply` and `RemoveUnit.Apply`
+    # in full.
+    dialogs_single_choice_auto: bool = True
+
     # A fight is called a draw if neither side dies within this long. The game
     # has some real timeout or sudden-death rule.
     # Settle by: finding the fight timeout in the fight controller.

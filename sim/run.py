@@ -128,9 +128,11 @@ def consumable_family(row: dict) -> str:
     the row is `Direct` and every unit otherwise; `C_ReserveConsumable` makes
     team members when the row's `kind` carries `TeamMember` and temporary
     allies when it does not (`Kinds.TeamMember = 64`, and `C_Team.AfterFight`
-    removes temporary units). `DejaVu` and `Event` open dialogs and
-    `DamageAllEnemies` is on no Default level's list, so those three are
-    carried and sold but have no effect here.
+    removes temporary units). `Event` opens a pool dialog
+    (`C_EventConsumable.Use` calls `C_Levels.StartDialog`). `DejaVu` is a
+    second life, a rewind to a save after a wipe, and `DamageAllEnemies` is on
+    no Default level's list, so those two are carried and sold but have no
+    effect here.
     """
     name = row.get("Name")
     if name == "Heal":
@@ -140,12 +142,12 @@ def consumable_family(row: dict) -> str:
         return "reserve_humans" if "TeamMember" in kind else "reserve_ally"
     return {"RoomCleaner": "cleaner", "Resurrection": "resurrection",
             "Teleport": "teleport", "AntiHunger": "anti_hunger",
-            "Reroll": "reroll"}.get(name, "unmodelled")
+            "Reroll": "reroll", "Event": "event"}.get(name, "unmodelled")
 
 
 CONSUMABLE_FAMILIES = ("heal_one", "heal_all", "cleaner", "reserve_humans",
                        "reserve_ally", "resurrection", "teleport", "anti_hunger",
-                       "reroll", "unmodelled")
+                       "reroll", "event", "unmodelled")
 
 # `RoomState`, straight from the enum. `C_Rooms.SetCurrent` is the only thing
 # that writes it, and the disassembly says exactly what it writes: the room being
@@ -685,16 +687,25 @@ class RunState:
     # "cleaner" (a RoomCleaner), "anti_hunger" (AntiHunger), "allies" (the
     # temporary units a Reserve summons, as (class, level) pairs).
     armed: dict = field(default_factory=dict)
+    # The level-entry dialogs not yet seen this run, and the one on screen.
+    # See `sim/dialogs.py`. While a dialog is open it is the only thing the
+    # run can do: the dialog screen is modal.
+    dialog_pool: list | None = None
+    dialog: Any = None
+    # Off plays a run with no dialogs at all, for measuring what they change.
+    dialogs_on: bool = True
 
     # -- setup -------------------------------------------------------------
     @classmethod
     def new(cls, tables: dict, seed: int = 0,
-            squad_name: str | None = None, chip: str = "default") -> "RunState":
+            squad_name: str | None = None, chip: str = "default",
+            dialogs: bool = True) -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
         squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
-                 food=Food.from_game(game), squad=squad, rng=rng, chip=chip)
+                 food=Food.from_game(game), squad=squad, rng=rng, chip=chip,
+                 dialogs_on=dialogs)
         st.rooms = RoomMap.generate(st.level_row, rng, chip)
         st.room = st.rooms.start
         st.rooms.set_current(st.room)
@@ -704,6 +715,9 @@ class RunState:
         # 1, so the first shop room already has stock waiting.
         st.start_cells = cells
         st.offer = [st.roll_item() for _ in range(st.shop_quantity())]
+        # `C_Session.Begin` reaches `C_Levels.ChangeLevel`, so the first level
+        # opens with a dialog as every later one does.
+        st.start_level_dialog()
         return st
 
     @property
@@ -875,10 +889,14 @@ class RunState:
     def expected_power(self, kind: str) -> float:
         """`M_Room.expectedPower`: this room's share of the level's Power.
 
-        Set by `CalculatePower` and not used for anything here yet; kept because
-        it is the number the game itself carries per room, and because it is
-        what the gold share is computed alongside.
+        The start room is the one place Power and gold part ways:
+        `CalculatePower` tests `Start` first and gives it `ItemsMult` of Power
+        and no gold. It only matters when the start room fights at all, which
+        is an `Ambush` from a dialog.
         """
+        if kind == "start":
+            total = float(self.level_row.get("PowerPerRoom") or 0.0) * (len(self.rooms.rooms) - 1)
+            return total * float(self.level_row.get("ItemsMult") or 0.0) / self.level_weight
         return self.room_share("PowerPerRoom", kind)
 
     def room_gold(self, room_kind_: str = "fight") -> float:
@@ -1210,9 +1228,105 @@ class RunState:
         return out
 
     # -- actions -----------------------------------------------------------
+    # -- dialogs -------------------------------------------------------------
+    def _dialog_engine(self):
+        from .dialogs import Engine
+        return Engine(self)
+
+    def start_level_dialog(self, from_consumable: bool = False) -> bool:
+        """`C_Levels.StartDialog`: a random pool dialog that can start, once a
+        run. Returns whether one started."""
+        if not self.dialogs_on:
+            return False
+        from .dialogs import pool
+        if self.dialog_pool is None:
+            self.dialog_pool = pool(self.tables)
+        engine = self._dialog_engine()
+        ready = [n for n in self.dialog_pool if engine.can_start(n, from_consumable)]
+        if not ready:
+            return False
+        name = self.rng.choice(ready)
+        self.dialog_pool.remove(name)
+        self.dialog = engine.start(name, from_consumable)
+        self._settle_dialog()
+        return True
+
+    def _settle_dialog(self) -> None:
+        """Walk through nodes with one choice, close a dialog that has run out
+        of choices, and fight the ambush a closed dialog left behind.
+
+        A node with a single choice is a "Continue": taking it is not a
+        decision, so it is taken here rather than spending one of the
+        policy's steps.
+        """
+        engine = self._dialog_engine()
+        while self.dialog is not None:
+            legal = engine.legal(self.dialog)
+            if len(legal) == 1:
+                if not engine.choose(self.dialog, legal[0]):
+                    self._close_dialog()
+                continue
+            if not legal:
+                self._close_dialog()
+            break
+
+    def _close_dialog(self) -> None:
+        d, self.dialog = self.dialog, None
+        if d is not None and d.ambush and self.squad:
+            # `Ambush.Apply` resets the room's `fightResult` and closes its
+            # doors: the room the squad stands in fights after all.
+            room = self.rooms.rooms[self.room]
+            room.cleared = False
+            result = self.fight(room)
+            if result.get("won", True):
+                room.cleared = True
+        if not self.squad:
+            self.finished, self.won = True, False
+
+    def item_class(self, item: str | None) -> str:
+        """The class a human holding `item` fights as; a bare one is a Novice."""
+        if not item:
+            return "Novice"
+        return (items_by_name(self.tables).get(item) or {}).get("Class") or "Novice"
+
+    def mutation_by_id(self, mid: int) -> dict | None:
+        from .mutations import by_id
+        return by_id(self.tables).get(mid)
+
+    def add_human(self, item: str | None = None, level: int = 1) -> Human:
+        h = Human(item=item, level=max(1, int(level)))
+        self.squad.append(h)
+        return h
+
+    def give_item(self, name: str) -> None:
+        """An item handed over outside a shop, to whoever gains most by it.
+
+        `GiveItem` puts it in the team's items for the player to drop on a
+        human; the run layer picks the human, as it does for a bought item.
+        """
+        if name not in items_by_name(self.tables) or not self.squad:
+            return
+        target = self.best_item_target(name)
+        if target is not None:
+            self.squad[target].item = name
+
+    def take_item(self, prefer: str | None = None) -> float:
+        """`C_Player.DownGradeUnit` on a human holding an item, one of class
+        `prefer` first. Returns the item's cost, which `RemoveItem` hands the
+        dialog as `itemCost`."""
+        armed = [h for h in self.squad if h.item]
+        if not armed:
+            return 0.0
+        pick = next((h for h in armed if self.item_class(h.item) == prefer), armed[0])
+        cost = self.item_cost(pick.item)
+        pick.item = None
+        return cost
+
     def legal_actions(self) -> list[tuple]:
         if self.finished:
             return []
+        if self.dialog is not None:
+            return [("choose", i) for i in self._dialog_engine().legal(self.dialog)]
         acts: list[tuple] = []
         here = self.rooms.rooms[self.room]
         if self.food.can_move(self.feed_cost):
@@ -1309,7 +1423,16 @@ class RunState:
         shop = self._shop_config
         result: dict = {"action": kind}
 
-        if kind in ("move", "teleport"):
+        if kind == "choose":
+            if self.dialog is not None:
+                engine = self._dialog_engine()
+                i = int(arg or 0)
+                if i in engine.legal(self.dialog):
+                    result["dialog"] = self.dialog.name
+                    if not engine.choose(self.dialog, i):
+                        self._close_dialog()
+                    self._settle_dialog()
+        elif kind in ("move", "teleport"):
             # `C_Rooms.TeleportTo` runs `SetCurrent` and `C_Room.AfterMoveInto`
             # exactly as a move does, so arriving is the same either way. Only
             # the door walk feeds the squad.
@@ -1667,6 +1790,13 @@ class RunState:
             return here.cleared and bool(here.corpses)
         if fam == "teleport":
             return len(self.rooms.rooms) > 1
+        if fam == "event":
+            if not self.dialogs_on:
+                return False
+            from .dialogs import pool
+            remaining = self.dialog_pool if self.dialog_pool is not None else pool(self.tables)
+            engine = self._dialog_engine()
+            return any(engine.can_start(n) for n in remaining)
         if fam == "reroll":
             # `RoomType.ShopWithChoices = 16652`: an item, food, mutation or
             # consumable shop, open.
@@ -1730,6 +1860,8 @@ class RunState:
             self._arrive(dest, out)
         elif fam == "reroll":
             self.reroll_shop(here)
+        elif fam == "event":
+            out["dialog"] = self.start_level_dialog()
         c.charges -= 1
         if c.charges <= 0 and c in self.consumables:
             self.consumables.remove(c)
@@ -1917,3 +2049,6 @@ class RunState:
         # `C_Levels.WinLevel` and `ChangeLevel` touch food nowhere. So the food
         # for a level is bought from its shops, and this was handing over up to
         # 250 free food a level, which is 40 rooms for a six-human squad.
+        #
+        # `ChangeLevel` ends in `C_Levels.StartDialog`.
+        self.start_level_dialog()

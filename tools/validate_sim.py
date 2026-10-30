@@ -1093,6 +1093,14 @@ if _core_available():
 print("\n== run layer ==")
 from sim.run import Food, RoomMap, RunState
 
+# The checks below test the map, the shops, the fights and the rest of the run
+# layer, each by acting on a fresh run. A fresh run now opens on a modal
+# level-entry dialog, so they build their runs with the dialogs off unless they
+# ask; the dialogs have their own section.
+_RunState_new = RunState.new.__func__
+RunState.new = classmethod(
+    lambda cls, *a, **kw: _RunState_new(cls, *a, **{"dialogs": False, **kw}))
+
 _rm = RoomMap.from_table(_STRICT["Rooms"])
 check("room map parses", len(_rm.rooms) > 10, f"{len(_rm.rooms)} rooms")
 check("start and boss exist", _rm.start in _rm.rooms and _rm.boss in _rm.rooms,
@@ -1919,8 +1927,105 @@ _give(_rr, 14)
 _rr.apply(("use_consumable", 0))
 check("a Reroll rolls the item shop for free",
       _rr.gold == _g1 and len(_rr.offer) == len(_before_offer), f"{_before_offer} -> {_rr.offer}")
-check("every consumable the sim models has a family, three do not",
-      sum(1 for c in _STRICT["Consumables"] if _fam(c) == "unmodelled") == 3)
+check("every consumable but DejaVu and DamageAllEnemies has an effect",
+      {c["Name"] for c in _STRICT["Consumables"] if _fam(c) == "unmodelled"}
+      == {"DejaVu", "DamageAllEnemies"})
+
+# -- the level-entry dialogs ----------------------------------------------------
+from sim.dialogs import Engine as _Engine, pool as _dpool, table as _dtable
+
+_names = _dpool(_STRICT)
+check("the Default pool is Game.Dialogs, all 46 in the table",
+      len(_names) == 46 and all(n in _dtable() for n in _names), f"{len(_names)}")
+
+# every pool dialog walks to its end under random choices
+_bad_walk = []
+for _n in _names:
+    for _seed in range(6):
+        _wd = RunState.new(_STRICT, seed=_seed)
+        _wd.dialog = None
+        _wd.gold = 40.0
+        _eng = _Engine(_wd)
+        if not _eng.can_start(_n):
+            continue
+        try:
+            _wd.dialog = _eng.start(_n)
+            _wd._settle_dialog()
+            _wr = random.Random(_seed)
+            for _ in range(60):
+                if _wd.dialog is None:
+                    break
+                _wd.apply(_wr.choice(_wd.legal_actions()))
+            if _wd.dialog is not None:
+                _bad_walk.append((_n, "open"))
+        except Exception as _ex:
+            _bad_walk.append((_n, repr(_ex)[:60]))
+check("every pool dialog runs to its end", not _bad_walk, f"{_bad_walk[:4]}")
+
+# a run opens with one and every level change brings another, never twice
+_dr = RunState.new(_STRICT, seed=4, dialogs=True)
+_seen = [n for n in _names if n not in _dr.dialog_pool]
+_dr.dialog = None
+_dr.next_level()
+_seen2 = [n for n in _names if n not in _dr.dialog_pool]
+check("the run opens with a dialog and the next level brings another",
+      len(_seen) == 1 and len(_seen2) == 2 and _seen[0] in _seen2, f"{_seen} -> {_seen2}")
+
+# gates: `Stores` needs 5 gold to start, and its 5-gold purchase needs 5 gold
+_dg = RunState.new(_STRICT, seed=1)
+_dg.dialog = None
+_dg.gold = 0.0
+_eg = _Engine(_dg)
+_closed_poor = _eg.can_start("Stores")
+_dg.gold = 5.0
+check("a dialog whose own gates fail does not start", not _closed_poor
+      and _eg.can_start("Stores"))
+_dg.dialog = _eg.start("Stores")
+_dg._settle_dialog()
+_dg.apply(("choose", 0))                       # the "Steam" door
+_rich = list(_eg.legal(_dg.dialog))
+_dg.gold = 4.0
+_poor = list(_eg.legal(_dg.dialog))
+check("a choice that costs more than the purse holds is not offered",
+      0 in _rich and 0 not in _poor and 1 in _poor, f"5 gold: {_rich}, 4 gold: {_poor}")
+
+# `OneHandBandit` defines `robotsGold` and tests it in the same node
+check("a node's variables hold for its own gates", _eg.can_start("OneHandBandit"))
+
+# `WheelOfFortune`'s first prize is mutation 4
+_dw = RunState.new(_STRICT, seed=0)
+_dw.dialog = None
+_ew = _Engine(_dw)
+_got = set()
+for _seed in range(20):
+    _dw.rng = random.Random(_seed)
+    _dw.mutations = []
+    _dw.dialog = _ew.start("WheelOfFortune")
+    _dw._settle_dialog()
+    _dw.apply(("choose", 1))                   # spin the wheel
+    while _dw.dialog is not None:
+        _dw.apply(("choose", _ew.legal(_dw.dialog)[0]))
+    _got |= {m["ID"] for m in _dw.mutations}
+check("GiveMutation hands over the mutation it names", _got == {4, 5}, f"{sorted(_got)}")
+
+# an Ambush makes the room the squad stands in fight after all
+_built.clear()
+_sim_run.Battle = _CountBattle
+try:
+    _da = RunState.new(_STRICT, seed=2)
+    _da.dialog = None
+    _da.gold = 0.0
+    _da.squad[0].item = "stone-sword"
+    _ea = _Engine(_da)
+    _da.dialog = _ea.start("GuidingStone")
+    _da._settle_dialog()
+    _da.apply(("choose", 1))                   # "Go left"
+    while _da.dialog is not None:
+        _da.apply(("choose", _ea.legal(_da.dialog)[0]))
+finally:
+    _sim_run.Battle = _real_battle
+check("an Ambush makes the start room fight", _built and _da.gold >= 10.0,
+      f"{len(_built)} battles, gold {_da.gold}")
 
 # hunger model. `moves` is a list of thresholds on a `maxMoves` reserve, not an
 # allowance per stage, and moving feeds the team rather than costing a move.
