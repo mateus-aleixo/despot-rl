@@ -188,10 +188,10 @@ def main():
                     help="reveal the whole level instead of playing under the "
                          "fog, at the same obs_dim, which is the pre-fog "
                          "observation and the control arm for what the fog costs")
-    ap.add_argument("--blind-boss", action="store_true",
-                    help="hold every entry read off the distance to the boss at "
-                         "zero, at the same obs_dim: the to_boss fork's arm "
-                         "that navigates on the local view and the frontier")
+    ap.add_argument("--boss-distance", action="store_true",
+                    help="fill the entries read off the distance to the boss, "
+                         "which the shipped observation holds at zero since the "
+                         "to_boss fork's sweep: the fork's `revealed` arm")
     ap.add_argument("--blind-frontier", action="store_true",
                     help="hold the share of the revealed map still unentered at "
                          "zero, at the same obs_dim: the to_boss fork's arm "
@@ -237,7 +237,7 @@ def main():
                          squad=args.squad,
                          blind_squad=args.blind_squad,
                          lights_on=args.lights_on,
-                         blind_boss=args.blind_boss,
+                         boss_distance=args.boss_distance,
                          blind_frontier=args.blind_frontier)
             for i in range(args.envs)]
 

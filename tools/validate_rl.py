@@ -223,12 +223,15 @@ def rollout(seed):
 check("same seed gives the same trajectory", rollout(7) == rollout(7))
 
 print("\n== the to_boss fork's arms ==")
-# Each arm differs from the shipped observation in information only: the same
-# run, step for step, with its own entries held at zero (or, for `lights_on`,
-# the whole level shown) and nothing else moved, the mask included.
-def paired_obs(seed, steps=40, **arm):
-    """The shipped env and an arm, driven by the same actions."""
-    base, other = DespotRunEnv(tables=TABLES), DespotRunEnv(tables=TABLES, **arm)
+# Each arm differs from the observation it is compared with in information
+# only: the same run, step for step, with its own entries held at zero (or, for
+# `lights_on`, the whole level shown) and nothing else moved, the mask included.
+# The shipped observation is the fork's `noboss` arm, so the boss entries are
+# checked as the shipped env against `boss_distance=True`.
+def paired_obs(seed, steps=40, base_kw=None, **arm):
+    """Two envs, `base_kw` and `arm`, driven by the same actions."""
+    base = DespotRunEnv(tables=TABLES, **(base_kw or {}))
+    other = DespotRunEnv(tables=TABLES, **arm)
     o1, i1 = base.reset(seed=seed)
     o2, i2 = other.reset(seed=seed)
     rng = random.Random(seed)
@@ -245,11 +248,12 @@ def paired_obs(seed, steps=40, **arm):
             break
     return pairs, base, other
 
-for arm in ({"blind_boss": True}, {"blind_frontier": True}, {"lights_on": True}):
-    name = next(iter(arm))
+for name, base_kw, arm in (("no boss distance", {"boss_distance": True}, {}),
+                           ("blind_frontier", None, {"blind_frontier": True}),
+                           ("lights_on", None, {"lights_on": True})):
     moved, masks_same, zeroed = set(), True, True
     for seed in (3, 11, 29):
-        pairs, base, other = paired_obs(seed, **arm)
+        pairs, base, other = paired_obs(seed, base_kw=base_kw, **arm)
         masks_same &= all((m1 == m2).all() for _, _, m1, m2 in pairs)
         for o1, o2, _, _ in pairs:
             idx = set(np.flatnonzero(o1 != o2).tolist())

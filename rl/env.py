@@ -119,7 +119,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  dialogs: bool = True,
                  quests: bool = True,
                  long_run_reward: bool | str = False,
-                 blind_boss: bool = False,
+                 boss_distance: bool = False,
                  blind_frontier: bool = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
@@ -171,13 +171,15 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # `to_boss` fork to the batch-1 boundary; this is the control that lets
         # it be run as arms rather than as a code change.
         self.lights_on = lights_on
-        # The other two arms of the `to_boss` fork, in the same shape: hold the
-        # entries at zero and keep them in the vector. `blind_boss` zeroes every
-        # entry read off the distance to the boss (the found flag, this room's
-        # distance, each neighbour's "nearer" bit), which leaves the policy the
-        # local view and the frontier; `blind_frontier` zeroes the share of the
-        # revealed map still unentered, which leaves the boss distance alone.
-        self.blind_boss = blind_boss
+        # The other two arms of the `to_boss` fork, in the same shape: entries
+        # held at zero and kept in the vector. The entries read off the distance
+        # to the boss (the found flag, this room's distance, each neighbour's
+        # "nearer" bit) are zero unless `boss_distance` is set: the fork's sweep
+        # at the batch-1 boundary found them worth nothing (`notes/rl.md`, "The
+        # fog fork at 2M"), so the shipped observation is its `noboss` arm and
+        # `boss_distance=True` is the old one. `blind_frontier` zeroes the share
+        # of the revealed map still unentered.
+        self.boss_distance = boss_distance
         self.blind_frontier = blind_frontier
         # The level-entry dialogs. Off is a run without them, which exists to
         # measure what they change and for checks of other mechanics.
@@ -455,7 +457,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # and what `cleared` cannot say on its own: a room walked into and
             # lost in is explored and uncleared both.
             around[base + 2] = 1.0 if room.state == UNEXPLORED else 0.0
-            around[base + 3] = (1.0 if known and not self.blind_boss
+            around[base + 3] = (1.0 if known and self.boss_distance
                                 and known.get(rid, far) < d_here else 0.0)
             around[base + 4] = 1.0 if st.rooms.is_portal(rid) else 0.0
             if to_quest:
@@ -482,8 +484,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # Without the flag a distance of 0 means "standing on the boss" and
             # "no idea where the boss is" at once, and the two want opposite
             # moves.
-            0.0 if self.blind_boss else boss_found,
-            (d_here / far) if boss_found and not self.blind_boss else 0.0,
+            boss_found if self.boss_distance else 0.0,
+            (d_here / far) if boss_found and self.boss_distance else 0.0,
             sum(1 for r in seen if r.cleared) / max(1, len(seen)),
             len(seen) / 20.0,
             sum(1 for r in pantries

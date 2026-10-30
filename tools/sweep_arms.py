@@ -89,13 +89,17 @@ SWEEPS = {
     # observation, the control for what the fog's information is worth. All
     # four differ only in information, so each is graded on the vector it
     # trained on, as `shelf` is, and every other arm is paired against the
-    # first.
+    # first. `noboss` won and is the shipped observation since, so every other
+    # arm names `boss_distance` explicitly and the sweep still grades as it
+    # trained.
     "fog": {
         "arms": ("revealed", "noboss", "nofrontier", "lit"),
-        "flags": {"revealed": [], "noboss": ["--blind-boss"],
-                  "nofrontier": ["--blind-frontier"], "lit": ["--lights-on"]},
-        "env": {"revealed": {}, "noboss": {"blind_boss": True},
-                "nofrontier": {"blind_frontier": True}, "lit": {"lights_on": True}},
+        "flags": {"revealed": ["--boss-distance"], "noboss": [],
+                  "nofrontier": ["--blind-frontier", "--boss-distance"],
+                  "lit": ["--lights-on", "--boss-distance"]},
+        "env": {"revealed": {"boss_distance": True}, "noboss": {},
+                "nofrontier": {"blind_frontier": True, "boss_distance": True},
+                "lit": {"lights_on": True, "boss_distance": True}},
     },
 }
 PY_EXE = sys.executable
