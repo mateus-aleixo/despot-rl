@@ -517,7 +517,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                                if to_quest else 1.0)
             quest[base + 2] = (min(1.0, to_extra.get(st.room, far + 1) / (far + 1))
                                if to_extra else 1.0)
-            quest[base + 3] = (1.0 if any(st.rooms.rooms[r].cleared for r in q.extras)
+            quest[base + 3] = (1.0 if any(st.rooms.rooms[r].cleared for r in q.marked(st))
                                else 0.0)
         qtalk = np.zeros(1 + len(self.quest_nodes), dtype=np.float32)
         if st.quest_dialog is not None:
@@ -554,13 +554,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
     @staticmethod
     def _quest_distances(st: RunState) -> tuple[dict, dict]:
         """Distances over the revealed map to the quest room and to the nearest
-        revealed extra room; empty where the room is not on the map."""
+        room the quest points at (`Quest.marked`: its extra rooms, or the
+        Reaper's hater and the Bot); empty where nothing is on the map."""
         q = st.quest
         if q is None or q.room is None:
             return {}, {}
         to_quest = st.rooms._distances(q.room, known_only=True)
         to_extra: dict = {}
-        for rid in q.extras:
+        for rid in q.marked(st):
             for k, d in st.rooms._distances(rid, known_only=True).items():
                 if d < to_extra.get(k, 1 << 30):
                     to_extra[k] = d

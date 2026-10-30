@@ -186,7 +186,9 @@ class TreeRun:
         out = []
         for i, choice in enumerate(n.get("availableChoices") or []):
             cond = choice.get("condition")
-            if cond is None or self.quest.check(st, cond):
+            text = ((choice.get("statement") or {}).get("_text")) or ""
+            if ((cond is None or self.quest.check(st, cond))
+                    and self.quest.option_enabled(st, text)):
                 out.append(i)
         return out
 
@@ -278,6 +280,8 @@ class Quest:
     # Quest props in the inventory (`cube-part`, `rat-flute`): the sim has no
     # inventory, and they do nothing but mark the quest's progress.
     items: set = field(default_factory=set)
+    # Levels the quest still runs into after its own (`AdditionalLevels`).
+    levels_left: int = 0
 
     # -- the run layer's hooks --------------------------------------------
     def arrive(self, st, rid: str, fought: bool, won: bool) -> str | None:
@@ -291,12 +295,30 @@ class Quest:
         """`GetDialogIndex(room)` for the quest room, as a tree stem."""
         return None
 
+    def killed(self, st, n: int) -> None:
+        """`n` enemies died in a fight the squad just fought."""
+
+    def extra_enemies(self, st, room) -> list:
+        """Units the quest adds to `room`'s enemy team, as (class, level)
+        pairs: `OnEnemyTeamCreation`."""
+        return []
+
+    def dialog_ended(self, st) -> None:
+        """A quest dialog has just closed; what the controller does after."""
+
     def set_status(self, st, status: int) -> None:
         self.status = int(status)
         self.on_status(st, self.status)
 
     def on_status(self, st, status: int) -> None:
         """`C_Quest<T>.OnStatus` and the quest's own override."""
+
+    def marked(self, st) -> list:
+        """The rooms the quest points the squad at, as far as the map shows
+        them: its extra rooms by default, the runaway's room for the Reaper and
+        the Bot. Read by the environment and by the baseline's follow mode."""
+        from .run import UNKNOWN
+        return [r for r in self.extras if st.rooms.rooms[r].state != UNKNOWN]
 
     def reveal_extras(self, st) -> None:
         """`M_Room.state = Unexplored` on the extra rooms, which the walk-past
@@ -345,6 +367,11 @@ class Quest:
         """`CheckCondition(name)` and the quest's own condition tasks."""
         raise NotImplementedError(f"{self.name}: condition {name!r}")
 
+    def option_enabled(self, st, text: str) -> bool:
+        """`C_Quest<T>.IsOptionEnabled(text)`: true unless the quest overrides
+        it, which only Bot does."""
+        return True
+
     def call(self, st, fn: str, param) -> None:
         """`CallFunction(name[, param])`. Functions that only move actors,
         cameras and animations are presentation and do nothing here."""
@@ -373,6 +400,7 @@ def is_novice(h) -> bool:
     return h.item is None and getattr(h, "cls", None) is None
 
 
+@dataclass
 class PitQuest(Quest):
     """`C_PitQuest`: the Pit wants five Novices, or a few tokens.
 
@@ -409,6 +437,7 @@ class PitQuest(Quest):
                 st.finished, st.won = True, False
 
 
+@dataclass
 class CubeQuest(Quest):
     """`C_CubeQuest`: fetch the cube part from the extra room.
 
@@ -444,6 +473,7 @@ class CubeQuest(Quest):
             self.items.discard("cube-part")
 
 
+@dataclass
 class SciQuest(Quest):
     """`C_SciQuest`: bring the scientist a zombie.
 
@@ -519,6 +549,7 @@ def find_weakest_unit(st):
     return min(humans, key=key)
 
 
+@dataclass
 class RatQuest(Quest):
     """`C_RatQuest`: take the flute, win the rat back, return it alive.
 
@@ -567,16 +598,387 @@ class RatQuest(Quest):
             self.returned = self.returned or len(st.squad) < before
 
 
+def _seen(st, rid: str | None) -> list:
+    """`[rid]` when the room is on the map, else nothing."""
+    from .run import UNKNOWN
+    return [rid] if rid is not None and st.rooms.rooms[rid].state != UNKNOWN else []
+
+
+def _flee(st, current: str, prev: str | None, forbidden: str | None) -> str | None:
+    """`ChooseNextRoom(current, prev)` of the Reaper's hater and the Bot: a
+    uniform draw (`RND.Element`) over the rooms beside `current` other than the
+    one the squad came from and the quest room; None when there is none."""
+    rooms = [n for n in st.rooms.doors(current) if n != prev and n != forbidden]
+    return st.rng.choice(rooms) if rooms else None
+
+
+@dataclass
+class ReaperQuest(Quest):
+    """`C_ReaperQuest`: catch the hater the Reaper wants dead.
+
+    `GetDialogIndex` in the quest room is 0 (the beginning) while
+    Uninitialized and 1 (the ending) once Acquired. The beginning spawns the
+    hater there and `Run` sends him through a door at once (`ChooseNextRoom`,
+    `movesMade` to 1). While the quest is Accepted, the squad arriving in the
+    hater's room (`OnRoomChange`, which also records the room it came from as
+    `prevRoom`) makes him run again, while `movesMade < maxMoves` (5) and a
+    room qualifies; otherwise he stays and his dialog opens there. He offers
+    50 gold (outcome 1) to be let go, which finishes the quest; refusing sets
+    Acquired and starts a fight with him (`PrepareToFight`), and the Reaper
+    pays mutation 230 (outcome 2) for it. The hater is a level-1 unit of the
+    row's `class`, a Novice.
+    """
+
+    BEGIN, END = "Room-reaper-quest.Dialog_Beginning", "Room-reaper-quest.Dialog_Ending"
+    HATER = "Quest-hater-dialog.Dialog"
+
+    hater_room: str | None = None
+    moves: int = 0
+
+    @property
+    def max_moves(self) -> int:
+        return int(self.spec.get("maxMoves") or 0)
+
+    def marked(self, st):
+        return _seen(st, self.hater_room)
+
+    def room_dialog(self, st):
+        if self.status == UNINITIALIZED:
+            return self.BEGIN
+        if self.status == ACQUIRED:
+            return self.END
+        return None
+
+    def arrive(self, st, rid, fought, won):
+        if self.status == ACCEPTED and rid == self.hater_room and rid != self.room:
+            nxt = (_flee(st, rid, st.prev_room, self.room)
+                   if self.moves < self.max_moves else None)
+            if nxt is not None:
+                self.hater_room = nxt
+                self.moves += 1
+                return None
+            return self.HATER
+        return super().arrive(st, rid, fought, won)
+
+    def call(self, st, fn, param):
+        if fn == "Run":
+            nxt = _flee(st, self.room, st.prev_room, self.room)
+            if nxt is not None:
+                self.hater_room = nxt
+                self.moves += 1
+        elif fn == "RemoveHater":
+            self.hater_room = None
+        elif fn == "PrepareToFight":
+            st.quest_fight([(str(self.spec.get("class") or "Novice"), 1)])
+            self.hater_room = None
+
+
+@dataclass
+class SpiderQuest(Quest):
+    """`C_SpiderQuest`: post the monster's leaflets.
+
+    The monster grabs a unit and throws it back out (a knockback, no damage).
+    `OnStatus(Accepted)` hands over `leafletCount` (3) leaflets, and
+    `OnCurrentRoom` posts one in every room the squad then enters that is not
+    the quest room and has none yet; the last sets Acquired. Back in the quest
+    room: mutation 346 (outcome 1) or 50 gold (outcome 2).
+    """
+
+    TREE = "Spider-quest.Dialog"
+
+    posted: list = field(default_factory=list)
+
+    def room_dialog(self, st):
+        return self.TREE if self.status in (UNINITIALIZED, ACCEPTED, ACQUIRED) else None
+
+    def arrive(self, st, rid, fought, won):
+        if self.status == ACCEPTED and rid != self.room and rid not in self.posted:
+            self.posted.append(rid)
+            if len(self.posted) >= int(self.spec.get("leafletCount") or 0):
+                self.set_status(st, ACQUIRED)
+            return None
+        return super().arrive(st, rid, fought, won)
+
+
+
+@dataclass
+class BotQuest(Quest):
+    """`C_BotQuest`: bring the gamer back his bot.
+
+    `GetDialogIndex` in the quest room is 0 while Uninitialized and once
+    Acquired. `OnStatus(Accepted)` reveals the extra room, where the bot
+    starts (`currentBotRoom`). Arriving in the bot's room while Accepted opens
+    its dialog the first time: threaten it and it runs (`Run`, as the Reaper's
+    hater does, `maxMoves` 3), pay `goldLoss` (outcome 3, 5 gold; the option is
+    shown only when the team has that much, `IsOptionEnabled`) and it joins
+    the team (`SubscribeToBot`, Acquired), or say there is no money. Once it
+    runs, every arrival in its room sends it on while it can move, then opens
+    `bot-before-fight`: the squad fights it (`PrepareToFight`), and beaten it
+    changes sides (`OnBotDeath` recreates it in the player's team) and
+    `_OnEndFight` sets Acquired. Back with the gamer: `HasBot` (returned, or a
+    `Bot` in the team), then `RemoveBot` and mutation 22 (outcome 1) or 50
+    gold (outcome 2); without it, nothing.
+    """
+
+    MAIN = "Room-bot-quest.Dialog"
+    MEET, BEFORE, AFTER = "Bot-dialog.Dialog", "Bot-before-fight.Dialog", "Bot-after-fight.Dialog"
+
+    bot_room: str | None = None
+    moves: int = 0
+    running: bool = False
+    returned: bool = False
+
+    def marked(self, st):
+        return _seen(st, self.bot_room)
+
+    @property
+    def gold_loss(self) -> float:
+        outs = self.spec.get("outcomes") or []
+        for e in (outs[2] if len(outs) > 2 else []):
+            if e.get("className") == "MinusGold":
+                return float((e.get("parameters") or {}).get("amount") or 0.0)
+        return 0.0
+
+    def room_dialog(self, st):
+        return self.MAIN if self.status in (UNINITIALIZED, ACQUIRED) else None
+
+    def on_status(self, st, status):
+        if status == ACCEPTED:
+            self.reveal_extras(st)
+            if self.bot_room is None and self.extras:
+                self.bot_room = self.extras[0]
+
+    def arrive(self, st, rid, fought, won):
+        if self.status == ACCEPTED and rid == self.bot_room and rid != self.room:
+            if not self.running:
+                return self.MEET
+            nxt = (_flee(st, rid, st.prev_room, self.room)
+                   if self.moves < int(self.spec.get("maxMoves") or 0) else None)
+            if nxt is not None:
+                self.bot_room = nxt
+                self.moves += 1
+                return None
+            return self.BEFORE
+        return super().arrive(st, rid, fought, won)
+
+    def option_enabled(self, st, text):
+        if text == "Quest.Bot.Meet.3.2":
+            return st.gold >= self.gold_loss
+        return True
+
+    def condition(self, st, name):
+        if name == "HasBot":
+            return self.returned or any(getattr(h, "cls", None) == "Bot" for h in st.squad)
+        return super().condition(st, name)
+
+    def call(self, st, fn, param):
+        if fn == "Run":
+            self.running = True
+            nxt = _flee(st, self.bot_room, st.prev_room, self.room)
+            if nxt is not None:
+                self.bot_room = nxt
+                self.moves += 1
+        elif fn == "SubscribeToBot":
+            self._join(st)
+        elif fn == "PrepareToFight":
+            res = st.quest_fight([(str(self.spec.get("class") or "Bot"), 1)])
+            if res.get("won") and not st.finished:
+                self._join(st)
+                self.set_status(st, ACQUIRED)
+                st.queue_quest_dialog(self.AFTER)
+        elif fn == "RemoveBot":
+            before = len(st.squad)
+            st.squad = [h for h in st.squad if getattr(h, "cls", None) != "Bot"]
+            self.returned = self.returned or len(st.squad) < before
+
+    def _join(self, st):
+        st.squad.append(st.make_companion(str(self.spec.get("class") or "Bot"), 1))
+        self.bot_room = None
+
+
+@dataclass
+class NurgleQuest(Quest):
+    """`C_NurgleQuest`: five cabbage leaves, on this level or the next.
+
+    While Accepted (`OnStatus` subscribes to every new enemy team's dead
+    units) every enemy that dies adds a `plant-leaf`. `GetDialogIndex` counts
+    the leaves against `threshold` (5): on the level the quest started, the
+    beginning while Uninitialized, then the ending or "not finished"; with
+    `AdditionalLevels` 1 the model carries into the next level, whose map gets
+    the room again from `Overrides` (`nurgle-quest-2`), with its own
+    not-finished, ending and finished dialogs. The ending pays 35 gold
+    (outcome 1) or mutation 302 (outcome 2) and `RemoveItems` takes the
+    leaves.
+    """
+
+    BEGIN = "Room-nurgle-quest.Dialog_Beginning"
+    NOT, END = "Room-nurgle-quest.Dialog_NotFinished", "Room-nurgle-quest.Dialog_Ending"
+    NOT2, END2 = "Room-nurgle-quest-2.Dialog_NotFinished", "Room-nurgle-quest-2.Dialog_Ending"
+    FIN2 = "Room-nurgle-quest-2.Dialog_Finished"
+
+    leaves: int = 0
+    started: int | None = None
+
+    def room_dialog(self, st):
+        enough = self.leaves >= int(self.spec.get("threshold") or 0)
+        if self.started is None or st.level == self.started:
+            if self.status == UNINITIALIZED:
+                return self.BEGIN
+            if self.status == ACCEPTED:
+                return self.END if enough else self.NOT
+            return None
+        if self.status == ACCEPTED:
+            return self.END2 if enough else self.NOT2
+        if self.status == FINISHED:
+            return self.FIN2
+        return None
+
+    def on_status(self, st, status):
+        if status == ACCEPTED and self.started is None:
+            self.started = st.level
+
+    def killed(self, st, n):
+        if self.status == ACCEPTED:
+            self.leaves += n
+
+    def call(self, st, fn, param):
+        if fn == "RemoveItems":
+            self.leaves = 0
+
+
+@dataclass
+class FlightQuest(Quest):
+    """`C_FlightQuest`: find Mad Mike, on foot or by cannon.
+
+    `GetDialogIndex` is 0 for Uninitialized, Accepted and Acquired. Walking
+    sets Accepted and reveals the extra room, and arriving there plays its
+    dialog. Flying (`MoveToCannon`) leaves the status where it is, shoots the
+    squad into the extra room and takes `hpLossPercent` (10) percent of each
+    unit's health on landing (`WaitForArrival`), and the extra dialog plays at
+    once with `ChoseToFly`. Either way the dialog sets Acquired and hands over
+    `mik-helmet`; back in the quest room, 35 gold (outcome 1) or mutation 237
+    (outcome 2).
+    """
+
+    MAIN, EXTRA = "Flight-quest-main.Dialog", "Flight-quest-extra-dialog.Dialog"
+
+    chose_to_fly: bool = False
+    flying: bool = False
+
+    def room_dialog(self, st):
+        return self.MAIN if self.status in (UNINITIALIZED, ACCEPTED, ACQUIRED) else None
+
+    def arrive(self, st, rid, fought, won):
+        if rid in self.extras and self.status == ACCEPTED:
+            return self.EXTRA
+        return super().arrive(st, rid, fought, won)
+
+    def on_status(self, st, status):
+        if status == ACCEPTED:
+            self.reveal_extras(st)
+        elif status == ACQUIRED:
+            self.items.add("mik-helmet")
+        elif status == FINISHED:
+            self.items.discard("mik-helmet")
+
+    def condition(self, st, name):
+        if name == "ChoseToFly":
+            return self.chose_to_fly
+        return super().condition(st, name)
+
+    def call(self, st, fn, param):
+        if fn == "MoveToCannon":
+            self.chose_to_fly = self.flying = True
+
+    def dialog_ended(self, st):
+        if self.flying and self.extras:
+            self.flying = False
+            st.quest_flight(self.extras[0], float(self.spec.get("HPLossPercent") or 0.0))
+            st.open_quest_dialog(self.EXTRA)
+
+
+@dataclass
+class SwordQuest(Quest):
+    """`C_SwordQuest`: the talking sword's revenge on its twin.
+
+    The sword's "extra" room is the boss room. `GetDialogIndex` in the quest
+    room is 0 while Uninitialized, Declined or Initialized. The dialog first
+    runs `CheckBossRoomStatus`, which sets Declined when the boss is already
+    dead, and that branch ends the quest unpaid. Otherwise the sword offers
+    itself: refused, Initialized (it can be asked again); taken, Accepted and
+    a level-1 `TalkingSword` joins the team (`SpawnSword`). Arriving in the
+    boss room while Accepted adds a level-1 `DeathSword` to the boss's team
+    (`SpawnEnemySword`, `OnEnemyTeamCreation`), and once the boss fight is
+    won the after-fight dialog pays 35 gold (outcome 1) or mutation 358
+    (outcome 2), from the sword or, if it died, its ghost. Finished takes the
+    sword out of the team.
+    """
+
+    MAIN, AFTER = "Sword-quest-main.Dialog", "Sword-quest-after-fight.Dialog"
+
+    def room_dialog(self, st):
+        return self.MAIN if self.status in (UNINITIALIZED, DECLINED, INITIALIZED) else None
+
+    def arrive(self, st, rid, fought, won):
+        if rid == st.rooms.boss and self.status == ACCEPTED and fought and won:
+            return self.AFTER
+        return super().arrive(st, rid, fought, won)
+
+    def extra_enemies(self, st, room):
+        if room.id == st.rooms.boss and self.status == ACCEPTED:
+            return [("DeathSword", 1)]
+        return []
+
+    def condition(self, st, name):
+        if name == "HasSword":
+            return any(getattr(h, "cls", None) == "TalkingSword" for h in st.squad)
+        return super().condition(st, name)
+
+    def call(self, st, fn, param):
+        if fn == "CheckBossRoomStatus":
+            if st.rooms.rooms[st.rooms.boss].cleared:
+                self.set_status(st, DECLINED)
+        elif fn == "SpawnSword":
+            st.squad.append(st.make_companion("TalkingSword", 1))
+
+    def on_status(self, st, status):
+        if status == FINISHED:
+            st.squad = [h for h in st.squad if getattr(h, "cls", None) != "TalkingSword"]
+
+
+@dataclass
 class InertQuest(Quest):
     """A quest whose controller is not ported yet: its rooms are placed and
     typed, its extra rooms fight their packs, and its dialogs never run."""
 
 
-QUESTS = {"Pit": PitQuest, "Cube": CubeQuest, "Sci": SciQuest, "Rat": RatQuest}
+QUESTS = {"Pit": PitQuest, "Cube": CubeQuest, "Sci": SciQuest, "Rat": RatQuest,
+          "Reaper": ReaperQuest, "Spider": SpiderQuest, "Bot": BotQuest,
+          "Nurgle": NurgleQuest, "Flight": FlightQuest, "Sword": SwordQuest}
 
 
 def make_quest(tables: dict, name: str | None) -> Quest | None:
     spec = quest_spec(tables, name)
     if spec is None:
         return None
-    return QUESTS.get(name, InertQuest)(name=name, spec=spec)
+    q = QUESTS.get(name, InertQuest)(name=name, spec=spec)
+    q.levels_left = int(spec.get("AdditionalLevels") or 0)
+    return q
+
+
+def carry_on(quest: Quest) -> bool:
+    """Take `quest` into the next level when it has levels left: its row with
+    `Overrides` laid over it (one level deep, `RoomParams` key by key), and
+    its rooms to be placed again."""
+    if quest.levels_left <= 0:
+        return False
+    quest.levels_left -= 1
+    spec = dict(quest.spec)
+    for key, value in (spec.pop("Overrides", None) or {}).items():
+        if isinstance(value, dict) and isinstance(spec.get(key), dict):
+            spec[key] = {**spec[key], **value}
+        else:
+            spec[key] = value
+    quest.spec = spec
+    quest.room, quest.extras = None, []
+    return True

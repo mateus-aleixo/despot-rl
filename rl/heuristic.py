@@ -291,21 +291,24 @@ def _quest_choice_value(st: RunState, index: int) -> float:
 def _quest_target(st: RunState) -> str | None:
     """Where the level's quest wants the squad, if the baseline follows it.
 
-    An accepted quest wants its extra room while that room still has something
-    to give: Cube and Rat hand it over whenever the room is visited after the
-    quest was accepted, Sci only after a fight there. The baseline goes only
-    when the room's pack is no stronger than the squad by the game's Power
-    statistic, the same readiness test the item rule uses; that threshold is a
-    guess. An acquired quest wants the quest room.
+    An accepted quest wants the room it points at on the map (`Quest.marked`):
+    its extra room while that room still has something to give (Cube and Rat
+    hand it over whenever the room is visited after the quest was accepted,
+    Sci only after a fight there), or the room the Reaper's hater or the Bot
+    is in. The baseline goes only when an extra room's pack is no stronger than
+    the squad by the game's Power statistic, the same readiness test the item
+    rule uses; that threshold is a guess. An acquired quest wants the quest
+    room.
     """
     q = st.quest
     if q is None or q.room is None or type(q).__name__ == "InertQuest":
         return None
     if q.status == 4:
         return q.room
-    if q.status != 1 or not q.extras:
+    marked = q.marked(st)
+    if q.status != 1 or not marked:
         return None
-    rid = q.extras[0]
+    rid = marked[0]
     room = st.rooms.rooms[rid]
     if q.name == "Sci" and room.cleared:
         return None

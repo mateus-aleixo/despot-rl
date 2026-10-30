@@ -2453,6 +2453,158 @@ check("the trumpeter takes the Rat back and pays 25 gold",
       and not any(h.cls for h in _qr.squad) and _qr.quest.status == _Q.FINISHED
       and "rat-flute" not in _qr.quest.items)
 
+# Level 6. The walks below are over rooms marked won, so what is checked is the
+# quest and not whether a squad survives level-6 fights on the way.
+def _calm(st):
+    for _r in st.rooms.rooms.values():
+        _r.cleared = True
+    return st
+
+
+# Reaper: the hater runs from the Reaper's room and from every arrival until
+# his five moves are spent, then talks.
+_qa = _calm(_quest_level("Reaper", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qa, _qa.rooms.quest_room)
+_first = (_qa.quest.status, _qa.quest.moves, _qa.quest.hater_room)
+_ran_ok = (_first[0] == _Q.ACCEPTED and _first[1] == 1 and _first[2] is not None
+           and _first[2] in _qa.rooms.doors(_qa.rooms.quest_room))
+for _ in range(10):
+    if _qa.quest_dialog is not None or _qa.quest.hater_room is None:
+        break
+    _was = _qa.quest.hater_room
+    _walk_in(_qa, _was, talk=False)
+    if _qa.quest.hater_room not in (_was, None):
+        _ran_ok = _ran_ok and _qa.quest.hater_room in _qa.rooms.doors(_was) \
+            and _qa.quest.hater_room != _qa.prev_room and _qa.quest.hater_room != _qa.rooms.quest_room
+check("the hater runs from the Reaper and from the squad, never back to either",
+      _ran_ok, f"{_first}")
+check("after five moves he stays and offers to pay",
+      _qa.quest_dialog is not None and _qa.quest.moves <= 5
+      and _qa.legal_actions() == [("choose", 0), ("choose", 1)], f"moves {_qa.quest.moves}")
+_qa.apply(("choose", 1))
+check("refusing his money is a fight the squad wins, and the quest is Acquired",
+      _qa.quest.status == _Q.ACQUIRED and len(_qa.squad) == len(_strong))
+_walk_in(_qa, _qa.rooms.quest_room)
+check("the Reaper pays mutation 230 for him",
+      _qa.quest.status == _Q.FINISHED and any(m.get("ID") == 230 for m in _qa.mutations))
+
+# Spider: three leaflets, one per new room, then the monster pays.
+_qd = _calm(_quest_level("Spider", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qd, _qd.rooms.quest_room)
+_three = [r for r in _qd.rooms.rooms if r not in (_qd.rooms.quest_room, _qd.rooms.start)][:3]
+_walk_in(_qd, _three[0])
+_walk_in(_qd, _three[0])
+_one = (_qd.quest.status, list(_qd.quest.posted))
+for _r in _three[1:]:
+    _walk_in(_qd, _r)
+check("a leaflet goes up in each new room, the third finishing the round",
+      _one == (_Q.ACCEPTED, [_three[0]]) and _qd.quest.status == _Q.ACQUIRED, f"{_one}")
+_g0 = _qd.gold
+_walk_in(_qd, _qd.rooms.quest_room, talk=False)
+_qd.apply(("choose", 1))
+check("the monster pays 50 gold for the leaflets",
+      _qd.gold == _g0 + 50 and _qd.quest.status == _Q.FINISHED)
+
+# Bot: the pay option needs the money; paid, the bot joins; beaten, it joins too.
+_qb = _calm(_quest_level("Bot", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_qb.gold = 20.0
+_walk_in(_qb, _qb.rooms.quest_room)
+_walk_in(_qb, _qb.quest.bot_room, talk=False)
+_rich = _qb.legal_actions()
+_qb.apply(("choose", 1))
+check("with 5 gold the bot can be paid, and it joins the team",
+      _rich == [("choose", 0), ("choose", 1), ("choose", 2)] and _qb.gold == 15.0
+      and [h.cls for h in _qb.squad if h.cls] == ["Bot"] and _qb.quest.status == _Q.ACQUIRED)
+_g0 = _qb.gold
+_walk_in(_qb, _qb.rooms.quest_room, talk=False)
+_qb.apply(("choose", 1))
+check("the gamer takes the bot back and pays 50 gold",
+      _qb.gold == _g0 + 50 and not any(h.cls for h in _qb.squad) and _qb.quest.status == _Q.FINISHED)
+_qb = _calm(_quest_level("Bot", seed=2, squad=[dataclasses.replace(h) for h in _strong]))
+_qb.gold = 0.0
+_walk_in(_qb, _qb.rooms.quest_room)
+_walk_in(_qb, _qb.quest.bot_room, talk=False)
+_poor = _qb.legal_actions()
+_qb.apply(("choose", 0))
+for _ in range(8):
+    if _qb.quest.bot_room is None or _qb.quest.status == _Q.ACQUIRED:
+        break
+    _walk_in(_qb, _qb.quest.bot_room, talk=False)
+check("broke, the bot is threatened, runs, is caught, fought and joins",
+      _poor == [("choose", 0), ("choose", 2)] and _qb.quest.status == _Q.ACQUIRED
+      and [h.cls for h in _qb.squad if h.cls] == ["Bot"] and _qb.quest.moves <= 3,
+      f"{_poor} status {_qb.quest.status} moves {_qb.quest.moves}")
+
+# Level 10. Nurgle: a leaf per enemy killed while Accepted, five for the reward,
+# and an unfinished quest goes on into the next level from its Overrides.
+_qn = _calm(_quest_level("Nurgle", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qn, _qn.rooms.quest_room)
+_qn.quest.killed(_qn, 4)
+_walk_in(_qn, _qn.rooms.quest_room, talk=False)
+_short4 = _qn.quest_dialog is None and _qn.quest.status == _Q.ACCEPTED
+_qn.quest.killed(_qn, 1)
+_g0 = _qn.gold
+_walk_in(_qn, _qn.rooms.quest_room, talk=False)
+_qn.apply(("choose", 0))
+check("Nurgle wants five dead enemies' leaves, and pays 35 gold for them",
+      _short4 and _qn.gold == _g0 + 35 and _qn.quest.status == _Q.FINISHED
+      and _qn.quest.leaves == 0)
+_qn = _calm(_quest_level("Nurgle", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qn, _qn.rooms.quest_room)
+_qn_q = _qn.quest
+_qn.next_level()
+_calm(_qn)
+check("an unfinished Nurgle quest carries into the next level, in its second room",
+      _qn.level == 11 and _qn.quest is _qn_q and _qn.quest.room is not None
+      and _qn.quest.spec["RoomParams"]["room"]["Layout"] == "nurgle-quest-2")
+_qn.quest.killed(_qn, 5)
+_walk_in(_qn, _qn.quest.room, talk=False)
+_qn.apply(("choose", 0))
+_qn.next_level()
+check("and is paid there, and goes no further", _qn_q.status == _Q.FINISHED and _qn.quest is None)
+
+# Flight: on foot, the extra room is revealed and its dialog plays there; by
+# cannon the squad lands in it with 10% of its health gone.
+_qf = _calm(_quest_level("Flight", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qf, _qf.rooms.quest_room, talk=False)
+_qf.apply(("choose", 1))
+check("the cannon lands the squad in the extra room, 10% lighter, holding the helm",
+      _qf.room == _qf.quest.extras[0] and _qf.quest.status == _Q.ACQUIRED
+      and all(abs(h.hp - 0.9) < 1e-9 for h in _qf.squad) and "mik-helmet" in _qf.quest.items)
+_g0 = _qf.gold
+_walk_in(_qf, _qf.rooms.quest_room, talk=False)
+_qf.apply(("choose", 0))
+check("Mike's friend pays 35 gold for the helm", _qf.gold == _g0 + 35 and _qf.quest.status == _Q.FINISHED)
+_qf = _calm(_quest_level("Flight", seed=2, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qf, _qf.rooms.quest_room, talk=False)
+_qf.apply(("choose", 0))
+_xs = _qf.rooms.rooms[_qf.quest.extras[0]].state
+_walk_in(_qf, _qf.quest.extras[0])
+check("on foot, the extra room is marked, and reaching it finds the helm unhurt",
+      _xs != _UNKNOWN and _qf.quest.status == _Q.ACQUIRED and all(h.hp == 1.0 for h in _qf.squad))
+
+# Sword: taken, it joins; the twin joins the boss; after the boss, the reward;
+# too late, nothing.
+_qw = _calm(_quest_level("Sword", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_qw.rooms.rooms[_qw.rooms.boss].cleared = False
+_walk_in(_qw, _qw.rooms.quest_room, talk=False)
+_qw.apply(("choose", 1))
+_boss = _qw.rooms.rooms[_qw.rooms.boss]
+check("the sword joins the team, and its twin will stand with the boss",
+      [h.cls for h in _qw.squad if h.cls] == ["TalkingSword"]
+      and _qw.quest.extra_enemies(_qw, _boss) == [("DeathSword", 1)])
+_qw.room = _qw.rooms.boss
+_stem = _qw.quest.arrive(_qw, _qw.rooms.boss, True, True)
+_qw.open_quest_dialog(_stem)
+_g0 = _qw.gold
+_qw.apply(("choose", 0))
+check("after the boss falls the sword pays 35 gold and leaves",
+      _qw.gold == _g0 + 35 and _qw.quest.status == _Q.FINISHED and not any(h.cls for h in _qw.squad))
+_qw = _calm(_quest_level("Sword", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qw, _qw.rooms.quest_room, talk=False)
+check("met after the boss is dead, the sword has nothing to give",
+      _qw.quest.status == _Q.FINISHED and _qw.quest_dialog is None and not any(h.cls for h in _qw.squad))
+
 # A companion is no human: no item goes to it, and it fights as its own row.
 _qz = _quest_level("Sci", seed=4, squad=[_QH(item=None, cls="Zombie")])
 check("a companion takes no item", _qz.best_item_target("broadsword") is None)

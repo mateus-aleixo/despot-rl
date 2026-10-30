@@ -163,19 +163,18 @@ thrown away.
   `ChangeLevel`. The run stays on the level after the boss until it takes the
   pipe (`descend`), and every boss room but the last has a free three-slot
   consumable shop.
-- **Quests.** Partly done, 2026-10-30. Every quest's rooms are placed
+- **Quests.** Ten of eleven done, 2026-10-30. Every quest's rooms are placed
   (`ChooseQuestRoom`, `ChooseQuestExtraRoom`, `CountValidPaths`), typed, paid
   and fought as the game does; the dialogs are the NodeCanvas trees
   `tools/dump_dialogue_trees.py` pulls out of `sharedassets2/3.assets`, run by
-  `sim/quests.py`; the four level-2 controllers (Pit, Sci, Cube, Rat) are
-  ported, with their companions (the Zombie, the Rat). A quest room never
-  fights; an extra room fights its own pack in its `SpecialRoomLayouts` layout.
-  `RoomTransition.CheckDirection` turned out to refuse moves into `Unknown`
-  rooms, which the sim had allowed. Worth -0.121 [-0.286, +0.044] to the
-  heuristic, which passes quests by (following them cost it -0.113). Details in
-  `notes/reference-sim.md`. Still open: the seven controllers of levels 6 and
-  10 (Reaper, SecretRoom, Spider, Bot; Nurgle with its second level, Flight,
-  Sword), the secret room (`MaybeMakeSecretRoom`, `secretRoomCount`), the
+  `sim/quests.py`; Pit, Sci, Cube, Rat, Reaper, Spider, Bot, Nurgle (into its
+  second level), Flight and Sword are ported, with their companions (Zombie,
+  Rat, Bot, TalkingSword). `RoomTransition.CheckDirection` turned out to
+  refuse moves into `Unknown` rooms, which the sim had allowed. Worth -0.121
+  [-0.286, +0.044] to the heuristic, which passes quests by (following them
+  cost it -0.113). Details in `notes/reference-sim.md`. Still open: the
+  SecretRoom quest with the secret room itself (`MaybeMakeSecretRoom`,
+  `activatesSecret`, the portal branch, the room's pack and shop), the
   level-2 reward mutations (306, 218, 328, 233), and the placement layer's
   `guaranteedPositions`.
 - ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26

@@ -2194,7 +2194,7 @@ but `DamageAllEnemies`, which no Default level lists, now do what they do in
 the game. With them all, the shop is worth +0.692 [+0.569, +0.814] to the
 heuristic (`tools/consumable_value.py`, dialogs and pack layouts on).
 
-## Quests, the level-2 four implemented (2026-10-30)
+## Quests, ten of the eleven implemented (2026-10-30)
 
 ### Where the dialogs were
 
@@ -2315,8 +2315,67 @@ the team until returned or killed.
 Nine of the eleven quest reward mutations are not modelled by the mutation
 layer (230 and 668 are, both level-6 rewards), all four of level 2 among them,
 so for now a level-2 mutation reward is a mutation that does nothing, and the
-baseline takes the gold. The level-6 and level-10 controllers are not ported: their rooms are
-placed, typed and fought, their dialogs never run.
+baseline takes the gold.
+
+### Levels 6 and 10, later the same day
+
+Six more controllers, read the same way; only SecretRoom is left, because it
+needs the secret room itself (below).
+
+  * **Reaper.** The beginning spawns a hater (a level-1 Novice) in the
+    Reaper's room and `Run` sends him through a door at once. `ChooseNextRoom`
+    draws uniformly among the room's neighbours, never the room the squad came
+    from (`OnRoomChange` stores it as `prevRoom` on every move) and never the
+    Reaper's room. Each arrival in his room makes him run again while
+    `movesMade < maxMoves` (5, the first escape included) and a room
+    qualifies; then he stays and offers 50 gold to be let go. Refused,
+    `PrepareToFight` turns the room's fight on him (`OnEnemyTeamCreation`),
+    the quest is Acquired, and the Reaper pays mutation 230.
+  * **Spider.** The monster grabs a unit and throws it back (a knockback, no
+    damage). Accepting hands over three leaflets, and every room the squad
+    then enters that is not the quest room and has none yet gets one; the third
+    sets Acquired. 50 gold or mutation 346.
+  * **Bot.** The bot waits in the extra room, which accepting puts on the map.
+    Met there it asks for 5 gold: the option shows only with that much in hand
+    (`IsOptionEnabled("Quest.Bot.Meet.3.2")`, the one override of the base
+    method), and paid it joins the team. Threatened, it runs like the hater
+    (`maxMoves` 3); cornered, it fights (a level-1 `Bot`, 1,101 health), and
+    beaten it changes sides (`OnBotDeath` recreates it in the player's team).
+    Brought back alive: 50 gold or mutation 22.
+  * **Nurgle.** While Accepted every enemy that dies adds a `plant-leaf`
+    (`OnDeadUnit` on each new enemy team, no condition on the unit); five buy
+    35 gold or mutation 302. `AdditionalLevels` 1 keeps the model into the next
+    level, whose map places the room again from `Overrides` (`nurgle-quest-2`)
+    with its own not-finished, ending and finished dialogs.
+  * **Flight.** On foot, accepting reveals the extra room and its dialog plays
+    on arrival. By cannon the status is left alone, the squad lands in the
+    extra room and `WaitForArrival` sets each unit's health to
+    `health * (100 - hpLossPercent) / 100`, 10% off. Either way the helm, then
+    35 gold or mutation 237.
+  * **Sword.** The sword's "extra" room is the boss room. Taken, a level-1
+    `TalkingSword` (4,000 health) joins the team, and arriving in the boss
+    room adds a level-1 `DeathSword` to the boss's pack. After the boss falls,
+    35 gold or mutation 358, from the sword or its ghost, and Finished takes
+    the sword away. Met after the boss is dead, `CheckBossRoomStatus` sets
+    Declined and the dialog ends unpaid.
+
+Three generic hooks came with them: kills reach the quest, a quest can add
+units to a room's enemy team, and a quest dialog can be followed by another
+(the Bot's after-fight dialog) or by an action (the cannon).
+
+### The secret room, read and not built
+
+`LevelGenerator.Generate` makes `secretRoomCount` secret rooms after the
+growth and before `PositionRooms`: it draws a weighted open position and
+`MaybeMakeSecretRoom` puts the room on a cell beside it that touches no room,
+diagonals included, so a secret room is off the door graph. `C_Rooms`'
+`MaybeActivateSecretRoom` counts the rooms flagged `activatesSecret` the squad
+has stood in, and at `roomsToActivateSecret` (2) switches on every `Secret`
+room that is not a quest room; `ChoosePortals` needs `secretRoomCount + 2`
+portals on such a level, so the room is reached by teleport. Still to read:
+which rooms get `activatesSecret`, the portal branch, and what the room holds
+(the `regular-secret-room` pack style and a four-slot mutation shop). Level 7
+and the SecretRoom quest both wait on it.
 
 ### What it is worth
 
@@ -2337,3 +2396,8 @@ baseline's default is to answer a quest dialog when it walks into one and to go
 no further (`heuristic_action(quests="pass")`). Whether finishing a quest pays
 is left to the agent; once the four level-2 mutations are modelled it is worth
 measuring again.
+
+With the six controllers of levels 6 and 10 in, the same measurement reads the
+same, -0.121 [-0.286, +0.044], and it has to: with quests on, none of the 240
+heuristic runs reaches level 6. Those quests are held to the checks in
+`tools/validate_sim.py`, not to this number.

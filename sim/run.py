@@ -722,6 +722,13 @@ class RunState:
     # Off plays a run with no quests: no quest rooms on the map at all, for
     # measuring what they change.
     quests_on: bool = True
+    # The room the squad stood in before this one, which `C_ReaperQuest`
+    # records on every move (`OnRoomChange(room, prevRoom)`).
+    prev_room: str | None = None
+    # Quest dialogs waiting for the one on screen to end: the Bot's
+    # after-fight dialog, which its controller creates once the fight that the
+    # before-fight dialog started is over.
+    quest_queue: list = field(default_factory=list)
 
     # -- setup -------------------------------------------------------------
     @classmethod
@@ -755,10 +762,17 @@ class RunState:
         `C_Rooms.Generate` reads it from the level data, so the quest is fixed
         before the map is built and the map is built to fit it.
         """
-        from .quests import draw_quest, make_quest
+        from .quests import carry_on, draw_quest, make_quest
         name = draw_quest(self.level_row, self.rng) if self.quests_on else None
-        self.quest = make_quest(self.tables, name)
+        if name is None and self.quest is not None and carry_on(self.quest):
+            # `AdditionalLevels`: `CreateQuestModel` keeps the model and the
+            # next level places the room again, from the row's `Overrides`.
+            pass
+        else:
+            self.quest = make_quest(self.tables, name)
         self.quest_dialog = None
+        self.quest_queue = []
+        self.prev_room = None
         self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip,
                                       self.quest.spec if self.quest else None)
         if self.quest is not None:
@@ -1754,6 +1768,7 @@ class RunState:
 
     def _arrive(self, rid: str, result: dict) -> None:
         """Walk or teleport into `rid`: reveal, fight if it was never won, pay."""
+        self.prev_room = self.room
         self.room = rid
         # The reveal happens on entry, before the fight, so the neighbours
         # of a room the squad dies in are still uncovered.
@@ -1820,6 +1835,23 @@ class RunState:
             run.choose(self, options[0])
         if run is not None and (run.closed or not run.options(self)):
             self.quest_dialog = None
+            if self.quest is not None and not self.finished:
+                self.quest.dialog_ended(self)
+            if self.quest_dialog is None and self.quest_queue and not self.finished:
+                self.open_quest_dialog(self.quest_queue.pop(0))
+
+    def quest_flight(self, rid: str, hp_loss_percent: float) -> None:
+        """The Flight quest's cannon: into `rid` without a door, so without
+        `C_Food.Move`, and `hpLossPercent` of each unit's health gone on
+        landing (`WaitForArrival`: `health * (100 - loss) / 100`)."""
+        self._arrive(rid, {})
+        keep = max(0.0, 1.0 - hp_loss_percent / 100.0)
+        for h in self.squad:
+            h.hp = max(0.01, h.hp * keep)
+
+    def queue_quest_dialog(self, stem: str) -> None:
+        """Open `stem` once the quest dialog on screen has ended."""
+        self.quest_queue.append(stem)
 
     def win_level(self) -> None:
         """`C_Levels.WinLevel`, which `C_Fight.AfterFight` calls on a boss win.
@@ -2065,7 +2097,7 @@ class RunState:
         return {"won": True, "cleaned": True, "exp": exp, "levels": levels}
 
     # -- fights ------------------------------------------------------------
-    def fight(self, room: Room) -> dict:
+    def fight(self, room: Room, enemies: list | None = None) -> dict:
         # An AntiHunger used before this fight holds the hunger penalties off
         # for it: `M_AntiHungerStatus` wraps each unit's hunger status until
         # the fight ends. Temporary allies from a Reserve fight once and go.
@@ -2073,10 +2105,21 @@ class RunState:
         allies = self.armed.pop("allies", [])
         specs = self.specs(no_hunger=no_hunger)
         quest_layout = None
-        if room.kind in ("quest", "quest_extra"):
+        if enemies is not None:
+            # A fight a quest starts (`quest_fight`): its units, everyone in e1,
+            # in whatever layout the fallback below draws.
+            self._last_pack = (None, ["e1"] * len(enemies))
+        elif room.kind in ("quest", "quest_extra"):
             enemies, quest_layout = self.quest_enemies(room)
         else:
             enemies = self.enemy_specs(room.kind)
+            # `OnEnemyTeamCreation`: the Sword quest's twin joins the boss.
+            extra = self.quest.extra_enemies(self, room) if self.quest is not None else []
+            if extra and enemies:
+                more = self.ally_specs(extra)
+                pack_id, zones = self._last_pack or (None, [])
+                enemies = enemies + more
+                self._last_pack = (pack_id, list(zones) + ["e1"] * len(more))
         if not specs:
             self.finished, self.won = True, False
             return {"won": False, "reason": "no squad"}
@@ -2159,6 +2202,13 @@ class RunState:
         res = b.run()
 
         return self._after_fight(team0[:n_humans], team1, res, room)
+
+    def quest_fight(self, units: list) -> dict:
+        """A fight a quest starts in the room the squad stands in, against
+        `units` as (class, level) pairs: the Reaper's hater, the runaway Bot.
+        `OnEnemyTeamCreation` adds the unit to the enemy team of the fight that
+        `PrepareToFight` starts there."""
+        return self.fight(self.rooms.rooms[self.room], enemies=self.ally_specs(units))
 
     def quest_enemies(self, room: Room) -> tuple[list, Any]:
         """A quest room's own pack and layout, from the quest's `RoomParams`.
@@ -2248,6 +2298,8 @@ class RunState:
         # resolves first and the levels land after, which is the one place the
         # timing differs.
         exp = sum(a.spec.exp_reward for a in team1 if not a.alive)
+        if self.quest is not None:
+            self.quest.killed(self, sum(1 for a in team1 if not a.alive))
         # A quest companion is not levelled: its class has rows only at the
         # levels the quest creates it at (see `sim/assumptions.py`).
         levels = self.gain_experience(exp, targets=[h for h in kept if not h.cls])

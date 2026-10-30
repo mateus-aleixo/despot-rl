@@ -237,11 +237,18 @@ class Assumptions:
     # (`cube-part`, `rat-flute`) is a flag on the quest, since the sim has no
     # inventory. (5) A human `ReplaceUnit` turns into the Zombie loses the item
     # it held; `C_Player.DownGradeUnit` was not read for where it goes. (6) The
-    # controllers of the level 6 and level 10 quests are not ported: their
-    # rooms are placed, typed and fought, and their dialogs never run.
+    # SecretRoom quest is not ported, with the secret room it needs: its rooms
+    # are placed, typed and fought, and its dialogs never run. (7) The room
+    # the Reaper's hater or the runaway Bot is in shows on the map once that
+    # room is revealed; how the game shows a runaway was not read. (8) A fight
+    # a quest starts (the hater, the Bot) puts its unit in e1 of a random
+    # layout, since the room's own layout is the pack's and these have none;
+    # the Sword's twin joins the boss in e1. (9) The Flight quest's cannon
+    # costs no food, the way a teleport does not; the flight's path was read
+    # for its health loss and not for `C_Food.Move`.
     # Settle by: reading `C_UnitLayout`'s use of `guaranteedPositions`,
-    # `C_Team.GetExperience` and `C_Player.DownGradeUnit`, and porting the
-    # remaining seven controllers.
+    # `C_Team.GetExperience`, `C_Player.DownGradeUnit`, the minimap's quest
+    # markers and `C_FlightQuest.ShootUnit`, and porting the SecretRoom quest.
     quests_partly_ported: bool = True
 
     # A fight is called a draw if neither side dies within this long. The game
