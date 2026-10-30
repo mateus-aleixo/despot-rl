@@ -42,7 +42,7 @@ STATUS_SLOT = {"stun": 0, "silence": 1, "panic": 2, "blinked": 3}
  P_UNTOUCHABLE, P_BUFF_ON_CAST, P_MULTICAST, P_BUFF_ON_DEATH, P_STICKY_BLOOD,
  P_RESURRECT, P_COMPENSATION, P_MODIFY_DAMAGE, P_CS_LINK,
  P_DEATH_DAMAGE, P_DEATH_SUMMON, P_EVASION, P_VAMPIRISM,
- P_EXPLODE, P_KNOCKBACK, P_REVENGE) = range(21)
+ P_EXPLODE, P_KNOCKBACK, P_REVENGE, P_SUSTAIN) = range(22)
 
 PASSIVE_KIND = {
     "BuffAttack": P_BUFF_ATTACK, "FearsomeAttack": P_FEARSOME,
@@ -348,6 +348,11 @@ def passive_rows(a, i: int, templates: "_Templates | None" = None) -> list[list[
         for chance, threshold, jump_back in getattr(a, "evasions", ()):
             row = blank(i, P_EVASION)
             row[3], row[8], row[10] = chance, threshold, 1.0 if jump_back else 0.0
+            rows.append(row)
+
+        if getattr(a, "sustain", 1.0) != 1.0:
+            row = blank(i, P_SUSTAIN)
+            row[8] = a.sustain
             rows.append(row)
 
         for value, pct, mask in getattr(a, "vampirisms", ()):

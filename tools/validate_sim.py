@@ -1064,6 +1064,50 @@ check("a knockback with a radius moves the victim's whole team",
       sum(1 for o in _t1 if o.knockback is not None) == len(_t1),
       f"{sum(1 for o in _t1 if o.knockback is not None)}/{len(_t1)}")
 
+# Sustain (242: slowMult 6.5, "can't be knocked down"). `C_SustainSkill.
+# OnBeforeKnockback` multiplies a decelerating knockback's acceleration by
+# slowMult, so the push stops 6.5 times sooner, and it leaves a Dodge alone, so
+# an evasion's jump back keeps its length.
+from sim.battle import JUMP_BACK_ACCEL as _JB_ACCEL
+_t0s = _mut_fight([242], item=_item_for("Warrior"))[0]
+check("a Sustain mutation reaches the agents", all(a.sustain == 6.5 for a in _t0s),
+      f"{[a.sustain for a in _t0s]}")
+_t0, _t1, _b = _mut_fight([])
+_att, _vic = _t0[0], _t1[0]
+_att.knockbacks = [(100.0, 0.0, 200.0, -300.0, 0)]
+_lengths = []
+for _sus, _ev in ((1.0, []), (6.5, []), (6.5, [(100.0, 100.0, True)])):
+    _vic.sustain, _vic.evasions, _vic.knockback = _sus, _ev, None
+    _b.hit(0, _vic, 1.0, attacker=_att)
+    _lengths.append(_vic.knockback[2] if _vic.knockback else None)
+check("Sustain: a knockback lasts 1/6.5 as long, an evasion's jump back keeps its length",
+      None not in _lengths and abs(_lengths[0] - 200.0 / 300.0) < 1e-9
+      and abs(_lengths[1] - _lengths[0] / 6.5) < 1e-9
+      and abs(_lengths[2] - _JB_SPEED / abs(_JB_ACCEL)) < 1e-9, f"{_lengths}")
+if _core_available():
+    def _sustain_fight(seed, sustain):
+        """1v1, melee, every hit a knockback, the foe holding Sustain or not."""
+        _a, _e, _bt = _mut_fight([], n=1, foes=1, seed=seed)
+        _a[0].knockbacks = [(100.0, 0.0, 200.0, -300.0, 0)]
+        _e[0].sustain = sustain
+        return _bt
+    _agree, _err, _moved = 0, [], 0
+    for _seed in range(10):
+        _res = _sustain_fight(_seed, 6.5).run()
+        _fr = _fast_battle(GRID, _sustain_fight(_seed, 6.5).agents, seed=_seed,
+                           tables=_STRICT)
+        _agree += int(_res.winner == _fr["winner"])
+        if _res.total_damage[0]:
+            _err.append(abs(_fr["damage"][0] - _res.total_damage[0])
+                        / _res.total_damage[0])
+        _plain = _sustain_fight(_seed, 1.0).run()
+        _moved += int((_plain.ticks, _plain.total_damage) != (_res.ticks, _res.total_damage))
+    _err_pct = sum(_err) / len(_err) * 100.0 if _err else 0.0
+    check("the core reproduces Sustain exactly at 1v1",
+          _agree == 10 and _err_pct < 0.01,
+          f"winners {_agree}/10, damage error {_err_pct:.2f}%")
+    check("Sustain changes the fight", _moved == 10, f"{_moved}/10 fights differ")
+
 
 print("\n== the per-unit on-death skills, in both engines ==")
 from sim.battle import place_at as _place_at

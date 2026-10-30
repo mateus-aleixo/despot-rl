@@ -86,7 +86,7 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "PlagueAntiHeal": Handler(UNIMPLEMENTED, note="swaps the Medic class skill"),
     "Untouchable": Handler(PASSIVE, note="on-damaged stat debuff on the attacker"),
     "Purification": Handler(UNIMPLEMENTED, note="status cleanse"),
-    "Sustain": Handler(UNIMPLEMENTED, note="conditional healing"),
+    "Sustain": Handler(PASSIVE, note="knockbacks cut short"),
     "Revival": Handler(UNIMPLEMENTED, note="resurrection"),
     "DeferredDamage": Handler(UNIMPLEMENTED, note="delayed damage pool"),
     "RandomDamage": Handler(UNIMPLEMENTED, note="damage variance"),
@@ -851,6 +851,9 @@ def apply_to_agents(agents: list, mutations: list[dict],
                 a.damage_bonus.append((
                     _mask(p), param(p, "Value", "value", "amount", "Amount"),
                     _is_pct(p, "percentage", "Percentage")))
+            elif name == "Sustain":
+                # `C_SustainSkill.OnBeforeKnockback`: see `Agent.sustain`.
+                a.sustain = param(p, "slowMult", default=1.0) or 1.0
             elif name == "ResurrectionChance":
                 a.resurrect = (param(p, "chance", "Chance"),
                                param(p, "healthValue", "HealthValue"),

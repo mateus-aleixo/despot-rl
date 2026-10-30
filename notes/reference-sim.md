@@ -2716,3 +2716,18 @@ agrees as the other on-death rows do (16/16 at 1v1 and 2v2, 12/16 at 4v6
 against BuffOnDeath's 12/16). On the heuristic, against not: -0.001
 [-0.006, +0.004] over 2400 seeds from 40000, 241 runs ending with it.
 
+**Sustain** (242: slowMult 6.5, Warrior, Tank, Dodger and Monk; "can't be
+knocked down"). The registry had it as "conditional healing", which it is not.
+`C_SustainSkill.OnBeforeKnockback` leaves a `Dodge` knockback (`type & 2`) and
+one with `disableGrid` set alone; otherwise it multiplies a negative
+acceleration `a` by `slowMult`, divides a positive one, and when `a` is about
+zero divides `speed` and `originalSpeed` instead. Every shipped knockback
+decelerates (EventualKnockback 236 and 338 both carry -300), so in both engines
+a knockback addon's push on a unit holding it lasts `1 / slowMult` as long
+(`P_SUSTAIN` in the core), and an evasion's jump back keeps its length.
+`tools/validate_sim.py` checks the lengths, that the core reproduces it
+exactly at 1v1, and that it changes the fight (10 of 10). No `diff_core.py`
+row, since that tool gives mutations to the squad only; the 1v1 check puts
+Sustain on the side being pushed instead. On the heuristic, against not:
+-0.000 [-0.003, +0.002] over 2400 seeds from 40000, 113 runs ending with it.
+

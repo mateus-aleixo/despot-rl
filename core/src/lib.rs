@@ -98,6 +98,8 @@ const P_EXPLODE: i32 = 18;
 const P_KNOCKBACK: i32 = 19;
 /// `C_RevengeSkill`: on death, damage to the allies around, once each.
 const P_REVENGE: i32 = 20;
+/// `C_SustainSkill`: a knockback-addon push lasts `1 / slowMult` as long.
+const P_SUSTAIN: i32 = 21;
 
 /// `DamageType`, the flags enum from the game. Only the bits the gates read.
 const DT_PHYSICAL: i32 = 1;
@@ -249,6 +251,8 @@ struct Agent {
     resurrected: bool,
     /// Holds a Revenge bonus already, which does not stack.
     revenged: bool,
+    /// Sustain's `slowMult`, 1.0 without it.
+    sustain: f32,
     death_handled: bool,
 }
 
@@ -932,10 +936,12 @@ impl Sim {
                         })
                         .collect();
                     for o in hits {
-                        self.push(o, ax, ay, speed, secs);
+                        let s = secs / self.agents[o].sustain;
+                        self.push(o, ax, ay, speed, s);
                     }
                 } else if self.agents[tgt].hp > 0.0 {
-                    self.push(tgt, ax, ay, speed, secs);
+                    let s = secs / self.agents[tgt].sustain;
+                    self.push(tgt, ax, ay, speed, s);
                 }
             }
         }
@@ -1723,6 +1729,7 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         resurrect: None,
         resurrected: false,
         revenged: false,
+        sustain: 1.0,
         death_handled: false,
     }
 }
@@ -1807,6 +1814,7 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
                 a.knockbacks
                     .push((p.chance, p.radius, p.amount, p.amount2, p.damage_mask))
             }
+            P_SUSTAIN => a.sustain = p.amount,
             _ => {}
         }
     }
