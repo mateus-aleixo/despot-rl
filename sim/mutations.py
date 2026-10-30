@@ -19,6 +19,7 @@ coverage is measurable, and an unregistered one raises.
 from __future__ import annotations
 
 import dataclasses
+import math
 import random
 from typing import Any
 
@@ -58,10 +59,10 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "SwapAttack": Handler(UNIMPLEMENTED, note="replaces the default attack"),
     "BeforeFightSummon": Handler(UNIMPLEMENTED, note="summons before the fight starts"),
     "FearsomeAttack": Handler(PASSIVE, note="on-attack fear"),
-    "ChanceIncrease": Handler(UNIMPLEMENTED, note="raises another mutation's chance"),
+    "ChanceIncrease": Handler(PASSIVE, note="raises every chance its units carry"),
+    # At fight start, against the enemy count: `underdog`.
+    "Underdog": Handler(PASSIVE, note="armour per enemy beyond the squad's count"),
     "PassiveStun": Handler(PASSIVE, note="on-attack stun"),
-    "UnderFeed": Handler(UNIMPLEMENTED, note="food economy"),
-    "Intelligence": Handler(UNIMPLEMENTED, note="mana economy"),
     "ManaBreak": Handler(PASSIVE, note="mana burn on hit"),
     "RailProjectile": Handler(UNIMPLEMENTED, note="piercing projectile"),
     "RubberProjectile": Handler(UNIMPLEMENTED, note="bouncing projectile"),
@@ -73,19 +74,23 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "SuperPunch": Handler(UNIMPLEMENTED, note="bespoke attack replacement"),
     "CooldownReduction": Handler(PASSIVE, note="scales every action's cooldown"),
     "CastSpeed": Handler(UNIMPLEMENTED, note="scales cast animation speed"),
-    "HungerFury": Handler(UNIMPLEMENTED, note="food economy"),
-    "HoboFury": Handler(UNIMPLEMENTED, note="gold economy"),
+    # Stat bonuses that follow the run: see `apply_to_specs`.
+    "HungerFury": Handler(PASSIVE, note="stat bonus by hunger level"),
+    "HoboFury": Handler(PASSIVE, note="stat bonus while the purse is nearly empty"),
+    # Run layer: `RunState.gain_experience` applies it.
+    "Intelligence": Handler(PASSIVE, note="more experience per gain"),
+    # Run layer and fight: `RunState.feed_cost` and `apply_to_specs`.
+    "UnderFeed": Handler(PASSIVE, note="food needed per move, and a slow"),
     "CSRange": Handler(UNIMPLEMENTED, note="class-skill range"),
     "ChainLightning": Handler(UNIMPLEMENTED, note="chaining projectile"),
     "PlagueAntiHeal": Handler(UNIMPLEMENTED, note="swaps the Medic class skill"),
     "Untouchable": Handler(PASSIVE, note="on-damaged stat debuff on the attacker"),
     "Purification": Handler(UNIMPLEMENTED, note="status cleanse"),
-    "Sustain": Handler(UNIMPLEMENTED, note="conditional healing"),
+    "Sustain": Handler(PASSIVE, note="knockbacks cut short"),
     "Revival": Handler(UNIMPLEMENTED, note="resurrection"),
     "DeferredDamage": Handler(UNIMPLEMENTED, note="delayed damage pool"),
     "RandomDamage": Handler(UNIMPLEMENTED, note="damage variance"),
     "MedicRetreat": Handler(UNIMPLEMENTED, note="repositioning"),
-    "Underdog": Handler(UNIMPLEMENTED, note="scales with squad deficit"),
     "Shield": Handler(UNIMPLEMENTED, note="absorb pool"),
     "Tank": Handler(UNIMPLEMENTED, note="mutation form of the Tank skill"),
     "Fireball": Handler(UNIMPLEMENTED, note="bespoke projectile"),
@@ -120,7 +125,7 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     # Verified as an on-death buff to allies in radius, but its *stat* lives on
     # the status prefab rather than in the shipped data, so there is no number
     # to implement it from.
-    "Revenge": Handler(UNIMPLEMENTED, note="on-death ally buff, stat not in the data"),
+    "Revenge": Handler(PASSIVE, note="on death, damage to the allies around, once each"),
     "Rage": Handler(UNIMPLEMENTED, note="conditional buff"),
     "Overheal": Handler(UNIMPLEMENTED, note="excess healing becomes a pool"),
     "PassiveBlock": Handler(UNIMPLEMENTED, note="conditional mitigation"),
@@ -130,7 +135,11 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "HumanBlinkAway": Handler(UNIMPLEMENTED, note="displacement"),
     "BlindingLightning": Handler(UNIMPLEMENTED, note="bespoke projectile"),
     "LightningChance": Handler(UNIMPLEMENTED, note="bespoke projectile"),
-    "FoodPackHeal": Handler(UNIMPLEMENTED, note="food economy, outside a fight"),
+    # Not a fight effect either: `C_FoodPackHealMutation.UpdateHealth` heals
+    # every unit `goldSpent * koefficient` percent of its health whenever a
+    # food pack is bought, which `RunState.apply("buy_food")` does. It was
+    # worth nothing while every fight started at full health.
+    "FoodPackHeal": Handler(NOOP, note="run layer: buying food heals the squad"),
     "Combined": Handler(UNIMPLEMENTED, note="composite of child mutations"),
 }
 
@@ -145,8 +154,40 @@ def handler_for(name: str) -> Handler:
 
 
 def mutation_params(m: dict) -> dict[str, Any]:
-    return {m[f"Param{i}Name"]: m[f"Param{i}Value"]
-            for i in range(1, 9) if m.get(f"Param{i}Name")}
+    """The row's parameters, plus the model defaults it leaves out
+    (`sim/model_defaults.py`)."""
+    from .model_defaults import with_model_defaults
+    return with_model_defaults(m.get("Name"), {
+        m[f"Param{i}Name"]: m[f"Param{i}Value"]
+        for i in range(1, 9) if m.get(f"Param{i}Name")})
+
+
+# `Const.UpgradedClassValues`, built in `Const..cctor` as Class 2 to 11: the
+# classes a "random" mutation can be offered for.
+UPGRADED_CLASSES = ("Tank", "Warrior", "Dodger", "Monk", "Medic", "Thrower",
+                    "Shooter", "Cultist", "Mage", "Scientist")
+
+
+def offer_classes(row: dict) -> list[str]:
+    """`C_Mutations.ExtractClasses`: the classes a mutation row can be offered
+    for, each its own (id, class) pair.
+
+    "all" is the single pair `Class.Empty`, which covers every unit; "random"
+    is every class in `UPGRADED_CLASSES`; a comma list is its classes; a name
+    is itself. `Class` is not a flags enum, so an offered mutation carries one
+    class and covers that class alone.
+    """
+    spec = str(row.get("Class") or "All").strip()
+    if spec.lower() == "all":
+        return ["All"]
+    if spec.lower() == "random":
+        return list(UPGRADED_CLASSES)
+    return [c.strip() for c in spec.split(",") if c.strip()]
+
+
+def for_class(row: dict, cls: str) -> dict:
+    """A mutation as it is offered and held: its row with its one class."""
+    return {**row, "Class": cls}
 
 
 def by_id(tables: dict) -> dict[int, dict]:
@@ -201,7 +242,8 @@ def apply_stat_bonus(spec, params: dict):
 
 
 def apply_to_specs(specs: list, mutations: list[dict],
-                   rng: random.Random | None = None) -> list:
+                   rng: random.Random | None = None, gold: float | None = None,
+                   hunger: int | None = None) -> list:
     """Apply the stat-changing mutations to a squad's specs.
 
     Returns new specs; the originals are untouched. Everything that is a hook
@@ -213,6 +255,23 @@ def apply_to_specs(specs: list, mutations: list[dict],
     a single randomly chosen member of its class, by `bonus x count(otherClass)`
     -- the game applies it at fight start and re-picks when that unit dies, so
     reading it as a standing pre-fight change is the approximation here.
+
+    Two more follow the run, and need its state: `gold` and `hunger` (the
+    food's hunger level). Without them they do nothing.
+
+      * `HoboFury`: `C_HoboFuryMutation.OnGold` turns a `StatBonus` status on
+        for every live unit while `goldAmount >= floor(gold)` and off again
+        above it. The shipped row is Damage +30, flat, at 10 gold or less.
+      * `UnderFeed` slows every covered unit by `slowValue` percent in a
+        fight ("UnderFeeding", a `StatBonus` on Speed); its other half, the
+        food, is `under_feed` on `RunState.feed_cost`.
+      * `HungerFury` hands its units `C_HungerFurySkill`, whose
+        `Food_HungerLevelChanged` sets the bonus to nothing at hunger level 0,
+        `lowValue` at 1 and `highValue` above. The shipped row is AttackSpeed
+        +40% and +60%.
+
+    Gold and hunger change between fights and not inside one here, so the
+    bonus is read once, when the squad's specs are built for the fight.
     """
     rng = rng or random.Random(0)
     classes = sorted({s.cls for s in specs})
@@ -234,7 +293,47 @@ def apply_to_specs(specs: list, mutations: list[dict],
             bonus = class_diversity_bonus(out, p)
             if i >= 0 and bonus:
                 out[i] = apply_stat_bonus(out[i], dict(p, bonus=bonus))
+        elif name == "HoboFury":
+            if gold is not None and param(p, "goldAmount") >= math.floor(gold):
+                out = [apply_stat_bonus(s, p) if applies_to(m, s.cls, rng) else s
+                       for s in out]
+        elif name == "UnderFeed":
+            slow = param(p, "slowValue")
+            if slow:
+                bonus = {"stat": "Speed", "value": -slow,
+                         "percentage": p.get("percentage", "true")}
+                out = [apply_stat_bonus(s, bonus) if applies_to(m, s.cls, rng) else s
+                       for s in out]
+        elif name == "HungerFury":
+            if hunger:
+                value = param(p, "lowValue") if hunger == 1 else param(p, "highValue")
+                bonus = dict(p, value=value)
+                out = [apply_stat_bonus(s, bonus) if applies_to(m, s.cls, rng) else s
+                       for s in out]
     return out
+
+
+def under_feed(needed: int, params: dict) -> int:
+    """`C_UnderFeedMutation.Modify`, the compositor on `M_Food.needed`.
+
+    `needed * (1 - value / 100)` when `percentage` (the model's default),
+    `needed - value` otherwise, through `Math.Round` (to even) and up to at
+    least 1. When the rounding leaves the number where it was and it is above
+    1, it moves one step the way `value` points, so a small cut on a small
+    squad still cuts.
+    """
+    v = param(params, "value")
+    pct = str(params.get("percentage", "true")).lower() == "true"
+    out = max(1, int(round(needed * (1.0 - v / 100.0) if pct else needed - v)))
+    if out == needed and needed > 1:
+        out += -1 if v > 0 else (1 if v < 0 else 0)
+    return out
+
+
+def hobo_fury_active(mutations: list[dict], gold: float) -> tuple:
+    """Which held `HoboFury` mutations are on at this purse, for a cache key."""
+    return tuple(param(mutation_params(m), "goldAmount") >= math.floor(gold)
+                 for m in mutations if m["Name"] == "HoboFury")
 
 
 # The stats a mutation can move that this sim resolves into a spec, and what a
@@ -338,7 +437,11 @@ def effect_on(specs: list, mutation: dict,
 ON_ATTACK = ("BuffAttack", "FearsomeAttack", "PassiveStun", "ManaBreak")
 ON_DAMAGED = ("Craggy", "Untouchable")
 ON_CAST = ("BuffOnCasted", "MultiCast")
-ON_DEATH = ("BuffOnDeath", "StickyBlood")
+ON_DEATH = ("BuffOnDeath", "StickyBlood", "Revenge")
+
+# `C_RevengeSkill.OnDeath` builds its status with duration -1, for the rest
+# of the fight; both engines read this stand-in for "never runs out".
+REVENGE_DURATION = 1e9
 STANDING = ("Compensation",)
 
 # Every mutation that lands as an agent-level passive rather than a stat. The
@@ -418,6 +521,83 @@ def _gate(battle, params: dict, dtype: int, name: str = "") -> bool:
     return chance >= 100.0 or battle.rng.random() * 100.0 < chance
 
 
+def chance_bonuses(mutations: list[dict], cls: str) -> list[tuple[float, bool]]:
+    """The held ChanceIncrease mutations covering `cls`, as (value, percentage)."""
+    out = []
+    for m in mutations:
+        if m["Name"] == "ChanceIncrease" and applies_to(m, cls):
+            p = mutation_params(m)
+            out.append((param(p, "value"),
+                        str(p.get("percentage", "true")).lower() == "true"))
+    return out
+
+
+def boost_chance(chance: float, bonuses) -> float:
+    """`C_ChanceIncreaseSkill.Modify`: `chance * (1 + value / 100)` with
+    `percentage`, `chance + value` without, held to 0..100, once per bonus."""
+    for value, pct in bonuses:
+        chance = chance * (1.0 + value / 100.0) if pct else chance + value
+        chance = min(100.0, max(0.0, chance))
+    return chance
+
+
+def _boost_hook(name: str, p: dict, bonuses) -> dict:
+    for key in CHANCE_PARAM.get(name, ("chance", "Chance")):
+        if p.get(key) is not None:
+            return {**p, key: boost_chance(float(p[key]), bonuses)}
+    return p      # no chance named: the default 100 stays 100
+
+
+def boost_agent_chances(agent, bonuses) -> None:
+    """ChanceIncrease on one unit, after its skills and mutations are on it.
+
+    `C_ChanceIncreaseSkill` decorates the `chance` of every action and
+    passive skill its unit has or gains (`IProbable`), and the mutation side
+    the `chance` of every held mutation, so here every chance the agent
+    carries goes through `boost_chance` once: the crit, each evasion,
+    knockback and explosion, the resurrection, and the hooks' rolls. Whether
+    a mutation's own skill gets the bonus twice, once on the mutation and
+    once on the unit's copy, was not read (`chance_increase_applies_once`).
+    """
+    if not bonuses:
+        return
+    if agent.crit_chance:
+        agent.crit_chance = boost_chance(agent.crit_chance, bonuses)
+    agent.evasions = [(boost_chance(c, bonuses), t, j) for c, t, j in agent.evasions]
+    agent.knockbacks = [(boost_chance(c, bonuses), r, s, a, m)
+                        for c, r, s, a, m in agent.knockbacks]
+    agent.explodes = [(d, r, boost_chance(c, bonuses), m) for d, r, c, m in agent.explodes]
+    if agent.resurrect:
+        c, hp, pct = agent.resurrect
+        agent.resurrect = (boost_chance(c, bonuses), hp, pct)
+    for attr in ("on_attack", "on_damaged", "on_cast"):
+        setattr(agent, attr, [(n, _boost_hook(n, p, bonuses)) for n, p in getattr(agent, attr)])
+
+
+def underdog(team0: list, n_enemies: int, mutations: list[dict]) -> None:
+    """`C_UnderdogMutation.OnFightBegin`, once the fight's agents are built.
+
+    With `diff` the enemy team's unit count less the squad's, a positive
+    `diff` gives every covered unit an "Underdog" `StatBonus` of
+    `amount * diff * coefficient`, flat, on the row's stat (Armor; the
+    model's `coefficient` defaults to 1). The units counted are the ones in
+    the fight at its start, summoned allies included.
+    """
+    diff = n_enemies - len(team0)
+    if diff <= 0:
+        return
+    for m in mutations:
+        if m["Name"] != "Underdog":
+            continue
+        p = mutation_params(m)
+        bonus = {"stat": p.get("stat") or "Armor",
+                 "value": param(p, "amount") * diff * param(p, "coefficient", default=1.0),
+                 "percentage": "false"}
+        for a in team0:
+            if applies_to(m, a.spec.cls):
+                a.spec = apply_stat_bonus(a.spec, bonus)
+
+
 def status_stats(params: dict, numbered: bool = False) -> tuple:
     """The (stat, amount, percentage) triples a status carries.
 
@@ -476,11 +656,10 @@ def fire_on_damaged(battle, victim, attacker, dtype: int) -> None:
             continue
         duration = param(p, "duration", "Duration")
         if name == "Craggy":
-            # DebuffType is None/Stun/Silence, and the property carries a
-            # [DefaultValue] this dump does not give. The shipped row without
-            # one is a 30% reaction to physical damage, which would do nothing
-            # at all if the default were None, so it is read as Stun.
-            debuff = str_param(p, "debuff", "Debuff", default="Stun")
+            # DebuffType is None/Stun/Silence, and the model's default is
+            # Stun (`sim/model_defaults.py`).
+            from .model_defaults import CRAGGY_DEBUFF
+            debuff = str_param(p, "debuff", "Debuff", default=CRAGGY_DEBUFF)
             attacker.apply_status("silence" if debuff == "Silence" else "stun",
                                   duration)
         elif name == "Untouchable":
@@ -511,6 +690,20 @@ def fire_on_cast(battle, agent, action) -> None:
 def run_death_passives(agent, battle) -> None:
     """`C_BaseOnDeathSkill.OnDeath`, once, after the unit is confirmed dead."""
     for name, p in agent.on_death_passives:
+        if name == "Revenge":
+            # `C_RevengeSkill.OnDeath`: every living ally within `radius` of
+            # the dead unit gets a "Revenge" status of `amount` damage for the
+            # rest of the fight ("increase the damage of allies"), and an ally
+            # that has one gets no second ("this bonus doesn't stack").
+            r2 = param(p, "radius") ** 2
+            for o in battle.agents:
+                if o.team != agent.team or not o.alive or o.revenged:
+                    continue
+                if (o.x - agent.x) ** 2 + (o.y - agent.y) ** 2 <= r2:
+                    o.revenged = True
+                    battle.add_stat_buff(o, REVENGE_DURATION,
+                                         (("damage", param(p, "amount"), False),))
+            continue
         duration = param(p, "duration", "Duration")
         stats = status_stats(p)
         if not stats:
@@ -658,6 +851,9 @@ def apply_to_agents(agents: list, mutations: list[dict],
                 a.damage_bonus.append((
                     _mask(p), param(p, "Value", "value", "amount", "Amount"),
                     _is_pct(p, "percentage", "Percentage")))
+            elif name == "Sustain":
+                # `C_SustainSkill.OnBeforeKnockback`: see `Agent.sustain`.
+                a.sustain = param(p, "slowMult", default=1.0) or 1.0
             elif name == "ResurrectionChance":
                 a.resurrect = (param(p, "chance", "Chance"),
                                param(p, "healthValue", "HealthValue"),

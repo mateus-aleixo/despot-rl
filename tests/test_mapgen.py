@@ -5,8 +5,10 @@ import random
 import pytest
 
 from sim.mapgen import (DIRS, MIN_PORTAL_DISTANCE, Generator, choose_diverse_positions,
-                        choose_portals, generate, min_finish_distance, portals_count,
-                        room_count, room_name, shop_spread, start_is_portal)
+                        choose_portals, choose_quest_extra_room, choose_quest_room,
+                        directions, generate, min_finish_distance, portals_count,
+                        quest_reachable, room_count, room_name, shop_spread,
+                        start_is_portal)
 
 # Shaped like `M_Levels` rows: level 1 is exactly 7 rooms; later levels draw a range.
 SMALL = {"ID": 1, "MinRooms": 7, "MaxRooms": 7, "ItemShops": 1, "FoodShops": 1,
@@ -61,10 +63,11 @@ def test_level_shape(row, seed):
                 todo.append(n)
     assert seen == cells
 
-    # `CheckNeighborCount`, and the 2x2 rationing that keeps levels thin.
-    assert all(len(neighbours(cells, p)) <= 3 for p in cells)
+    # The 2x2 rationing that keeps levels thin. `MaybeMakeRoom` holds growth and
+    # `Adjust` to it; `CloseLoops` writes rooms directly and can add a block.
+    # Nothing bounds a room's neighbours (`CheckNeighborCount` has no caller).
     squares = sum(1 for r, c in cells if {(r + 1, c), (r, c + 1), (r + 1, c + 1)} <= cells)
-    assert squares <= len(rooms) // 10 + 1
+    assert squares <= len(rooms) // 10 + 2
 
     assert rooms[level["start"]][2] == "start" and rooms[level["boss"]][2] == "boss"
     assert level["start"] != level["boss"]
@@ -74,16 +77,17 @@ def test_level_shape(row, seed):
     assert kinds["mutation"] == row.get("Shrines", 0)
     assert kinds["mutation_shop"] == row.get("RerollShrines", 0)
 
-    # Portals: between two and `portalsCount + 1`, never on the boss, all at
-    # least `minPortalDistance` apart by doors, and the start one exactly when
-    # the level is 5 or 9.
+    # Portals: none (a step that lands fewer than two is undone, which a compact
+    # small level can force) or between two and `portalsCount + 1`, never on
+    # the boss, all at least `minPortalDistance` apart by doors, and the start
+    # one exactly when the level is 5 or 9.
     dist = door_distances(cells)
     portals = [rooms[p][:2] for p in level["portals"]]
-    assert 2 <= len(portals) <= portals_count(len(rooms)) + 1
+    assert not portals or 2 <= len(portals) <= portals_count(len(rooms)) + 1
     assert rooms[level["boss"]][:2] not in portals
     assert all(dist[a][b] >= MIN_PORTAL_DISTANCE
                for i, a in enumerate(portals) for b in portals[i + 1:])
-    assert (level["start"] in level["portals"]) == start_is_portal(row["ID"])
+    assert not portals or (level["start"] in level["portals"]) == start_is_portal(row["ID"])
 
     # The finish can see `minFinishDistance`; every level after the first
     # opens in an item shop.
@@ -195,3 +199,84 @@ def test_articulation_points():
     bowtie = {"x": ["a", "b", "c", "d"], "a": ["x", "b"], "b": ["a", "x"],
               "c": ["x", "d"], "d": ["c", "x"]}
     assert gen.articulation_points(bowtie) == {"x"}
+
+
+# A T on the grid: a row of four rooms with one room hanging under the second.
+#
+#     (0,0) (0,1) (0,2) (0,3)
+#           (1,1)
+T_SHAPE = {(0, 0): [(0, 1)], (0, 1): [(0, 0), (0, 2), (1, 1)],
+           (0, 2): [(0, 1), (0, 3)], (0, 3): [(0, 2)], (1, 1): [(0, 1)]}
+
+
+def test_quest_room_doors_must_fit_the_prefab():
+    cells = sorted(T_SHAPE)
+    # Rows count down from the top, so the room under (0, 1) is `Down` of it.
+    assert directions((0, 1), T_SHAPE) == {"Left", "Right", "Down"}
+    assert directions((1, 1), T_SHAPE) == {"Up"}
+    # Doors only Up and Left (Sci's prefab): the room hanging below, and (0, 3),
+    # whose one door is on its left. Never the hub, which has three.
+    sci = {"Name": "Sci", "Doors": ["Up", "Left"]}
+    got = {choose_quest_room(cells, {}, T_SHAPE, sci, random.Random(s)) for s in range(40)}
+    assert got == {(1, 1), (0, 3)}
+    # A guaranteed door must be there: Rat wants `Down`, which only the hub has.
+    rat = {"Name": "Rat", "Doors": ["Left", "Right", "Down"], "GuaranteedDoors": ["Down"]}
+    assert choose_quest_room(cells, {}, T_SHAPE, rat, random.Random(0)) == (0, 1)
+    # A typed room is never a candidate, and none fitting fails the step.
+    assert choose_quest_room(cells, {(0, 1): "start"}, T_SHAPE, rat, random.Random(0)) is None
+    # Flight takes the leftmost candidate, not a draw.
+    flight = {"Name": "Flight", "Doors": ["Left", "Right", "Up", "Down"]}
+    assert all(choose_quest_room(cells, {}, T_SHAPE, flight, random.Random(s)) == (0, 0)
+               for s in range(10))
+
+
+def test_quest_extra_room_is_a_far_dead_end_or_corridor():
+    cells = sorted(T_SHAPE)
+    dist = {p: bfs(T_SHAPE, p) for p in cells}
+    gen = Generator(7, random.Random(0))
+    arts = gen.articulation_points(T_SHAPE)
+    n_count = lambda p: len(T_SHAPE[p])
+    kinds = {(1, 1): "quest"}
+    # Not an articulation point, one or two doors, more than one room from the
+    # quest room: (0, 0) and (0, 3) are two away; (0, 1) is an articulation
+    # point and next door anyway, (0, 2) is an articulation point.
+    got = {choose_quest_extra_room(cells, kinds, dist, arts, n_count, (1, 1),
+                                   {"Name": "Cube"}, random.Random(s)) for s in range(40)}
+    assert got == {(0, 0), (0, 3)}
+    # Flight takes the rightmost candidate, and only when it lies left of the
+    # quest room. From (1, 1) the rightmost is (0, 3), to its right: nothing.
+    # On a corridor with the quest room at the right end, (0, 1) is the
+    # rightmost room far enough away, and it lies left of it.
+    flight = {"Name": "Flight"}
+    assert choose_quest_extra_room(cells, {(1, 1): "quest"}, dist, arts, n_count,
+                                   (1, 1), flight, random.Random(0)) is None
+    wide = {(0, 0): [(0, 1)], (0, 1): [(0, 0), (0, 2)], (0, 2): [(0, 1), (0, 3)],
+            (0, 3): [(0, 2)]}
+    wdist = {p: bfs(wide, p) for p in wide}
+    assert choose_quest_extra_room(sorted(wide), {(0, 3): "quest"}, wdist, set(),
+                                   lambda p: len(wide[p]), (0, 3), flight,
+                                   random.Random(0)) == (0, 1)
+
+
+def test_quest_needs_a_way_in_past_the_boss_and_the_extra_rooms():
+    # The quest room (0, 3) is reached from the start (0, 0) only through (0, 1)
+    # and (0, 2).
+    assert quest_reachable(T_SHAPE, (0, 0), (0, 3), set())
+    assert not quest_reachable(T_SHAPE, (0, 0), (0, 3), {(0, 2)})
+    assert not quest_reachable(T_SHAPE, (1, 1), (0, 3), {(0, 1)})
+    # Next door to the start is always reachable.
+    assert quest_reachable(T_SHAPE, (0, 2), (0, 3), {(0, 1)})
+
+
+def test_a_quest_level_places_its_rooms():
+    quest = {"Name": "Cube", "Doors": ["Up", "Down", "Left", "Right"], "ExtraRooms": 1}
+    for seed in range(10):
+        level = generate(LARGE, random.Random(seed), quest=quest)
+        kinds = collections.Counter(k for _, _, k in level["rooms"].values())
+        assert kinds["quest"] == 1 and kinds["quest_extra"] == 1
+        assert level["quest_room"] in level["rooms"]
+        assert level["quest_extras"] and level["quest_extras"][0] in level["rooms"]
+        assert not set(level["portals"]) & {level["quest_room"], *level["quest_extras"]}
+    # No quest, no quest rooms.
+    plain = generate(LARGE, random.Random(0))
+    assert plain["quest_room"] is None and plain["quest_extras"] == []

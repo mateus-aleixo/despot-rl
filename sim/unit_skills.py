@@ -175,29 +175,35 @@ def evasion_entry(params: dict) -> tuple[float, float, bool]:
 
     Both extra properties carry `[DefaultValueAttribute]` and most rows omit
     them. `OnHealthChanged` computes `_active = healthThreshold >= health%`,
-    so the default has to be at or above 100 for a plain evasion to work at
-    full health; `evasion_health_threshold_default` says so and why.
+    and the model's default is 100, so a plain evasion works at full health
+    (`sim/model_defaults.py`).
     """
-    from .assumptions import DEFAULT
+    from .model_defaults import EVASION_HEALTH_THRESHOLD
     return (param(params, "chance", "Chance"),
             param(params, "healthThreshold", "HealthThreshold",
-                  default=DEFAULT.evasion_health_threshold_default),
+                  default=EVASION_HEALTH_THRESHOLD),
             str(str_param(params, "jumpBack", "JumpBack", default="")).lower() == "true")
 
 
-def vampirism_entry(params: dict) -> tuple[float, bool]:
-    """One `M_VampirismSkill` row: `value`, and whether it is a percentage.
+def vampirism_entry(params: dict) -> tuple[float, bool, int]:
+    """One `M_VampirismSkill` row: `value`, whether it is a percentage, and
+    the damage type it feeds on.
 
     Every row in `Skills.json` and `Mutations.json` names the number `value`,
     never `percent`: reading it as `percent` is how this fired nowhere at all.
-    Only the FixedVampirism rows carry `percentage: false`, so the default is
-    a percentage share (`vampirism_percentage_default`).
+    Only the FixedVampirism rows carry `percentage: false`, and the model's
+    default is true, a percentage share. No shipped row names
+    a `damageType`, so every one takes the model's Physical
+    (`sim/model_defaults.py`): `C_VampirismSkill.OnDamageCreated` attaches the
+    heal only to damage carrying that type and not `Secondary`.
     """
-    from .assumptions import DEFAULT
+    from .model_defaults import VAMPIRISM_PERCENTAGE, with_model_defaults
+    from .mutations import _mask
     pct = str_param(params, "percentage", "Percentage")
     return (param(params, "value", "Value", default=0.0),
-            DEFAULT.vampirism_percentage_default if pct is None
-            else str(pct).lower() == "true")
+            VAMPIRISM_PERCENTAGE if pct is None
+            else str(pct).lower() == "true",
+            _mask(with_model_defaults("Vampirism", params)))
 
 
 def explode_entry(params: dict) -> tuple[float, float, float, int]:
@@ -429,6 +435,8 @@ def apply_unit_skills(agent, tables: dict) -> list:
             n = row.get(f"Param{i}Name")
             if n:
                 p[n] = row.get(f"Param{i}Value")
+        from .model_defaults import with_model_defaults
+        p = with_model_defaults(cs, p)
 
         if h.kind in (NOOP, UNIMPLEMENTED):
             continue

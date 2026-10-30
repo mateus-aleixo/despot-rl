@@ -507,6 +507,41 @@ print(f"      {_mt} definitions: " + ", ".join(
     f"{k} {v}" for k, v in sorted(_mc['by_kind'].items(), key=lambda x: -x[1])))
 print(f"      handled {_mh}/{_mt} = {_mh/_mt*100:.0f}%  (mutations are mostly bespoke)")
 
+# An offer is one (id, class) pair (`C_Mutations.ExtractClasses`,
+# `TryGetTreasureParameters`): "All" is the one pair that covers every unit,
+# "Random" any of the ten upgraded classes, a list any one of its classes.
+from sim.mutations import UPGRADED_CLASSES as _UPG
+from sim.mutations import offer_classes as _offer_classes
+check("a mutation is offered per class: All once, Random ten ways, a list per entry",
+      _offer_classes({"Class": "All"}) == ["All"]
+      and _offer_classes({"Class": "Random"}) == list(_UPG) and len(_UPG) == 10
+      and _offer_classes({"Class": "Warrior,Tank"}) == ["Warrior", "Tank"])
+from sim.run import RunState as _RS
+_rp = _RS.new(_STRICT, seed=8)
+_rp.level = 5
+_pool5 = _rp.mutation_pool()
+_multi = next(r for r, c in _pool5 if len(_offer_classes(r)) > 1)
+_two = _offer_classes(_multi)[:2]
+_rp.mutations = [dict(_multi, Class=_two[0])]
+_after = {(r["ID"], c) for r, c in _rp.mutation_pool()}
+check("a held pair is not offered again, the same mutation for another class is",
+      (_multi["ID"], _two[0]) not in _after and (_multi["ID"], _two[1]) in _after)
+_shelf = _rp.draw_mutations(next(iter(_rp.rooms.rooms.values())))
+check("a shelf shows single-class offers, no pair twice",
+      all("," not in m["Class"] and m["Class"] != "Random" for m in _shelf)
+      and len({(m["ID"], m["Class"]) for m in _shelf}) == len(_shelf), f"{len(_shelf)}")
+# the history: two pairs, drawn in turn far more than by chance
+_ra = _RS.new(_STRICT, seed=9)
+_duo = [(_multi, _two[0]), (_multi, _two[1])]
+_seq = [_ra.draw_mutation(_duo)["Class"] for _ in range(200)]
+_gap, _widest = 0, 0
+for _c in _seq:
+    _gap += 1 if _c == _two[0] else -1
+    _widest = max(_widest, abs(_gap))
+check("the pair draw weighs history: two pairs never drift far apart "
+      "(a fair coin's widest gap over 200 draws is about 17)",
+      _widest <= 6, f"widest gap {_widest}")
+
 check("mutations are offered per level", len(offered_at_level(_STRICT, 1)) > 0
       and len(offered_at_level(_STRICT, 12)) > len(offered_at_level(_STRICT, 1)),
       f"L1 {len(offered_at_level(_STRICT, 1))}, L12 {len(offered_at_level(_STRICT, 12))}")
@@ -527,6 +562,62 @@ check("a timed StatBonus does not change the spec",
       all(a.damage == b.damage and a.attack_speed == b.attack_speed
           for a, b in zip(_specs, _after2)),
       f"{len(_timed)} timed definitions")
+
+# The two that follow the run. HoboFury (239): Damage +30 while
+# `goldAmount >= floor(gold)`; HungerFury (227): AttackSpeed +40% at hunger
+# level 1 and +60% above, nothing when fed.
+_hobo = next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 239)
+_hf = next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 227)
+_d0 = _specs[0].damage
+_hob = [apply_to_specs(_specs, [_hobo], random.Random(0), gold=g)[0].damage
+        for g in (10.99, 11.0)]
+check("HoboFury adds 30 Damage at 10.99 gold and nothing at 11",
+      _hob == [_d0 + 30.0, _d0], f"{_d0} -> {_hob}")
+_as0 = _specs[0].attack_speed
+_hfs = [apply_to_specs(_specs, [_hf], random.Random(0), hunger=h)[0].attack_speed
+        for h in (0, 1, 2)]
+check("HungerFury is nothing fed, +40% attack speed at hunger 1 and +60% beyond",
+      abs(_hfs[0] - _as0) < 1e-9 and abs(_hfs[1] - _as0 * 1.4) < 1e-9
+      and abs(_hfs[2] - _as0 * 1.6) < 1e-9, f"{_as0} -> {_hfs}")
+from sim.run import RunState as _RS
+_rs = _RS.new(_STRICT, seed=5)
+_rs.squad = [_rs.squad[0]]
+_rs.mutations = [_hobo]
+_rs.gold = 3.0
+_poor = _rs.specs_cached()[0].damage
+_rs.gold = 50.0
+_rich = _rs.specs_cached()[0].damage
+check("a run's own purse switches HoboFury, cache and all", _poor == _rich + 30.0,
+      f"{_poor} at 3 gold, {_rich} at 50")
+
+# Intelligence (289: +50%, every class) composes the unit's experience: a
+# gain of g lands as 1.5 g, bought or earned.
+_ri = _RS.new(_STRICT, seed=6)
+_ri.squad = [_ri.squad[0]]
+_ri.squad[0].experience, _ri.squad[0].level = 0.0, 1
+_ri.gain_experience(4.0)
+_plain_exp = _ri.squad[0].experience
+_ri.squad[0].experience, _ri.squad[0].level = 0.0, 1
+_ri.mutations = [next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 289)]
+_ri.gain_experience(4.0)
+check("Intelligence turns 4 experience into 6", _plain_exp == 4.0
+      and abs(_ri.squad[0].experience - 6.0) < 1e-9, f"{_ri.squad[0].experience}")
+
+# UnderFeed: 269 eats 20% less and slows 30% in a fight; 286 eats 10% more.
+# The compositor on `M_Food.needed` rounds to even, keeps at least 1, and
+# steps once when rounding would leave a number above 1 unchanged.
+from sim.mutations import under_feed as _uf
+check("UnderFeed's food: 20% less is 1,1,2,3,4,8 for 1,2,3,4,5,10 humans",
+      [_uf(n, {"value": 20}) for n in (1, 2, 3, 4, 5, 10)] == [1, 1, 2, 3, 4, 8])
+check("and 10% more is 1,3,5,6,11 for 1,2,4,5,10 (5.5 rounds to 6, to even)",
+      [_uf(n, {"value": -10}) for n in (1, 2, 4, 5, 10)] == [1, 3, 5, 6, 11])
+_ru = _RS.new(_STRICT, seed=7)
+_ru.squad = _ru.squad[:1] * 5
+_ru.mutations = [next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 269)]
+_slow = apply_to_specs(_specs, _ru.mutations, random.Random(0))
+check("the run feeds 4 for 5 humans, and the squad fights 30% slower",
+      _ru.feed_cost == 4.0 and abs(_slow[0].speed - _specs[0].speed * 0.7) < 1e-9,
+      f"{_ru.feed_cost}, speed {_specs[0].speed} -> {_slow[0].speed}")
 
 # and it becomes a castable action instead
 _rngM = random.Random(2)
@@ -779,11 +870,13 @@ from sim.unit_skills import vampirism_entry as _vampirism_entry
 # Every shipped row names the number `value`, never `percent`. Reading it as
 # `percent` is why vampirism healed exactly nothing, in the oracle and in the
 # core, from the day it was "ported" until this check existed.
-check("a Vampirism row reads its value, not a percent",
-      _vampirism_entry({"value": 5}) == (5.0, True),
+check("a Vampirism row reads its value, not a percent, and feeds on physical damage",
+      _vampirism_entry({"value": 5}) == (5.0, True, _DT_PHY),
       f"{_vampirism_entry({'value': 5})}")
 check("FixedVampirism is a flat heal",
-      _vampirism_entry({"value": 15, "percentage": "false"}) == (15.0, False))
+      _vampirism_entry({"value": 15, "percentage": "false"})[:2] == (15.0, False))
+check("a row that names its damage type keeps it",
+      _vampirism_entry({"value": 5, "damageType": "Magical"})[2] == _DT_MAG)
 check("an Evasion row carries chance, threshold and jumpBack",
       _evasion_entry({"chance": 35, "healthThreshold": 30}) == (35.0, 30.0, False)
       and _evasion_entry({"chance": 40, "jumpBack": "true"})[2] is True,
@@ -793,7 +886,7 @@ check("an absent healthThreshold leaves the skill always on",
 
 _t0, _t1, _b = _mut_fight([23])          # Vampirism, a 5% share of the damage
 check("a Vampirism mutation reaches the agents",
-      all(a.vampirisms == [(5.0, True)] for a in _t0), f"{_t0[0].vampirisms}")
+      all(a.vampirisms == [(5.0, True, _DT_PHY)] for a in _t0), f"{_t0[0].vampirisms}")
 _b.run()
 check("vampirism heals the squad that carries it", _b.healing_done[0] > 0.0,
       f"{_b.healing_done[0]:.1f} healed")
@@ -802,6 +895,80 @@ check("vampirism never heals past the ceiling",
 _t0n, _t1n, _bn = _mut_fight([])
 _bn.run()
 check("the same fight without it heals nothing", _bn.healing_done[0] == 0.0)
+
+# ChanceIncrease (215: +15%, every class) raises every chance a unit carries,
+# clamped at 100: LastSecondChance's 35% evasion (221) becomes 40.25%.
+from sim.mutations import boost_agent_chances as _boost, chance_bonuses as _bonuses
+_ci = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 215]
+_t0c, _t1c, _bc = _mut_fight([221])
+_before = [e[0] for e in _t0c[0].evasions]
+_boost(_t0c[0], _bonuses(_ci, _t0c[0].spec.cls))
+# Revenge (316: radius 100, +80 damage): a death hands every living ally in
+# the radius the bonus for the rest of the fight, and a second death adds
+# nothing to an ally that has it.
+from sim.mutations import run_death_passives as _rdp
+_t0r, _t1r, _br = _mut_fight([], n=3, foes=2)
+_dead, _near, _far = _t0r
+_near.x, _near.y = _dead.x + 50.0, _dead.y
+_far.x, _far.y = _dead.x + 150.0, _dead.y
+_dead.on_death_passives = [("Revenge", {"radius": 100, "amount": 80})]
+_dmg0 = (_near.damage, _far.damage)
+_rdp(_dead, _br)
+_dmg1 = (_near.damage, _far.damage)
+_rdp(_dead, _br)
+check("Revenge: +80 damage to an ally 50 away, none 150 away, and no second helping",
+      _dmg1 == (_dmg0[0] + 80.0, _dmg0[1]) and _near.damage == _dmg1[0],
+      f"{_dmg0} -> {_dmg1} -> {(_near.damage, _far.damage)}")
+
+# Underdog (259: +10 armour per enemy beyond the squad's count) at fight start.
+from sim.mutations import underdog as _underdog
+_ud = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 259]
+_t0u, _t1u, _bu = _mut_fight([], n=4, foes=6)
+_a0 = _t0u[0].armor
+_underdog(_t0u, len(_t1u), _ud)
+_a1 = _t0u[0].armor
+_t0e, _t1e, _be = _mut_fight([], n=4, foes=4)
+_underdog(_t0e, len(_t1e), _ud)
+check("Underdog: 4 against 6 is +20 armour each, 4 against 4 nothing",
+      abs(_a1 - _a0 - 20.0) < 1e-9 and abs(_t0e[0].armor - _a0) < 1e-9,
+      f"{_a0} -> {_a1}, even {_t0e[0].armor}")
+
+check("ChanceIncrease turns a 35% evasion into 40.25%",
+      _before == [35.0] and abs(_t0c[0].evasions[0][0] - 40.25) < 1e-9,
+      f"{_before} -> {[e[0] for e in _t0c[0].evasions]}")
+
+# `C_VampirismSkill.OnDamageCreated` attaches the heal only to damage of the
+# model's type, Physical unless the row says otherwise, and never to
+# `Secondary` damage: a magical hit or a splash feeds nobody.
+_t0, _t1, _b = _mut_fight([23])
+_va, _vt = _t0[0], _t1[0]
+_va.hp = _va.max_hp * 0.5
+_hp0 = _va.hp
+_b.hit(0, _vt, 50.0, magical=True, attacker=_va)
+_mag = _va.hp - _hp0
+_b.hit(0, _vt, 50.0, magical=False, attacker=_va, dtype=_DT_PHY | _DT_SEC)
+_sec = _va.hp - _hp0
+_b.hit(0, _vt, 50.0, magical=False, attacker=_va)
+check("vampirism feeds on a physical hit and not on a magical one or a splash",
+      _mag == 0.0 and _sec == 0.0 and _va.hp > _hp0, f"{_mag} {_sec} {_va.hp - _hp0}")
+
+# The other model defaults on `damageType` (`sim/model_defaults.py`), where
+# shipped rows leave it out: BuffAttack and Untouchable on Physical, Blurp's
+# damage Magical.
+from sim.model_defaults import with_model_defaults as _wmd
+from sim.mutations import _mask as _dmask
+from sim.unit_skills import _magical as _is_magical
+check("a BuffAttack or Untouchable row without a damage type gates on Physical",
+      _dmask(_wmd("BuffAttack", {})) == _DT_PHY
+      and _dmask(_wmd("Untouchable", {"stat": "Armor"})) == _DT_PHY
+      and _dmask(_wmd("BuffAttack", {"DamageType": "Magical"})) == _DT_MAG)
+check("Blurp hits as magical damage", _is_magical(_wmd("Blurp", {"damage": 10})))
+check("a model without a default stays ungated",
+      _dmask(_wmd("ExplodeProjectile", {"damage": 5})) == 0)
+_rows = [m for m in _STRICT["SimpleMutations"] if m["Name"] in ("BuffAttack", "Untouchable")]
+from sim.mutations import mutation_params as _mparams
+check("every shipped BuffAttack and Untouchable mutation carries a damage type now",
+      all(_dmask(_mparams(m)) != 0 for m in _rows), f"{len(_rows)} rows")
 
 # `Battle._evaded` is the whole gate in one call, so it can be asked directly
 # rather than inferred from a win rate.
@@ -896,6 +1063,50 @@ _b.hit(0, _t1[0], 1.0, attacker=_att)
 check("a knockback with a radius moves the victim's whole team",
       sum(1 for o in _t1 if o.knockback is not None) == len(_t1),
       f"{sum(1 for o in _t1 if o.knockback is not None)}/{len(_t1)}")
+
+# Sustain (242: slowMult 6.5, "can't be knocked down"). `C_SustainSkill.
+# OnBeforeKnockback` multiplies a decelerating knockback's acceleration by
+# slowMult, so the push stops 6.5 times sooner, and it leaves a Dodge alone, so
+# an evasion's jump back keeps its length.
+from sim.battle import JUMP_BACK_ACCEL as _JB_ACCEL
+_t0s = _mut_fight([242], item=_item_for("Warrior"))[0]
+check("a Sustain mutation reaches the agents", all(a.sustain == 6.5 for a in _t0s),
+      f"{[a.sustain for a in _t0s]}")
+_t0, _t1, _b = _mut_fight([])
+_att, _vic = _t0[0], _t1[0]
+_att.knockbacks = [(100.0, 0.0, 200.0, -300.0, 0)]
+_lengths = []
+for _sus, _ev in ((1.0, []), (6.5, []), (6.5, [(100.0, 100.0, True)])):
+    _vic.sustain, _vic.evasions, _vic.knockback = _sus, _ev, None
+    _b.hit(0, _vic, 1.0, attacker=_att)
+    _lengths.append(_vic.knockback[2] if _vic.knockback else None)
+check("Sustain: a knockback lasts 1/6.5 as long, an evasion's jump back keeps its length",
+      None not in _lengths and abs(_lengths[0] - 200.0 / 300.0) < 1e-9
+      and abs(_lengths[1] - _lengths[0] / 6.5) < 1e-9
+      and abs(_lengths[2] - _JB_SPEED / abs(_JB_ACCEL)) < 1e-9, f"{_lengths}")
+if _core_available():
+    def _sustain_fight(seed, sustain):
+        """1v1, melee, every hit a knockback, the foe holding Sustain or not."""
+        _a, _e, _bt = _mut_fight([], n=1, foes=1, seed=seed)
+        _a[0].knockbacks = [(100.0, 0.0, 200.0, -300.0, 0)]
+        _e[0].sustain = sustain
+        return _bt
+    _agree, _err, _moved = 0, [], 0
+    for _seed in range(10):
+        _res = _sustain_fight(_seed, 6.5).run()
+        _fr = _fast_battle(GRID, _sustain_fight(_seed, 6.5).agents, seed=_seed,
+                           tables=_STRICT)
+        _agree += int(_res.winner == _fr["winner"])
+        if _res.total_damage[0]:
+            _err.append(abs(_fr["damage"][0] - _res.total_damage[0])
+                        / _res.total_damage[0])
+        _plain = _sustain_fight(_seed, 1.0).run()
+        _moved += int((_plain.ticks, _plain.total_damage) != (_res.ticks, _res.total_damage))
+    _err_pct = sum(_err) / len(_err) * 100.0 if _err else 0.0
+    check("the core reproduces Sustain exactly at 1v1",
+          _agree == 10 and _err_pct < 0.01,
+          f"winners {_agree}/10, damage error {_err_pct:.2f}%")
+    check("Sustain changes the fight", _moved == 10, f"{_moved}/10 fights differ")
 
 
 print("\n== the per-unit on-death skills, in both engines ==")
@@ -1093,6 +1304,14 @@ if _core_available():
 print("\n== run layer ==")
 from sim.run import Food, RoomMap, RunState
 
+# The checks below test the map, the shops, the fights and the rest of the run
+# layer, each by acting on a fresh run. A fresh run now opens on a modal
+# level-entry dialog, so they build their runs with the dialogs off unless they
+# ask; the dialogs have their own section.
+_RunState_new = RunState.new.__func__
+RunState.new = classmethod(
+    lambda cls, *a, **kw: _RunState_new(cls, *a, **{"dialogs": False, **kw}))
+
 _rm = RoomMap.from_table(_STRICT["Rooms"])
 check("room map parses", len(_rm.rooms) > 10, f"{len(_rm.rooms)} rooms")
 check("start and boss exist", _rm.start in _rm.rooms and _rm.boss in _rm.rooms,
@@ -1118,8 +1337,10 @@ for _seed in range(40):
     _rng = random.Random(_seed)
     for _row in _STRICT["Levels"]:
         _m = RoomMap.generate(_row, _rng)
-        if not (_row["MinRooms"] <= len(_m.rooms) <= _row["MaxRooms"]):
-            _bad_count.append((_row["ID"], len(_m.rooms)))
+        # `num`: the secret rooms are made on top of it
+        _num = len(_m.rooms) - len(_m.secret_rooms)
+        if not (_row["MinRooms"] <= _num <= _row["MaxRooms"]):
+            _bad_count.append((_row["ID"], _num))
         _kinds = collections.Counter(r.kind for r in _m.rooms.values())
         for _col, _kind in (("ItemShops", "item_shop"), ("FoodShops", "food_shop"),
                             ("Shrines", "mutation")):
@@ -1152,11 +1373,16 @@ for _seed in range(30):
                 _treasure.append((_row["ID"], _kind, _k[_kind], _row.get(_col)))
 check("a level holds the treasure rooms its row asks for", not _treasure,
       f"{_treasure[:4]}")
-check("no Default level asks for a talent shop, so consumables never appear",
+check("no Default level asks for a talent shop",
       all(int(r.get("StatShops") or 0) == 0 for r in _STRICT["Levels"]))
 
-# the mutation shop: a shelf of `ShowCount`, `BuyCount` takes, no reroll
+# the mutation shop, as `C_Room..ctor` builds it on a generated level: a shelf
+# of 3, one take, two free rerolls
 from sim.run import MUTATION_SHOP as _MS
+
+check("a generated mutation shop is the constructor's defaults",
+      (_MS["ShowCount"], _MS["BuyCount"], _MS["RollCount"], _MS["RollCost"])
+      == (3, 1, 2, 0.0), f"{_MS}")
 
 _stm = RunState.new(_STRICT, seed=21)
 _stm.level = 3
@@ -1171,6 +1397,19 @@ if _shop is not None:
           len(_shop.offer_mutations) == _MS["ShowCount"], f"{len(_shop.offer_mutations)}")
     check("the shelf holds no duplicates",
           len({id(m) for m in _shop.offer_mutations}) == len(_shop.offer_mutations))
+    # a reroll is a whole new shelf, free, and there are RollCount of them
+    _rolled, _shelves = 0, [[m["ID"] for m in _shop.offer_mutations]]
+    _gold_before = _stm.gold
+    while ("reroll_mutations", None) in _stm.legal_actions() and _rolled < 10:
+        _stm.apply(("reroll_mutations", None))
+        _rolled += 1
+        _shelves.append([m["ID"] for m in _shop.offer_mutations])
+    check("the shelf rerolls RollCount times, for nothing",
+          _rolled == _MS["RollCount"] and _stm.gold == _gold_before
+          and len(_shelves[-1]) == _MS["ShowCount"],
+          f"{_rolled} rerolls, shelves {_shelves}")
+    check("and a reroll draws the shelf again",
+          any(a != b for a, b in zip(_shelves, _shelves[1:])), f"{_shelves}")
     _gold_before, _taken = _stm.gold, 0
     while any(a[0] == "buy_mutation" for a in _stm.legal_actions()) and _taken < 20:
         _stm.apply(next(a for a in _stm.legal_actions() if a[0] == "buy_mutation"))
@@ -1179,6 +1418,15 @@ if _shop is not None:
           f"{_taken} takes")
     check("a mutation costs nothing", _stm.gold == _gold_before, f"{_stm.gold}")
     check("the takes land in the run's mutations", len(_stm.mutations) == _taken)
+    # `OnLevelChange` reserves what the run holds, so it is never offered again
+    _held = {m["ID"] for m in _stm.mutations}
+    _again = 0
+    for _ in range(30):
+        _shop.offer_mutations = None
+        _stm.ensure_stock(_shop)
+        _again += sum(1 for m in _shop.offer_mutations if m["ID"] in _held)
+    check("a mutation the run holds is never on a shelf", _held and _again == 0,
+          f"held {sorted(_held)}, offered again {_again} times in 30 shelves")
 
 # what a mutation on the shelf would do to this squad
 from sim.mutations import EFFECT_STATS as _EFFECT_STATS
@@ -1275,20 +1523,23 @@ for _seed in range(40):
         _cells = {(r.row, r.col) for r in _m.rooms.values()}
         _deg = {p: sum(((p[0] + d[0], p[1] + d[1]) in _cells) for d in _DIRS)
                 for p in _cells}
-        # `CheckNeighborCount`: no room may have four room-neighbours
+        # Rooms with four room-neighbours do occur: `CheckNeighborCount` is in
+        # the binary with no caller, and the Pit quest's room allows all four doors.
         if max(_deg.values()) > 3:
             _deg4.append((_row["ID"], max(_deg.values())))
-        # `CheckSquares` / `CheckMultiSquares`: 2x2 blocks are rationed
+        # `CalculateSquares` / `CheckMultiSquares`: 2x2 blocks are rationed while
+        # rooms are made; `CloseLoops` writes rooms directly and can add one.
         _num = len(_cells)
         _sq = sum(1 for (r, c) in _cells
                   if {(r + 1, c), (r, c + 1), (r + 1, c + 1)} <= _cells)
-        if _sq > _num // 10 + 1:
+        if _sq > _num // 10 + 2:
             _big.append((_row["ID"], _sq, _num // 10 + 1))
         # and the map is one piece
         if len(_m.to_boss) != len(_m.rooms):
             _cut.append(_row["ID"])
-check("no room has four neighbours (CheckNeighborCount)", not _deg4, f"{_deg4[:4]}")
-check("2x2 blocks stay inside maxSquares", not _big, f"{_big[:4]}")
+check("rooms with four neighbours occur, nothing forbidding them", len(_deg4) > 0,
+      f"{len(_deg4)} maps")
+check("2x2 blocks stay inside maxSquares, but for what CloseLoops adds", not _big, f"{_big[:4]}")
 check("a generated map is one connected piece", not _cut, f"{_cut[:4]}")
 
 # the boss room is what `CouldBeFinishRoom` allows: never an articulation point,
@@ -1331,10 +1582,11 @@ from sim.mapgen import (MIN_PORTAL_DISTANCE, Generator, min_finish_distance,
 
 
 def _graph(m):
-    """Door distances between every pair of rooms, and the articulation points."""
-    _adj = {rid: list(m.doors(rid)) for rid in m.rooms}
+    """Door distances between every pair of rooms, and the articulation points.
+    Secret rooms have no door and are left out."""
+    _adj = {rid: list(m.doors(rid)) for rid in m.rooms if rid not in m.secret_rooms}
     _d = {}
-    for _src in m.rooms:
+    for _src in _adj:
         _out, _q = {_src: 0}, collections.deque([_src])
         while _q:
             _c = _q.popleft()
@@ -1352,13 +1604,13 @@ for _seed in range(40):
     for _row in _STRICT["Levels"]:
         _m = RoomMap.generate(_row, _rng)
         _d, _arts = _graph(_m)
-        _need = min_finish_distance(len(_m.rooms))
+        _need = min_finish_distance(len(_m.rooms) - len(_m.secret_rooms))
         # `ChooseFinishRoom`: the boss can see at least `minFinishDistance`
         if max(_d[_m.boss].values()) < _need:
             _short.append((_row["ID"], max(_d[_m.boss].values()), _need))
         # `ChooseStartRoom`: the start is at least the largest `d <= need` that
         # some eligible room clears, and is not always the furthest of them
-        _eligible = [r for r in _m.rooms if r not in (_m.boss,) and r not in _arts]
+        _eligible = [r for r in _d if r not in (_m.boss,) and r not in _arts]
         _best = max(_d[r][_m.boss] for r in _eligible)
         if _d[_m.start][_m.boss] < min(_need, _best):
             _below.append((_row["ID"], _d[_m.start][_m.boss], min(_need, _best)))
@@ -1397,9 +1649,11 @@ for _seed in range(40):
     for _row in _STRICT["Levels"]:
         _m = RoomMap.generate(_row, _rng)
         _d, _ = _graph(_m)
-        _p = _m.portals
+        _p = [p for p in _m.portals if p not in _m.secret_rooms]
         _counts[len(_p)] += 1
-        if not (2 <= len(_p) <= portals_count(len(_m.rooms)) + 1):
+        _num = len(_m.rooms) - len(_m.secret_rooms)
+        _most = (max(portals_count(_num), 2) if _m.secret_rooms else portals_count(_num)) + 1
+        if _p and not (2 <= len(_p) <= _most):
             _bad_room.append((_row["ID"], "count", len(_p)))
         if _m.boss in _p:
             _bad_room.append((_row["ID"], "boss"))
@@ -1407,10 +1661,10 @@ for _seed in range(40):
             for _b in _p[_i + 1:]:
                 if _d[_a][_b] < MIN_PORTAL_DISTANCE:
                     _close.append((_row["ID"], _a, _b, _d[_a][_b]))
-        if start_is_portal(_row["ID"]) != (_m.start in _p):
+        if _p and start_is_portal(_row["ID"]) != (_m.start in _p):
             (_forced if start_is_portal(_row["ID"]) else _unforced).append(_row["ID"])
-check("every generated level has between 2 and portalsCount + 1 portals, none "
-      "on the boss", not _bad_room,
+check("every generated level has none (the step undone) or between 2 and "
+      "portalsCount + 1 portals, none on the boss", not _bad_room,
       f"{dict(sorted(_counts.items()))} over 480 levels, {_bad_room[:4]}")
 check("portals are at least minPortalDistance apart", not _close, f"{_close[:4]}")
 check("the start is a portal on levels 5 and 9 and on no other",
@@ -1637,6 +1891,441 @@ check("a food shop's budget is TotalFood / FoodShops",
       _stf.food_shop_budget == _row1["TotalFood"] / _row1["FoodShops"],
       f"{_stf.food_shop_budget}")
 
+# -- wounds carry from fight to fight ----------------------------------------
+# In Default nothing heals a unit between fights (`C_Unit.BeforeFight` restores
+# health only in KingOfTheHill and an Arcade boss room), and a level or an item
+# rescales health as `totalMaxHealth * ratio`. These check the share is carried,
+# kept, and actually handed to the next fight.
+import sim.run as _sim_run
+from sim.run import Human as _Hum
+
+_starts = []
+
+
+class _ProbeBattle(_sim_run.Battle):
+    """Record what each player unit starts a fight with."""
+
+    def __init__(self, grid, agents, *a, **kw):
+        _starts.append([(ag.hp, ag.max_hp) for ag in agents if ag.team == 0])
+        super().__init__(grid, agents, *a, **kw)
+
+
+_real_battle = _sim_run.Battle
+_sim_run.Battle = _ProbeBattle
+try:
+    _sw = RunState.new(_STRICT, seed=13)
+    _hurt_seen = None
+    for _ in range(30):
+        _moves = [a for a in _sw.legal_actions() if a[0] == "move"
+                  and not _sw.rooms.rooms[a[1]].cleared]
+        if not _moves or _sw.finished:
+            break
+        _sw.apply(_moves[0])
+        if any(h.hp < 1.0 for h in _sw.squad):
+            _hurt_seen = [h.hp for h in _sw.squad]
+            break
+    check("a fight leaves its wounds on the squad",
+          _hurt_seen is not None and all(0.0 < x <= 1.0 for x in _hurt_seen),
+          f"{_hurt_seen}")
+    _carried = [h.hp for h in _sw.squad]
+    _starts.clear()
+    _next = [a for a in _sw.legal_actions() if a[0] == "move"
+             and not _sw.rooms.rooms[a[1]].cleared]
+    if _next:
+        _sw.apply(_next[0])
+    _first = _starts[0] if _starts else []
+    check("and the next fight starts with them",
+          bool(_first) and all(abs(hp - mx * c) < 1e-3
+                               for (hp, mx), c in zip(_first, _carried)),
+          f"carried {[round(c, 3) for c in _carried]}, "
+          f"started {[round(hp / mx, 3) for hp, mx in _first]}")
+finally:
+    _sim_run.Battle = _real_battle
+
+# a level and an item both keep the share; a bought human is whole
+_sk = RunState.new(_STRICT, seed=2)
+_sk.squad[0].hp = 0.5
+_sk.gain_experience(10_000.0, targets=[_sk.squad[0]])
+check("a level-up keeps the share of health", _sk.squad[0].level > 1
+      and _sk.squad[0].hp == 0.5, f"level {_sk.squad[0].level}, hp {_sk.squad[0].hp}")
+check("a new human arrives at full health", _Hum(item=None).hp == 1.0)
+# the pit takes the most wounded
+_sk.squad[1].hp = 0.1
+_before_ids = [id(h) for h in _sk.squad]
+_wounded = id(_sk.squad[1])
+_sk.apply(("sacrifice", None))
+check("the pit takes the most wounded human",
+      _wounded not in {id(h) for h in _sk.squad} and len(_sk.squad) == len(_before_ids) - 1)
+# carry_hp off is the old sim: everyone whole after every fight
+_so = RunState.new(_STRICT, seed=13)
+_so.carry_hp = False
+for _ in range(30):
+    _moves = [a for a in _so.legal_actions() if a[0] == "move"
+              and not _so.rooms.rooms[a[1]].cleared]
+    if not _moves or _so.finished:
+        break
+    _so.apply(_moves[0])
+check("with carry_hp off every unit stays whole", all(h.hp == 1.0 for h in _so.squad))
+
+# Mutation 356, `FoodPackHeal`: buying food heals `cost * koefficient` percent
+_sf = RunState.new(_STRICT, seed=11)
+_fp = next(m for m in _STRICT["SimpleMutations"] if m["Name"] == "FoodPackHeal")
+_sf.mutations.append(_fp)
+_shopf = next(r for r in _sf.rooms.rooms.values() if r.kind == "food_shop")
+_sf.room = _shopf.id
+_shopf.cleared = True
+_sf.ensure_stock(_shopf)
+_sf.gold = 100.0
+for _h in _sf.squad:
+    _h.hp = 0.5
+_sf.apply(("buy_food", 1))
+_cost1 = _sf.food_packs[1][1]
+check("FoodPackHeal heals the squad by what the pack cost",
+      all(abs(h.hp - (0.5 + _cost1 / 100.0)) < 1e-9 for h in _sf.squad),
+      f"pack cost {_cost1}, hp {[h.hp for h in _sf.squad]}")
+
+# -- the boss room, the pipe, and consumables ---------------------------------
+from sim.run import (CONSUMABLE_SHELF as _SHELF, CONSUMABLE_SLOTS as _SLOTS,
+                     Consumable as _Cons, consumable_family as _fam)
+
+_cons_rows = {c["ID"]: c for c in _STRICT["Consumables"]}
+
+
+def _won_boss(seed, level=1):
+    """A run standing in a boss room it has just won."""
+    s = RunState.new(_STRICT, seed=seed)
+    if level > 1:
+        s.level = level
+        s.rooms = RoomMap.generate(s.level_row, s.rng)
+    s.room = s.rooms.boss
+    s.rooms.set_current(s.room)
+    s.rooms.rooms[s.room].cleared = True
+    s.win_level()
+    return s
+
+
+_bw = _won_boss(31)
+check("beating the boss does not change the level", _bw.level == 1 and _bw.level_won
+      and ("descend", None) in _bw.legal_actions())
+_bw.apply(("descend", None))
+check("the pipe does", _bw.level == 2 and not _bw.level_won)
+_bl = _won_boss(32, level=len(_STRICT["Levels"]))
+check("the last boss ends the run, won", _bl.finished and _bl.won and not _bl.level_won)
+
+_bs = _won_boss(33)
+_bs.ensure_stock(_bs.rooms.rooms[_bs.room])
+_shelf_c = _bs.rooms.rooms[_bs.room].consumable_offer
+_lvl1 = {r["Consumable"] for r in _STRICT["ConsumablesByLevel"] if r["Level"] == 1}
+check("a boss room shows three consumables from its level's list, none twice",
+      len(_shelf_c) == _SHELF and {c["ID"] for c in _shelf_c} <= _lvl1
+      and len({c["ID"] for c in _shelf_c}) == _SHELF, f"{[c['Name'] for c in _shelf_c]}")
+_g0 = _bs.gold
+while any(a[0] == "take_consumable" for a in _bs.legal_actions()):
+    _bs.apply(next(a for a in _bs.legal_actions() if a[0] == "take_consumable"))
+check("they are free, and the run carries two", len(_bs.consumables) == _SLOTS
+      and _bs.gold == _g0, f"{len(_bs.consumables)} carried, gold {_g0} -> {_bs.gold}")
+_bs.apply(("sell_consumable", 0))
+check("selling one pays SellCost", _bs.gold == _g0 + _bs.consumable_sell_price
+      and _bs.consumable_sell_price == 5.0 and len(_bs.consumables) == _SLOTS - 1)
+# what the run carries is never on the next shelf
+_bs.rooms.rooms[_bs.room].consumable_offer = None
+_carried_ids = {c.row["ID"] for c in _bs.consumables}
+_again = 0
+for _ in range(30):
+    _bs.rooms.rooms[_bs.room].consumable_offer = None
+    _bs.ensure_stock(_bs.rooms.rooms[_bs.room])
+    _again += sum(1 for c in _bs.rooms.rooms[_bs.room].consumable_offer if c["ID"] in _carried_ids)
+check("nothing the run carries is on a shelf", _again == 0)
+
+# The long-run reward: `C_Levels.WinLevel` on level 4 sets a persistent flag,
+# and the next run's level-1 `C_Rooms.Generate` takes it and makes the start
+# room `Start | ConsumableShop`, two slots wide.
+_lr = RunState.new(_STRICT, seed=34, long_run_reward=True)
+_lr_start = _lr.rooms.rooms[_lr.rooms.start]
+_lr_takes = [a for a in _lr.legal_actions() if a[0] == "take_consumable"]
+check("the long-run reward opens level 1 in a two-slot consumable shop",
+      _lr_start.has("consumable_shop") and _lr.room == _lr.rooms.start
+      and _lr_takes == [("take_consumable", 0), ("take_consumable", 1)]
+      and {c["ID"] for c in _lr_start.consumable_offer} <= _lvl1, f"{_lr_takes}")
+_lr.apply(("take_consumable", 1))
+check("and what it shows is free to take", len(_lr.consumables) == 1
+      and _lr_start.consumable_offer[1] is None)
+_plain = RunState.new(_STRICT, seed=34)
+check("a run without it opens with no shop and the same map",
+      not any(a[0] == "take_consumable" for a in _plain.legal_actions())
+      and not _plain.rooms.rooms[_plain.rooms.start].has("consumable_shop")
+      and set(_plain.rooms.rooms) == set(_lr.rooms.rooms))
+_crazy = RunState.new(_STRICT, seed=34, chip="crazy", long_run_reward=True)
+check("the crazy chip leaves the flag for a later run",
+      not _crazy.long_run_reward_used
+      and not _crazy.rooms.rooms[_crazy.rooms.start].has("consumable_shop"))
+_lr.level = 2
+_lr.generate_level()
+check("only level 1 gets it", not _lr.rooms.rooms[_lr.rooms.start].has("consumable_shop"))
+_w3, _w4 = _won_boss(35, level=3), _won_boss(35, level=4)
+check("winning level 4 sets the flag for the next run, level 3 does not",
+      _w4.long_run_reward_earned and not _w3.long_run_reward_earned)
+from rl.env import DespotRunEnv as _Env
+_ce = _Env(tables=_STRICT, long_run_reward="carry", quests=False, dialogs=False)
+_ce.reset(seed=36)
+_c0 = _ce.state.long_run_reward
+_ce.state.long_run_reward_earned = True
+_ce.reset(seed=37)
+_c1 = _ce.state.long_run_reward
+_ce.reset(seed=38)
+check("the env carries it to the next episode only, the way the save does",
+      not _c0 and _c1 and not _ce.state.long_run_reward)
+
+
+def _give(s, cid):
+    s.consumables = [_Cons(row=_cons_rows[cid], charges=int(_cons_rows[cid]["Count"]))]
+
+
+# heals: the potion makes the most wounded whole, the scroll gives 30% to all
+_hs = RunState.new(_STRICT, seed=5)
+for _h, _v in zip(_hs.squad, (0.2, 0.6, 0.9, 1.0)):
+    _h.hp = _v
+_give(_hs, 1)
+_hs.apply(("use_consumable", 0))
+check("a Heal potion makes the most wounded unit whole",
+      [h.hp for h in _hs.squad][:4] == [1.0, 0.6, 0.9, 1.0]
+      and _hs.consumables[0].charges == _cons_rows[1]["Count"] - 1)
+_give(_hs, 2)
+_hs.apply(("use_consumable", 0))
+check("a Heal scroll gives every unit 30%",
+      all(abs(a - b) < 1e-9 for a, b in zip([h.hp for h in _hs.squad][:4], [1.0, 0.9, 1.0, 1.0])),
+      f"{[h.hp for h in _hs.squad]}")
+
+# a cleaner wins the next room it is carried into, with no fight and its experience
+_built = []
+
+
+class _CountBattle(_sim_run.Battle):
+    def __init__(self, *a, **kw):
+        _built.append(1)
+        super().__init__(*a, **kw)
+
+
+_sim_run.Battle = _CountBattle
+try:
+    _cs = RunState.new(_STRICT, seed=6)
+    _give(_cs, 3)
+    _cs.apply(("use_consumable", 0))
+    _tgt = next(a for a in _cs.legal_actions() if a[0] == "move"
+                and not _cs.rooms.rooms[a[1]].cleared
+                and _cs.rooms.rooms[a[1]].kind != "boss")
+    _exp0 = sum(h.experience + 1000 * h.level for h in _cs.squad)
+    _built.clear()
+    _r = _cs.apply(_tgt)
+    check("a RoomCleaner wins the next room without a fight",
+          _r.get("cleaned") and _cs.rooms.rooms[_tgt[1]].cleared and not _built
+          and sum(h.experience + 1000 * h.level for h in _cs.squad) > _exp0, f"{_r}")
+finally:
+    _sim_run.Battle = _real_battle
+
+# reserves: three Novices join for good; an ally fights the next fight and goes
+_rs = RunState.new(_STRICT, seed=7)
+_n0 = len(_rs.squad)
+_give(_rs, 4)
+_rs.apply(("use_consumable", 0))
+check("a Reserve of Novices adds three humans", len(_rs.squad) == _n0 + 3
+      and all(h.item is None for h in _rs.squad[_n0:]))
+_starts.clear()
+_sim_run.Battle = _ProbeBattle
+try:
+    _ra = RunState.new(_STRICT, seed=7)
+    _give(_ra, 5)
+    _ra.apply(("use_consumable", 0))
+    _n1 = len(_ra.squad)
+    _mv = next(a for a in _ra.legal_actions() if a[0] == "move"
+               and not _ra.rooms.rooms[a[1]].cleared)
+    _ra.apply(_mv)
+finally:
+    _sim_run.Battle = _real_battle
+check("a summoned ally fights the next fight and does not join the squad",
+      _starts and len(_starts[0]) == _n1 + 1 and len(_ra.squad) <= _n1
+      and not _ra.armed.get("allies"), f"{len(_starts[0]) if _starts else 0} fielded")
+
+# resurrection brings back the dead lying in this room
+_rz = RunState.new(_STRICT, seed=8)
+_dead = _rz.squad.pop()
+_here = _rz.rooms.rooms[_rz.room]
+_here.corpses.append(_dead)
+_give(_rz, 8)
+check("Resurrection is usable where corpses lie",
+      ("use_consumable", 0) in _rz.legal_actions())
+_rz.apply(("use_consumable", 0))
+check("and brings them back", _dead in _rz.squad and not _here.corpses and _dead.hp == 1.0)
+
+# teleport: a random room nobody has seen, no food spent
+_tz = RunState.new(_STRICT, seed=9)
+_hidden_before = {rid for rid, r in _tz.rooms.rooms.items() if r.state == UNKNOWN}
+_give(_tz, 9)
+_food0 = (_tz.food.amount, _tz.food.moves_left)
+_tz.apply(("use_consumable", 0))
+check("a Teleport lands in a room that was hidden, for no food",
+      _tz.room in _hidden_before and (_tz.food.amount, _tz.food.moves_left) == _food0)
+
+# AntiHunger lifts the hunger penalties for one fight
+_az = RunState.new(_STRICT, seed=10)
+_az.food.amount, _az.food.moves_left = 0.0, 0
+_az.food.spend_move(_az.feed_cost)
+check("a starving squad fights with its penalties", _az.food.damage_penalty > 0
+      and _az.specs()[0].damage < _az.specs(no_hunger=True)[0].damage)
+_give(_az, 11)
+_az.apply(("use_consumable", 0))
+check("AntiHunger waits for the next fight", _az.armed.get("anti_hunger"))
+
+# Reroll: a free new shelf in the shop the squad stands in
+_rr = RunState.new(_STRICT, seed=2)
+_rr.next_level()                      # level 2 opens in an item shop
+_rr.ensure_stock(_rr.rooms.rooms[_rr.room])
+_before_offer, _g1 = list(_rr.offer), _rr.gold
+_give(_rr, 14)
+_rr.apply(("use_consumable", 0))
+check("a Reroll rolls the item shop for free",
+      _rr.gold == _g1 and len(_rr.offer) == len(_before_offer), f"{_before_offer} -> {_rr.offer}")
+check("every consumable but DamageAllEnemies has an effect",
+      {c["Name"] for c in _STRICT["Consumables"] if _fam(c) == "unmodelled"}
+      == {"DamageAllEnemies"})
+
+# DejaVu: taken, it saves; a wipe while it is carried rewinds to the save
+_dj = _won_boss(40)
+_dj.ensure_stock(_dj.rooms.rooms[_dj.room])
+_dj.rooms.rooms[_dj.room].consumable_offer = [_cons_rows[10]]
+_dj.apply(("take_consumable", 0))
+_dj_n, _dj_gold = len(_dj.squad), _dj.gold
+_dj.squad = []
+_rw = _dj.apply(("buy_human", None))
+check("a wipe with a DejaVu carried rewinds to its save",
+      _rw.get("dejavu") and not _dj.finished and len(_dj.squad) == _dj_n
+      and _dj.gold == _dj_gold and not _dj.holds_dejavu(), f"{_rw}")
+_dj.squad = []
+_dj.apply(("buy_human", None))
+check("and a second wipe ends the run", _dj.finished and not _dj.won)
+
+# -- layouts: the pack chooses the room ------------------------------------------
+from sim.data import parse_room_layouts as _prl
+
+_lay_by_id = {lay.id: lay for lay in _prl(_STRICT["RoomLayouts"])}
+_lay_of = {r["Pack"]: r["Layout"] for r in _STRICT["LayoutsByPack"]}
+_lay_bad = []
+for _row in _STRICT["EnemyPacks"]:
+    if _row["ID"] >= 1001:              # 1001 to 1011 are no Default level's
+        continue
+    _lid = _lay_of.get(_row["ID"])
+    if _lid is None or not _lay_by_id[_lid].cells(_row.get("Zone") or "e1"):
+        _lay_bad.append((_row["ID"], _row.get("Zone"), _lid))
+check("every pack has a layout holding every zone its rows name", not _lay_bad,
+      f"{_lay_bad[:4]}")
+_lf = RunState.new(_STRICT, seed=3)
+_lay_seen = []
+for _ in range(8):
+    _mv = [a for a in _lf.legal_actions() if a[0] == "move"
+           and not _lf.rooms.rooms[a[1]].cleared]
+    if not _mv or _lf.finished:
+        break
+    _lf.apply(_mv[0])
+    _lay_seen.append((_lf._last_pack[0], _lf._last_layout))
+check("a fight is fought in its pack's own layout",
+      _lay_seen and all(_lay_of.get(p) == l for p, l in _lay_seen), f"{_lay_seen}")
+
+# -- the level-entry dialogs ----------------------------------------------------
+from sim.dialogs import Engine as _Engine, pool as _dpool, table as _dtable
+
+_names = _dpool(_STRICT)
+check("the Default pool is Game.Dialogs, all 46 in the table",
+      len(_names) == 46 and all(n in _dtable() for n in _names), f"{len(_names)}")
+
+# every pool dialog walks to its end under random choices
+_bad_walk = []
+for _n in _names:
+    for _seed in range(6):
+        _wd = RunState.new(_STRICT, seed=_seed)
+        _wd.dialog = None
+        _wd.gold = 40.0
+        _eng = _Engine(_wd)
+        if not _eng.can_start(_n):
+            continue
+        try:
+            _wd.dialog = _eng.start(_n)
+            _wd._settle_dialog()
+            _wr = random.Random(_seed)
+            for _ in range(60):
+                if _wd.dialog is None:
+                    break
+                _wd.apply(_wr.choice(_wd.legal_actions()))
+            if _wd.dialog is not None:
+                _bad_walk.append((_n, "open"))
+        except Exception as _ex:
+            _bad_walk.append((_n, repr(_ex)[:60]))
+check("every pool dialog runs to its end", not _bad_walk, f"{_bad_walk[:4]}")
+
+# a run opens with one and every level change brings another, never twice
+_dr = RunState.new(_STRICT, seed=4, dialogs=True)
+_seen = [n for n in _names if n not in _dr.dialog_pool]
+_dr.dialog = None
+_dr.next_level()
+_seen2 = [n for n in _names if n not in _dr.dialog_pool]
+check("the run opens with a dialog and the next level brings another",
+      len(_seen) == 1 and len(_seen2) == 2 and _seen[0] in _seen2, f"{_seen} -> {_seen2}")
+
+# gates: `Stores` needs 5 gold to start, and its 5-gold purchase needs 5 gold
+_dg = RunState.new(_STRICT, seed=1)
+_dg.dialog = None
+_dg.gold = 0.0
+_eg = _Engine(_dg)
+_closed_poor = _eg.can_start("Stores")
+_dg.gold = 5.0
+check("a dialog whose own gates fail does not start", not _closed_poor
+      and _eg.can_start("Stores"))
+_dg.dialog = _eg.start("Stores")
+_dg._settle_dialog()
+_dg.apply(("choose", 0))                       # the "Steam" door
+_rich = list(_eg.legal(_dg.dialog))
+_dg.gold = 4.0
+_poor = list(_eg.legal(_dg.dialog))
+check("a choice that costs more than the purse holds is not offered",
+      0 in _rich and 0 not in _poor and 1 in _poor, f"5 gold: {_rich}, 4 gold: {_poor}")
+
+# `OneHandBandit` defines `robotsGold` and tests it in the same node
+check("a node's variables hold for its own gates", _eg.can_start("OneHandBandit"))
+
+# `WheelOfFortune`'s first prize is mutation 4
+_dw = RunState.new(_STRICT, seed=0)
+_dw.dialog = None
+_ew = _Engine(_dw)
+_got = set()
+for _seed in range(20):
+    _dw.rng = random.Random(_seed)
+    _dw.mutations = []
+    _dw.dialog = _ew.start("WheelOfFortune")
+    _dw._settle_dialog()
+    _dw.apply(("choose", 1))                   # spin the wheel
+    while _dw.dialog is not None:
+        _dw.apply(("choose", _ew.legal(_dw.dialog)[0]))
+    _got |= {m["ID"] for m in _dw.mutations}
+check("GiveMutation hands over the mutation it names", _got == {4, 5}, f"{sorted(_got)}")
+
+# an Ambush makes the room the squad stands in fight after all
+_built.clear()
+_sim_run.Battle = _CountBattle
+try:
+    _da = RunState.new(_STRICT, seed=2)
+    _da.dialog = None
+    _da.gold = 0.0
+    _da.squad[0].item = "stone-sword"
+    _ea = _Engine(_da)
+    _da.dialog = _ea.start("GuidingStone")
+    _da._settle_dialog()
+    _da.apply(("choose", 1))                   # "Go left"
+    while _da.dialog is not None:
+        _da.apply(("choose", _ea.legal(_da.dialog)[0]))
+finally:
+    _sim_run.Battle = _real_battle
+check("an Ambush makes the start room fight", _built and _da.gold >= 10.0,
+      f"{len(_built)} battles, gold {_da.gold}")
+
 # hunger model. `moves` is a list of thresholds on a `maxMoves` reserve, not an
 # allowance per stage, and moving feeds the team rather than costing a move.
 _f = Food.from_game(_STRICT["Game"])
@@ -1785,6 +2474,460 @@ _st11.next_level()
 check("a new level grants no free food",
       _st11.food.amount == 3.0 and _st11.level == 2, f"{_st11.food.amount}")
 
+# -- quests ------------------------------------------------------------------
+print("\n== quests ==")
+import sim.quests as _Q
+from sim.mapgen import DIRECTION_STEP as _STEP
+from sim.run import UNKNOWN as _UNKNOWN
+from sim.run import Human as _QH
+
+
+def _quest_level(name, seed=0, squad=None):
+    """A run put on level 2 with the quest `name`, standing in the start room."""
+    st = RunState.new(_STRICT, seed=seed)
+    st.level = {"Sci": 2, "Pit": 2, "Cube": 2, "Rat": 2, "Reaper": 6, "SecretRoom": 6,
+                "Spider": 6, "Bot": 6, "Nurgle": 10, "Flight": 10, "Sword": 10}[name]
+    draw = _Q.draw_quest
+    _Q.draw_quest = lambda row, rng: name
+    try:
+        st.generate_level()
+    finally:
+        _Q.draw_quest = draw
+    st.room = st.rooms.start
+    st.rooms.set_current(st.room)
+    st.rooms.rooms[st.room].cleared = True
+    if squad is not None:
+        st.squad = squad
+    return st
+
+
+def _walk_in(st, rid, talk=True):
+    """Arrive in `rid` the way a move does, without the food or the adjacency.
+    A dialog that opens is answered with its first choice each time, unless
+    `talk` is off, which leaves it on screen."""
+    res = {}
+    st._arrive(rid, res)
+    if talk:
+        while st.quest_dialog is not None and st.legal_actions():
+            st.apply(st.legal_actions()[0])
+    return res
+
+
+def _sides(rooms, rid):
+    r = rooms[rid]
+    taken = {(x.row, x.col) for x in rooms.values()}
+    return {d for d, (dr, dc) in _STEP.items() if (r.row + dr, r.col + dc) in taken}
+
+
+# The level's quest is drawn from its shortlist, and every name on it comes up.
+_drawn = collections.Counter(RunState.new(_STRICT, seed=s).tables and
+                             _Q.draw_quest(next(r for r in _STRICT["Levels"] if r["ID"] == 2),
+                                           random.Random(s)) for s in range(400))
+check("level 2 draws each of its four quests",
+      set(_drawn) == {"Sci", "Pit", "Cube", "Rat"} and min(_drawn.values()) > 70, f"{dict(_drawn)}")
+check("levels without a shortlist have no quest",
+      all(_Q.draw_quest(r, random.Random(0)) is None for r in _STRICT["Levels"]
+          if r["ID"] not in (2, 6, 10)))
+
+# Placement: the quest room's doors, the extra rooms' shape, the path from the
+# start, and no portal on any of them.
+_bad = []
+for _name in ("Sci", "Pit", "Cube", "Rat", "Reaper", "SecretRoom", "Spider", "Bot",
+              "Nurgle", "Flight", "Sword"):
+    _spec = _Q.quest_spec(_STRICT, _name)
+    for _s in range(12):
+        _st = _quest_level(_name, seed=_s)
+        _rm = _st.rooms
+        _qr = _rm.quest_room
+        _sides_q = _sides(_rm.rooms, _qr)
+        if not (_sides_q <= set(_spec.get("Doors") or [])
+                and set(_spec.get("GuaranteedDoors") or []) <= _sides_q):
+            _bad.append((_name, _s, "doors", _sides_q))
+        if len(_rm.quest_extras) != int(_spec.get("ExtraRooms") or 0):
+            _bad.append((_name, _s, "extras"))
+        _dq = _rm._distances(_qr)
+        for _x in _rm.quest_extras:
+            if _dq[_x] <= 1 or len(_rm.doors(_x)) not in (1, 2):
+                _bad.append((_name, _s, "extra shape", _x))
+            if _name == "Flight":
+                _xr, _qq = _rm.rooms[_x], _rm.rooms[_qr]
+                if not (_xr.col < _qq.col and abs(_xr.row - _qq.row) <= 3):
+                    _bad.append((_name, _s, "flight extra", _x))
+        if any(_rm.is_portal(r) for r in [_qr] + _rm.quest_extras):
+            _bad.append((_name, _s, "portal"))
+        # a way in from the start past neither the boss nor an extra room
+        _block = {_rm.boss, *_rm.quest_extras}
+        _seen_q, _todo = {_rm.start}, [_rm.start]
+        _reach = False
+        while _todo:
+            _p = _todo.pop()
+            for _n in _rm.doors(_p):
+                if _n == _qr:
+                    _reach = True
+                elif _n not in _seen_q and _n not in _block:
+                    _seen_q.add(_n)
+                    _todo.append(_n)
+        if not _reach:
+            _bad.append((_name, _s, "path"))
+check("every quest's rooms sit where ChooseQuestRoom and ChooseQuestExtraRoom put them",
+      not _bad, f"{_bad[:4]}")
+
+# The economy: quest rooms carry no weight, a quest room pays nothing, an extra
+# room pays the plain share (nothing on Flight and Bot) and fights its own pack.
+_qc = _quest_level("Cube", seed=3)
+_plain = sum(1 for r in _qc.rooms.rooms.values()
+             if r.kind not in ("start", "quest", "quest_extra"))
+check("quest rooms are left out of CalculatePower's weights",
+      _qc.room_mult("quest") == 0.0 and _qc.room_mult("quest_extra") == 0.0)
+_gold_x = _qc.room_gold("quest_extra")
+_want_x = (float(_qc.level_row["GoldPerRoom"]) * (len(_qc.rooms.rooms) - 1)
+           * float(_qc.level_row["DefaultMult"]) / _qc.level_weight)
+check("a quest room pays nothing and an extra room the plain share",
+      _qc.room_gold("quest") == 0.0 and abs(_gold_x - _want_x) < 1e-6, f"{_gold_x:.2f}")
+check("Flight's and Bot's extra rooms pay nothing",
+      _quest_level("Flight", seed=1).room_gold("quest_extra") == 0.0
+      and _quest_level("Bot", seed=1).room_gold("quest_extra") == 0.0)
+_cx = _qc.rooms.rooms[_qc.rooms.quest_extras[0]]
+_ens, _lay = _qc.quest_enemies(_cx)
+check("the extra room fights its own pack in its own layout",
+      len(_ens) == 6 and all(e.name == "Dalek" for e in _ens) and _lay is not None
+      and _lay.id == "cube-quest-extra", f"{len(_ens)} {_lay.id if _lay else None}")
+check("the quest room has nothing to fight",
+      _qc.quest_enemies(_qc.rooms.rooms[_qc.rooms.quest_room]) == ([], None))
+
+# The fog: walking past an extra room does not reveal it; accepting does.
+_qr_room = _qc.rooms.rooms[_qc.rooms.quest_room]
+for _n in _qc.rooms.doors(_cx.id):
+    _qc.rooms.set_current(_n)
+check("walking next to an extra room leaves it off the map", _cx.state == _UNKNOWN)
+_qc.room = _qc.rooms.doors(_cx.id)[0]
+_qc.rooms.rooms[_qc.room].cleared = True
+check("and its door does not let the squad in (CheckDirection wants it off Unknown)",
+      ("move", _cx.id) not in _qc.legal_actions())
+_qc.rooms.set_current(_qc.rooms.start)
+_qc.room = _qc.rooms.start
+_walk_in(_qc, _qc.rooms.quest_room)
+check("the Cube quest is accepted in its room and reveals the extra room",
+      _qc.quest.status == _Q.ACCEPTED and _cx.state != _UNKNOWN and _qc.quest_dialog is None,
+      f"status {_qc.quest.status}")
+
+# Cube, through: the part on a won extra room, then the choice.
+_strong = [_QH(item="broadsword", level=5) for _ in range(6)]
+_qc.squad = [dataclasses.replace(h) for h in _strong]
+_walk_in(_qc, _cx.id)
+check("winning the extra room hands over the cube part",
+      _cx.cleared and _qc.quest.status == _Q.ACQUIRED and "cube-part" in _qc.quest.items,
+      f"status {_qc.quest.status}")
+_g0 = _qc.gold
+_walk_in(_qc, _qc.rooms.quest_room, talk=False)
+_opts = _qc.legal_actions()
+check("back with the part, the quest room asks: tokens or the secret",
+      _opts == [("choose", 0), ("choose", 1)], f"{_opts}")
+_qc.apply(("choose", 0))
+check("tokens pay outcome 1, 25 gold, and finish the quest",
+      _qc.gold == _g0 + 25 and _qc.quest.status == _Q.FINISHED
+      and "cube-part" not in _qc.quest.items, f"{_qc.gold - _g0}")
+_walk_in(_qc, _qc.rooms.quest_room)
+check("a finished Cube quest says nothing more", _qc.quest_dialog is None)
+
+# Pit: five Novices and nobody else jump and the run ends; with someone else
+# they jump and the Pit pays mutation 306; tokens are 30 gold.
+_qp = _quest_level("Pit", seed=2, squad=[_QH(item=None) for _ in range(5)])
+_walk_in(_qp, _qp.rooms.quest_room)
+check("five Novices alone jump into the Pit and the run is lost",
+      _qp.finished and not _qp.won and not _qp.squad)
+_qp = _quest_level("Pit", seed=2,
+                   squad=[_QH(item=None) for _ in range(5)] + [_QH(item="broadsword")])
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+_opts = _qp.legal_actions()
+_qp.apply(("choose", 0))
+check("five Novices with company: letting them go buys mutation 306",
+      _opts == [("choose", 0), ("choose", 1)] and len(_qp.squad) == 1
+      and any(m.get("ID") == 306 for m in _qp.mutations)
+      and _qp.quest.status == _Q.FINISHED, f"{len(_qp.squad)} left")
+_qp = _quest_level("Pit", seed=2, squad=[_QH(item="broadsword") for _ in range(3)])
+_g0 = _qp.gold
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+_qp.apply(("choose", 1))
+check("without five Novices, tokens thrown come back as 30 gold",
+      _qp.gold == _g0 + 30 and _qp.quest.status == _Q.FINISHED, f"{_qp.gold - _g0}")
+_qp = _quest_level("Pit", seed=2, squad=[_QH(item="broadsword") for _ in range(3)])
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+_qp.apply(("choose", 0))
+_walk_in(_qp, _qp.rooms.quest_room, talk=False)
+check("going to look for Novices leaves the Pit waiting",
+      _qp.quest.status == _Q.ACCEPTED and _qp.legal_actions() == [("choose", 0), ("choose", 1)])
+
+# Sci: the lab's fight turns the weakest human into a level-1 Zombie, and the
+# scientist pays for it alive.
+_qs = _quest_level("Sci", seed=4, squad=[dataclasses.replace(h) for h in _strong]
+                   + [_QH(item=None, level=1)])
+_walk_in(_qs, _qs.rooms.quest_room)
+_qs_ok = _qs.quest.status == _Q.ACCEPTED
+_weak = _qs.squad[-1]
+_walk_in(_qs, _qs.quest.extras[0])
+_z = [h for h in _qs.squad if h.cls == "Zombie"]
+check("the Sci lab turns the weakest human into a level-1 Zombie",
+      _qs_ok and _qs.quest.status == _Q.ACQUIRED and len(_z) == 1 and _z[0].level == 1
+      and all(h is not _weak for h in _qs.squad) and len(_qs.squad) == 7,
+      f"{[(h.item, h.cls) for h in _qs.squad]}")
+_g0 = _qs.gold
+_walk_in(_qs, _qs.rooms.quest_room, talk=False)
+_qs.apply(("choose", 1))
+check("the scientist takes the Zombie and pays 25 gold",
+      _qs.gold == _g0 + 25 and not any(h.cls for h in _qs.squad)
+      and _qs.quest.status == _Q.FINISHED)
+_qs = _quest_level("Sci", seed=4, squad=[dataclasses.replace(h) for h in _strong])
+_walk_in(_qs, _qs.quest.extras[0])
+_walk_in(_qs, _qs.rooms.quest_room)
+_walk_in(_qs, _qs.quest.extras[0])
+check("a lab won before the quest was accepted never gives a Zombie",
+      _qs.quest.status == _Q.ACCEPTED and not any(h.cls for h in _qs.squad))
+_qs = _quest_level("Sci", seed=4, squad=[_QH(item="broadsword", level=5)])
+_walk_in(_qs, _qs.rooms.quest_room)
+_walk_in(_qs, _qs.quest.extras[0])
+check("alone, the squad gets a new Zombie instead",
+      len(_qs.squad) == 2 and _qs.squad[1].cls == "Zombie" and _qs.quest.status == _Q.ACQUIRED)
+_qs.squad = [h for h in _qs.squad if not h.cls]
+_g0 = _qs.gold
+_walk_in(_qs, _qs.rooms.quest_room)
+check("with the Zombie dead, the scientist pays nothing",
+      _qs.gold == _g0 and _qs.quest.status == _Q.FINISHED and _qs.quest_dialog is None)
+
+# Rat: the flute on accepting, the Rat on the lab's win, the reward for it alive.
+_qr = _quest_level("Rat", seed=5, squad=[dataclasses.replace(h) for h in _strong])
+_walk_in(_qr, _qr.rooms.quest_room)
+check("accepting the Rat quest hands over the flute",
+      _qr.quest.status == _Q.ACCEPTED and "rat-flute" in _qr.quest.items)
+_walk_in(_qr, _qr.quest.extras[0])
+check("winning the Rat's room adds the Rat to the team",
+      _qr.quest.status == _Q.ACQUIRED and sum(1 for h in _qr.squad if h.cls == "Rat") == 1)
+_g0 = _qr.gold
+_walk_in(_qr, _qr.rooms.quest_room, talk=False)
+_opts = _qr.legal_actions()
+_qr.apply(("choose", 1))
+check("the trumpeter takes the Rat back and pays 25 gold",
+      _opts == [("choose", 0), ("choose", 1)] and _qr.gold == _g0 + 25
+      and not any(h.cls for h in _qr.squad) and _qr.quest.status == _Q.FINISHED
+      and "rat-flute" not in _qr.quest.items)
+
+# Level 6. The walks below are over rooms marked won, so what is checked is the
+# quest and not whether a squad survives level-6 fights on the way.
+def _calm(st):
+    for _r in st.rooms.rooms.values():
+        _r.cleared = True
+    return st
+
+
+# Reaper: the hater runs from the Reaper's room and from every arrival until
+# his five moves are spent, then talks.
+_qa = _calm(_quest_level("Reaper", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qa, _qa.rooms.quest_room)
+_first = (_qa.quest.status, _qa.quest.moves, _qa.quest.hater_room)
+_ran_ok = (_first[0] == _Q.ACCEPTED and _first[1] == 1 and _first[2] is not None
+           and _first[2] in _qa.rooms.doors(_qa.rooms.quest_room))
+for _ in range(10):
+    if _qa.quest_dialog is not None or _qa.quest.hater_room is None:
+        break
+    _was = _qa.quest.hater_room
+    _walk_in(_qa, _was, talk=False)
+    if _qa.quest.hater_room not in (_was, None):
+        _ran_ok = _ran_ok and _qa.quest.hater_room in _qa.rooms.doors(_was) \
+            and _qa.quest.hater_room != _qa.prev_room and _qa.quest.hater_room != _qa.rooms.quest_room
+check("the hater runs from the Reaper and from the squad, never back to either",
+      _ran_ok, f"{_first}")
+check("after five moves he stays and offers to pay",
+      _qa.quest_dialog is not None and _qa.quest.moves <= 5
+      and _qa.legal_actions() == [("choose", 0), ("choose", 1)], f"moves {_qa.quest.moves}")
+_qa.apply(("choose", 1))
+check("refusing his money is a fight the squad wins, and the quest is Acquired",
+      _qa.quest.status == _Q.ACQUIRED and len(_qa.squad) == len(_strong))
+_walk_in(_qa, _qa.rooms.quest_room)
+check("the Reaper pays mutation 230 for him",
+      _qa.quest.status == _Q.FINISHED and any(m.get("ID") == 230 for m in _qa.mutations))
+
+# Spider: three leaflets, one per new room, then the monster pays.
+_qd = _calm(_quest_level("Spider", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qd, _qd.rooms.quest_room)
+_three = [r for r in _qd.rooms.rooms if r not in (_qd.rooms.quest_room, _qd.rooms.start)][:3]
+_walk_in(_qd, _three[0])
+_walk_in(_qd, _three[0])
+_one = (_qd.quest.status, list(_qd.quest.posted))
+for _r in _three[1:]:
+    _walk_in(_qd, _r)
+check("a leaflet goes up in each new room, the third finishing the round",
+      _one == (_Q.ACCEPTED, [_three[0]]) and _qd.quest.status == _Q.ACQUIRED, f"{_one}")
+_g0 = _qd.gold
+_walk_in(_qd, _qd.rooms.quest_room, talk=False)
+_qd.apply(("choose", 1))
+check("the monster pays 50 gold for the leaflets",
+      _qd.gold == _g0 + 50 and _qd.quest.status == _Q.FINISHED)
+
+# Bot: the pay option needs the money; paid, the bot joins; beaten, it joins too.
+_qb = _calm(_quest_level("Bot", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_qb.gold = 20.0
+_walk_in(_qb, _qb.rooms.quest_room)
+_walk_in(_qb, _qb.quest.bot_room, talk=False)
+_rich = _qb.legal_actions()
+_qb.apply(("choose", 1))
+check("with 5 gold the bot can be paid, and it joins the team",
+      _rich == [("choose", 0), ("choose", 1), ("choose", 2)] and _qb.gold == 15.0
+      and [h.cls for h in _qb.squad if h.cls] == ["Bot"] and _qb.quest.status == _Q.ACQUIRED)
+_g0 = _qb.gold
+_walk_in(_qb, _qb.rooms.quest_room, talk=False)
+_qb.apply(("choose", 1))
+check("the gamer takes the bot back and pays 50 gold",
+      _qb.gold == _g0 + 50 and not any(h.cls for h in _qb.squad) and _qb.quest.status == _Q.FINISHED)
+_qb = _calm(_quest_level("Bot", seed=2, squad=[dataclasses.replace(h) for h in _strong]))
+_qb.gold = 0.0
+_walk_in(_qb, _qb.rooms.quest_room)
+_walk_in(_qb, _qb.quest.bot_room, talk=False)
+_poor = _qb.legal_actions()
+_qb.apply(("choose", 0))
+for _ in range(8):
+    if _qb.quest.bot_room is None or _qb.quest.status == _Q.ACQUIRED:
+        break
+    _walk_in(_qb, _qb.quest.bot_room, talk=False)
+check("broke, the bot is threatened, runs, is caught, fought and joins",
+      _poor == [("choose", 0), ("choose", 2)] and _qb.quest.status == _Q.ACQUIRED
+      and [h.cls for h in _qb.squad if h.cls] == ["Bot"] and _qb.quest.moves <= 3,
+      f"{_poor} status {_qb.quest.status} moves {_qb.quest.moves}")
+
+# Level 10. Nurgle: a leaf per enemy killed while Accepted, five for the reward,
+# and an unfinished quest goes on into the next level from its Overrides.
+_qn = _calm(_quest_level("Nurgle", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qn, _qn.rooms.quest_room)
+_qn.quest.killed(_qn, 4)
+_walk_in(_qn, _qn.rooms.quest_room, talk=False)
+_short4 = _qn.quest_dialog is None and _qn.quest.status == _Q.ACCEPTED
+_qn.quest.killed(_qn, 1)
+_g0 = _qn.gold
+_walk_in(_qn, _qn.rooms.quest_room, talk=False)
+_qn.apply(("choose", 0))
+check("Nurgle wants five dead enemies' leaves, and pays 35 gold for them",
+      _short4 and _qn.gold == _g0 + 35 and _qn.quest.status == _Q.FINISHED
+      and _qn.quest.leaves == 0)
+_qn = _calm(_quest_level("Nurgle", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qn, _qn.rooms.quest_room)
+_qn_q = _qn.quest
+_qn.next_level()
+_calm(_qn)
+check("an unfinished Nurgle quest carries into the next level, in its second room",
+      _qn.level == 11 and _qn.quest is _qn_q and _qn.quest.room is not None
+      and _qn.quest.spec["RoomParams"]["room"]["Layout"] == "nurgle-quest-2")
+_qn.quest.killed(_qn, 5)
+_walk_in(_qn, _qn.quest.room, talk=False)
+_qn.apply(("choose", 0))
+_qn.next_level()
+check("and is paid there, and goes no further", _qn_q.status == _Q.FINISHED and _qn.quest is None)
+
+# Flight: on foot, the extra room is revealed and its dialog plays there; by
+# cannon the squad lands in it with 10% of its health gone.
+_qf = _calm(_quest_level("Flight", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qf, _qf.rooms.quest_room, talk=False)
+_qf.apply(("choose", 1))
+check("the cannon lands the squad in the extra room, 10% lighter, holding the helm",
+      _qf.room == _qf.quest.extras[0] and _qf.quest.status == _Q.ACQUIRED
+      and all(abs(h.hp - 0.9) < 1e-9 for h in _qf.squad) and "mik-helmet" in _qf.quest.items)
+_g0 = _qf.gold
+_walk_in(_qf, _qf.rooms.quest_room, talk=False)
+_qf.apply(("choose", 0))
+check("Mike's friend pays 35 gold for the helm", _qf.gold == _g0 + 35 and _qf.quest.status == _Q.FINISHED)
+_qf = _calm(_quest_level("Flight", seed=2, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qf, _qf.rooms.quest_room, talk=False)
+_qf.apply(("choose", 0))
+_xs = _qf.rooms.rooms[_qf.quest.extras[0]].state
+_walk_in(_qf, _qf.quest.extras[0])
+check("on foot, the extra room is marked, and reaching it finds the helm unhurt",
+      _xs != _UNKNOWN and _qf.quest.status == _Q.ACQUIRED and all(h.hp == 1.0 for h in _qf.squad))
+
+# Sword: taken, it joins; the twin joins the boss; after the boss, the reward;
+# too late, nothing.
+_qw = _calm(_quest_level("Sword", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_qw.rooms.rooms[_qw.rooms.boss].cleared = False
+_walk_in(_qw, _qw.rooms.quest_room, talk=False)
+_qw.apply(("choose", 1))
+_boss = _qw.rooms.rooms[_qw.rooms.boss]
+check("the sword joins the team, and its twin will stand with the boss",
+      [h.cls for h in _qw.squad if h.cls] == ["TalkingSword"]
+      and _qw.quest.extra_enemies(_qw, _boss) == [("DeathSword", 1)])
+_qw.room = _qw.rooms.boss
+_stem = _qw.quest.arrive(_qw, _qw.rooms.boss, True, True)
+_qw.open_quest_dialog(_stem)
+_g0 = _qw.gold
+_qw.apply(("choose", 0))
+check("after the boss falls the sword pays 35 gold and leaves",
+      _qw.gold == _g0 + 35 and _qw.quest.status == _Q.FINISHED and not any(h.cls for h in _qw.squad))
+_qw = _calm(_quest_level("Sword", seed=1, squad=[dataclasses.replace(h) for h in _strong]))
+_walk_in(_qw, _qw.rooms.quest_room, talk=False)
+check("met after the boss is dead, the sword has nothing to give",
+      _qw.quest.status == _Q.FINISHED and _qw.quest_dialog is None and not any(h.cls for h in _qw.squad))
+
+# The secret room. On level 7 it touches no room, is a portal, and two other
+# portals switch it on; on the SecretRoom quest's level a sacrifice opens it.
+_ls = RunState.new(_STRICT, seed=3)
+_ls.level = 7
+_ls.generate_level()
+_ls.room = _ls.rooms.start
+_ls.rooms.set_current(_ls.room)
+_calm(_ls)
+_sid = _ls.rooms.secret_rooms[0] if _ls.rooms.secret_rooms else None
+check("a level-7 map has one secret room, a portal with no door",
+      _sid is not None and _ls.rooms.doors(_sid) == [] and _ls.rooms.is_portal(_sid)
+      and _ls.rooms.rooms[_sid].kind == "secret" and len(_ls.rooms.activators) == 2,
+      f"{_sid} {_ls.rooms.activators}")
+_a1, _a2 = _ls.rooms.activators
+_walk_in(_ls, _a1)
+_half = _ls.rooms.rooms[_sid].state
+_walk_in(_ls, _a2)
+check("standing in both activators puts it on the map, where a teleport reaches it",
+      _half == _UNKNOWN and _ls.rooms.rooms[_sid].state != _UNKNOWN
+      and _sid in _ls.rooms.teleports(_a2))
+_g0 = _ls.gold
+_walk_in(_ls, _sid)
+check("the secret room fights nothing and pays nothing",
+      _ls.gold == _g0 and _ls.rooms.rooms[_sid].cleared and not _ls.finished)
+check("secret rooms are left out of the level's room count",
+      _ls.num_rooms == len(_ls.rooms.rooms) - 1)
+
+_qx = _calm(_quest_level("SecretRoom", seed=4,
+                         squad=[_QH(item="broadsword", level=5) for _ in range(10)]))
+_walk_in(_qx, _qx.rooms.quest_room)
+_init = _qx.quest.status
+_qx.apply(("sacrifice", None))
+check("a sacrifice in the mysterious room is a trip to the Moon and back, quest in hand",
+      _init == _Q.INITIALIZED and _qx.quest.status == _Q.ACCEPTED
+      and _qx.room == _qx.rooms.quest_room
+      and _qx.rooms.rooms[_qx.quest.extras[0]].state != _UNKNOWN,
+      f"status {_qx.quest.status}")
+_qx.rooms.rooms[_qx.quest.extras[0]].cleared = False
+_walk_in(_qx, _qx.quest.extras[0])
+check("the maze's fight hands over the book",
+      _qx.quest.status == _Q.ACQUIRED and "comic-book" in _qx.quest.items,
+      f"status {_qx.quest.status}, squad {len(_qx.squad)}")
+_walk_in(_qx, _qx.rooms.quest_room)
+_g0 = _qx.gold
+_qx.apply(("sacrifice", None))
+_opts = _qx.legal_actions()
+_qx.apply(("choose", 0))
+check("a second sacrifice takes the book to the Doctor, who pays 35 gold",
+      _opts == [("choose", 0), ("choose", 1)] and _qx.gold == _g0 + 35
+      and _qx.quest.status == _Q.FINISHED and _qx.room == _qx.rooms.quest_room,
+      f"{_opts}")
+
+# A companion is no human: no item goes to it, and it fights as its own row.
+_qz = _quest_level("Sci", seed=4, squad=[_QH(item=None, cls="Zombie")])
+check("a companion takes no item", _qz.best_item_target("broadsword") is None)
+check("a companion fights as its class row",
+      _qz.specs()[0].name == "Zombie" and _qz.specs()[0].health > 0)
+
+# The quests switch: off generates the same levels with no quest at all.
+_qo = RunState.new(_STRICT, seed=7, quests=False)
+_qo.next_level()
+check("quests off leaves level 2 without a quest or its rooms",
+      _qo.quest is None and not any(r.kind in ("quest", "quest_extra")
+                                    for r in _qo.rooms.rooms.values()))
+
 print("\n== progression ==")
 from sim.data import items_by_quality as _by_quality
 from sim.run import MAX_UNIT_LEVEL as _MAX_LV
@@ -1815,6 +2958,26 @@ check("a level-5 shop draws every quality", set(_drawn) == {1, 2, 3, 4, 5}, f"{d
 _st4.shop_level = 1
 _drawn1 = {_ITEMS[_st4.roll_item()]["Quality"] for _ in range(200)}
 check("a level-1 shop never draws above quality 2", _drawn1 <= {1, 2}, f"{sorted(_drawn1)}")
+
+# Inside a quality the draw is `DynamicWeightedList` with factor 2: every item
+# starts at weight 1, and each pick halves an item's weight against the
+# least-picked one, so over a run the shop cycles through a quality's items.
+_st6 = RunState.new(_STRICT, seed=13)
+_q1 = _by_quality(_STRICT)[1]
+_st6.item_picks = {1: {_q1[0]: 2, _q1[1]: 1}}
+_w = _st6.item_weights(1, _q1)
+check("an item picked k times more than the least-picked weighs 1 / 2^k",
+      _w[0] == 0.25 and _w[1] == 0.5 and all(x == 1.0 for x in _w[2:]), f"{_w[:3]}")
+_st6.item_picks, _st6.shop_level = {}, 1
+for _ in range(300):
+    _st6.roll_item()
+_spread = {q: max(c.get(n, 0) for n in _by_quality(_STRICT)[q])
+           - min(c.get(n, 0) for n in _by_quality(_STRICT)[q])
+           for q, c in _st6.item_picks.items()}
+check("every roll is a pick, and 300 of them leave a quality's counts within 6 "
+      "(a uniform draw spreads them about 15 apart)",
+      sum(sum(c.values()) for c in _st6.item_picks.values()) == 300
+      and max(_spread.values()) <= 6, f"{_spread}")
 
 # never-given items are quest props with no stats; the shop must not sell them
 check("the shop never offers a NeverGiven item",

@@ -72,9 +72,9 @@ matching, and every constant either read from the shipped data or recorded in
 `sim/assumptions.py` as a choice.** That is checkable, and `tools/diff_core.py`
 already works to exactly this standard for the battle loop.
 
-Some constants will never be recovered: `maxDeadEnds`, `minFinishDistance`,
-whether a room may cover several squares, the anti-repeat weighting inside a
-quality. `sim/assumptions.py` is the honest boundary of the work, not a list
+Some constants will never be recovered. (`maxDeadEnds`, `minFinishDistance`,
+whether a room may cover several squares and the anti-repeat weighting inside
+a quality, once on this list, were all recovered.) `sim/assumptions.py` is the honest boundary of the work, not a list
 that eventually empties.
 
 ## The rule that makes completeness real
@@ -132,7 +132,10 @@ thrown away.
   `--lights-on` is the control it needs and it exists now: it reveals the whole
   level at an unchanged `obs_dim`, so the pre-fog observation is an arm rather
   than a code change. The other two candidates are a few lines from here, one
-  dropping the two boss features and one dropping the frontier.
+  dropping the two boss features and one dropping the frontier. **Measured at
+  the boundary, 2026-10-30**: twelve seeds at 2M per arm, and the boss
+  distance bought nothing (`noboss` +0.153 [-0.012, +0.318] against the
+  shipped arm, +0.102 [+0.016, +0.189] at 1M), so `noboss` ships now.
 - ~~**Portals.**~~ **Done, 2026-10-29**, and with them the rest of
   `PositionRooms`. `portalsCount = num / 7 + 1`, `minPortalDistance = 3` and
   `minFinishDistance = num / 6 + 2` are all written by `C_Rooms.Generate`, so
@@ -143,22 +146,49 @@ thrown away.
   are worth +0.237 [+0.115, +0.360] levels to the heuristic, paired. `obs_dim`
   210 to 258, actions 33 to 36. Details in `notes/reference-sim.md`, "Portals,
   and `PositionRooms` read end to end".
-- **The remaining room types.** `Secret` (with `activatesSecret`,
-  `secretIsActive`, `roomsToActivateSecret = 2`, `secretRoomCount`, and
-  `SecretRoom: true` on level 7), `TalentShop`, `PermanentShop`,
-  `ConsumableShop`, `QuestExtra`, `FinalBoss`.
-- **The shrine split.** `Shrines` is 1 at level 1 and 0 after, while
-  `RerollShrines` is 1 from level 2 on. The placement is right:
-  `ChooseTreasureRooms` gives `RerollShrines` the `MutationShop` bit (`0x140`)
-  and the port does the same. What is left is the shop's own parameters, the
-  `m1` defaults in `sim/assumptions.py`.
-- **Quests.** Eleven in `Quests.json`, each with `Doors`, `ExtraRooms`,
-  `RoomParams` (a named `Layout`, directional priorities,
-  `guaranteedPositions`) and per-quest fields. `C_Rooms.CreateQuest`, the
-  `QuestStatus` lifecycle, the per-level shortlist (levels 2, 6 and 10 only),
-  and `questCount` / `extraQuestRoomCount` / `questRoomAllowedDoors` /
-  `questRoomGuaranteedDoors`. Settles whether a quest room fights.
-- **Dialogs.** `C_Levels.StartDialog` fires one on every level change, drawn
+- ~~**The remaining room types.**~~ **Done, 2026-10-30.** `Secret`: made by
+  `MaybeMakeSecretRoom` off the door graph, a portal, switched on by two
+  `activatesSecret` portals; its level-7 shop's pool has no data in any
+  ruleset, so it is empty (`sim/assumptions.py`). `ConsumableShop` and
+  `QuestExtra` landed earlier. `TalentShop` (`StatShops`) is 0 on every Default
+  level, `FinalBoss`'s item shop is past the end of the run, and
+  `PermanentShop` is not made by the Default generator.
+- ~~**The shrine split.**~~ **Done, 2026-10-29.** The placement was right
+  (`ChooseTreasureRooms` gives `RerollShrines` the `MutationShop` bit), and the
+  shop's own parameters were not: `C_Room..ctor` builds a generated mutation
+  shop as 3 shown, 1 taken, 2 free rerolls, where the sim used `m1`'s 10 and 2
+  and no reroll. Draws exclude what the run holds. The shelf is now worth +0.04
+  [-0.02, +0.10] to the heuristic, against +0.13 on the old shelf.
+- ~~**Wounds between fights.**~~ **Done, 2026-10-29**, found on the way: in
+  Default nothing heals a unit between fights, and the sim healed every unit to
+  full before each one. `Human.hp` carries the share. Worth **-1.000 [-1.105,
+  -0.895]** levels to the heuristic, the largest single change this project has
+  measured. `FoodPackHeal` implemented with it.
+- ~~**The boss room and the pipe.**~~ **Done, 2026-10-29.** `C_Levels.WinLevel`
+  does not move the squad; `V_Pipes` is the only gameplay caller of
+  `ChangeLevel`. The run stays on the level after the boss until it takes the
+  pipe (`descend`), and every boss room but the last has a free three-slot
+  consumable shop.
+- ~~**Quests.**~~ **Done, 2026-10-30**, all eleven. Every quest's rooms are placed
+  (`ChooseQuestRoom`, `ChooseQuestExtraRoom`, `CountValidPaths`), typed, paid
+  and fought as the game does; the dialogs are the NodeCanvas trees
+  `tools/dump_dialogue_trees.py` pulls out of `sharedassets2/3.assets`, run by
+  `sim/quests.py`; Pit, Sci, Cube, Rat, Reaper, Spider, Bot, Nurgle (into its
+  second level), Flight, Sword and SecretRoom are ported, with their
+  companions (Zombie, Rat, Bot, TalkingSword). `RoomTransition.CheckDirection` turned out to
+  refuse moves into `Unknown` rooms, which the sim had allowed. Worth -0.072
+  [-0.124, -0.020] to the heuristic over 2400 seeds, which passes quests by
+  (following them costs it -0.028 [-0.049, -0.007] more; the first 240-seed
+  reading, -0.121 and -0.113, sat low). Details in `notes/reference-sim.md`. The
+  level-2 reward mutations (218 CastSpeed, 233 CSRange, 306 ClassSkill, 328
+  CSTauntTime) moved to Batch 2 with the other mutations that have no handler,
+  and which Novices the Pit takes (the room's `guaranteedPositions`) stays an
+  assumption (`quests_partly_ported`) for Batch 4's audit.
+- ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26
+  of their event types, plus consumable 13 (`DejaVu` followed, see Consumables). Worth +0.196
+  [+0.021, +0.370] levels to the heuristic, and choosing well +0.154 over
+  random. Details in `notes/reference-sim.md`. The original plan follows.
+  `C_Levels.StartDialog` fires one on every level change, drawn
   without replacement, with `M_Dialog`'s `choices`, branching `outcomes` and
   `M_Event[]`. **The agent currently makes zero choices per level transition
   where a player makes one.** The table is **found**: it is
@@ -169,27 +199,38 @@ thrown away.
   events, the gates that fill `enableds` and `hiddens`, and the choice itself as
   an action in the observation. `unlocks` is unused in the shipped file, so skip
   it. Note the second entry point: consumable ID 10 fires `Dialog.DejaVu`.
-- **Consumables.** `Consumables.json`, `ConsumablesByLevel.json`, and
-  `Rooms.json`'s `Consumables` and `SellCost`. Thought unreachable in Default
-  (all eight chips have `StatShops: 0`), but `ChooseFinishRoom` makes every boss
-  but the last `Boss | ConsumableShop`, and `C_Room.InitShop` builds its shop
-  from the class of the room's shop model rather than from `TalentShop`. Read
-  where the shop models are made (`C_Rooms.FromGeneratedData`) first: if the
-  boss room gets an `M_ConsumableShop`, consumables are live in every Default
-  run, and the run may also wait in the boss room after the win where the sim
-  moves straight to the next level. `KingOfTheHill`, `Arcade` and `Tasks` are
-  unchecked. Implement the mechanism, then record where it fires.
-- **Layouts.** `LayoutsByPack.json` and `SpecialRoomLayouts.csv`, neither named
-  anywhere in the sim, plus `M_EnemyPack.ChooseLayout`.
-- **`InstantTransitions`**, and one more attempt at `maxDeadEnds` and
-  multi-square rooms. `minFinishDistance` is recovered. `maxDeadEnds` really is
-  0 (the struct is zeroed and the one delegate subscriber does not touch it), so
-  the next place to look is `LevelGenerator.Adjust` itself, and the room-list
-  order is in `CreateRooms`.
+- ~~**Consumables.**~~ **Done, 2026-10-29**; Event and DejaVu followed on
+  2026-10-30, so thirteen of the fourteen (DamageAllEnemies is on no Default
+  list). The first pass, eleven of the fourteen: they are
+  live in every Default run, from the boss rooms. Two carried, free to take,
+  5 gold to sell; heals, the cleaner, reserves, resurrection, teleport,
+  AntiHunger and reroll modelled. DejaVu and Event wait on dialogs;
+  DamageAllEnemies is on no Default list. Worth +0.721 [+0.597, +0.844] levels
+  to the heuristic. Open: the placement stage, where the game lets a cleaner be
+  used after the pack is on screen (`sim/assumptions.py`). The long-run reward
+  (a won level 4 makes the next run's start a two-slot consumable shop) is in
+  since 2026-10-30: +0.147 [+0.090, +0.205] on a run that has it, off by
+  default in the env, "carry" for the save's behaviour.
+- ~~**Layouts.**~~ **Done, 2026-10-30**, for the packs: each fights in its one
+  `LayoutsByPack` layout with every enemy in its row's zone, where the sim drew
+  any of 77 layouts with everyone in `e1`. Worth -0.263 [-0.439, -0.086] to the
+  heuristic. `SpecialRoomLayouts.csv` landed with the quests.
+- ~~**`InstantTransitions`**~~ **closed, 2026-10-30**: `M_GameData.instantTransitions`
+  is false in every shipped ruleset, and the path it would switch on,
+  `C_Rooms.InstantMove`, spends food through `C_Food.Move` exactly as a walk
+  does. Nothing to model.
+- ~~**`maxDeadEnds`**~~ **Done, 2026-10-30.** It really is 0; what the port had
+  wrong was `Adjust`, which trades each cut dead end for a room on a uniformly
+  drawn open position, keeping the count, and stops when none is accepted
+  (undoing the last cut). `CloseLoops` moves dead ends into the gap of a ring
+  of seven rooms. Growth, `Adjust`, `CloseLoops` run once each. Multi-square
+  rooms do not exist: `RoomNode` and `M_Room` hold one grid position each.
 
 **Boundary:** re-baseline random + heuristic over 240 seeds, squads cycled, then
 one sweep for the `to_boss` question, which is a genuine fork rather than a
-feature.
+feature. **Done, 2026-10-30**: random 1.235, heuristic 3.350 over 2400 seeds
+from 40000 (240 proved too few for effects under a fifth of a level), and the
+fork sweep above. Both are in `notes/rl.md`.
 
 # Batch 2 — the battle layer, complete
 
@@ -205,7 +246,9 @@ against Batch 1's baseline.
   `sim/battle.py` and the Rust core.
 - **The 28 mutation names with no handler**, of 101 shipped. 259 of 1,094 offers
   are implemented, which is what caps the shelf at +0.13 and therefore caps
-  every mutation result in `notes/rl.md`.
+  every mutation result in `notes/rl.md`. Start with the four level-2 quest
+  rewards (218, 233, 306, 328): while they do nothing, the heuristic takes the
+  gold those quests offer instead.
 - **An audit of the 79 that do have handlers.** Three read the wrong key and did
   nothing while counting as implemented (`vampirism` reading `percent` where the
   rows say `value`, then `ExplodeProjectile`, then `EventualKnockback`). There
@@ -262,19 +305,18 @@ on.
 
 ## Where the next session picks up
 
-State at the close of 2026-09-02: nothing running, `main` clean and pushed,
-`room-fights` merged. Baselines on the current environment are **random 1.429,
-heuristic 3.946** over 240 seeds with the squads cycled; the best trained agent
-is `roomfight4m_long_s9` at 4.600 against an arm mean of 3.918, which is a draw
-with the heuristic rather than a win.
+State at the close of 2026-10-30: Batch 1 is done and merged into `main`.
+Baselines are **random 1.235, heuristic 3.350** over 2400 seeds from 40000.
+PPO at 2M loses to the heuristic by 0.6 to 0.8 levels and was still improving
+from 1M to 2M, so the next agent sweep should run to 4M at least. **Start Batch
+2** with the mutations that have no handler, the four level-2 quest rewards
+first, then the `C_Fight` escalation schedule.
 
 The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
-**stopped part-way and its checkpoints deleted**. Do not look for its results.
-Re-run it after Batch 1 if the question still matters; it will have to be
-re-trained against the new interface anyway.
+**stopped part-way and its checkpoints deleted** on 2026-09-02. Re-run it if
+the question still matters; it has to be trained against the new interface.
 
-**Start with Batch 1**, and inside it start with the two things that unblock the
-rest:
+How Batch 1 started, for the record:
 
 1. ~~Locate the dialog table.~~ **Done, 2026-09-02.** It is
    `EncryptedMainGroup/dialogs.json`, beside `DB/` rather than inside it, which
@@ -304,8 +346,8 @@ Tools that did not exist before this session and are worth knowing about:
 
 ## Tests and CI
 
-Done 2026-10-04 (commits `2423de8`, `0a51096`). `tests/` holds 160 tests that need no
-game data, and GitHub Actions builds the Rust core and runs them on every push:
+Done 2026-10-04 (commits `2423de8`, `0a51096`). `tests/` holds the tests that need no
+game data (172 tests in all on 2026-10-30, the two validate suites included), and GitHub Actions builds the Rust core and runs them on every push:
 pathfinding against a reference Dijkstra, ORCA's no-collision guarantee, the
 behaviour-tree node semantics, the ruleset layering on a synthetic metadata tree,
 level-generation invariants, Rijndael at Nb=4 against the FIPS-197 vectors, and the

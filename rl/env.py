@@ -28,6 +28,8 @@ picks the human who gains the most Power by it. See `best_item_target`.
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 
 try:
@@ -38,9 +40,13 @@ except ImportError:  # the env is usable without gymnasium installed
     spaces = None
 
 from sim.data import load_ruleset
-from sim.mapgen import portals_count
-from sim.run import (EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
-                     squad_names)
+from sim.dialogs import MAX_CHOICES as DIALOG_CHOICES
+from sim.dialogs import decision_nodes, pool as dialog_pool
+from sim.mapgen import portals_count, secret_room_count
+from sim.quests import QUEST_ENUM, decision_nodes as quest_decision_nodes, quest_spec, shortlist
+from sim.run import (CONSUMABLE_FAMILIES, CONSUMABLE_SHELF, CONSUMABLE_SLOTS,
+                     EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
+                     consumable_family, squad_names)
 
 # The widest shop is `max(ItemShopData.Quantity)` = 7 slots, at shop level 5.
 # Checked against the table in `__init__` rather than trusted.
@@ -52,17 +58,29 @@ FOOD_PACKS = 5
 
 # A mutation shop shows `MUTATION_SHOP["ShowCount"]` mutations and lets the run
 # take `BuyCount` of them. One action per slot, for the same reason the item
-# shop has one per slot.
-MUTATION_SLOTS = 10
+# shop has one per slot. Three on a generated level and four in a secret room's
+# shop, so four slots; this was ten while the shelf was `m1`'s.
+MUTATION_SLOTS = 4
 
 # Fixed action layout: room moves first, then the non-move actions.
 NON_MOVE_ACTIONS = (tuple(f"buy_item_{i}" for i in range(SHOP_SLOTS))
                     + tuple(f"buy_food_{i}" for i in range(FOOD_PACKS))
                     + tuple(f"buy_mutation_{i}" for i in range(MUTATION_SLOTS))
                     + ("reroll", "upgrade_shop", "buy_exp",
-                       "buy_human", "take_mutation", "sacrifice"))
+                       "buy_human", "take_mutation", "sacrifice",
+                       "reroll_mutations", "descend")
+                    + tuple(f"take_consumable_{i}" for i in range(CONSUMABLE_SHELF))
+                    + tuple(f"use_consumable_{i}" for i in range(CONSUMABLE_SLOTS))
+                    + tuple(f"sell_consumable_{i}" for i in range(CONSUMABLE_SLOTS))
+                    + tuple(f"choose_{i}" for i in range(DIALOG_CHOICES)))
 ROOM_KINDS = ("start", "fight", "boss", "item_shop", "food_shop", "mutation",
-              "mutation_shop", "talent_shop", "empty")
+              "mutation_shop", "talent_shop", "empty", "quest", "quest_extra")
+
+# The quest names, for the one-hot of the level's quest, and the statuses a
+# quest passes through (`QuestStatus` Uninitialized, Accepted, Acquired,
+# Finished); anything else reads as none of them.
+QUEST_NAMES = tuple(sorted(QUEST_ENUM, key=QUEST_ENUM.get))
+QUEST_STATUSES = (0, 1, 4, 8)
 
 # A move is a direction, not a room: (row, col) deltas.
 MOVES = (("north", (-1, 0)), ("south", (1, 0)),
@@ -70,9 +88,10 @@ MOVES = (("north", (-1, 0)), ("south", (1, 0)),
 
 # One teleport action per portal on the level. `ChoosePortals` places
 # `portalsCount = num / 7 + 1` and then one more in the middle, so a Default
-# level holds at most `MaxRooms / 7 + 2`: four at 18 rooms. Checked against the
-# level rows in `__init__` rather than trusted.
-TELEPORT_SLOTS = 4
+# level holds at most `MaxRooms / 7 + 2`: four at 18 rooms. A secret room is a
+# portal of its own on top (level 7, and the SecretRoom quest's level), which
+# makes five. Checked against the level rows in `__init__` rather than trusted.
+TELEPORT_SLOTS = 5
 MOVE_NAMES = tuple(name for name, _ in MOVES) + tuple(
     f"teleport_{i}" for i in range(TELEPORT_SLOTS))
 
@@ -96,7 +115,12 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  blind_shelf: bool = False,
                  squad: str | None = None,
                  blind_squad: bool = False,
-                 lights_on: bool = False):
+                 lights_on: bool = False,
+                 dialogs: bool = True,
+                 quests: bool = True,
+                 long_run_reward: bool | str = False,
+                 boss_distance: bool = False,
+                 blind_frontier: bool = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -147,6 +171,29 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # `to_boss` fork to the batch-1 boundary; this is the control that lets
         # it be run as arms rather than as a code change.
         self.lights_on = lights_on
+        # The other two arms of the `to_boss` fork, in the same shape: entries
+        # held at zero and kept in the vector. The entries read off the distance
+        # to the boss (the found flag, this room's distance, each neighbour's
+        # "nearer" bit) are zero unless `boss_distance` is set: the fork's sweep
+        # at the batch-1 boundary found them worth nothing (`notes/rl.md`, "The
+        # fog fork at 2M"), so the shipped observation is its `noboss` arm and
+        # `boss_distance=True` is the old one. `blind_frontier` zeroes the share
+        # of the revealed map still unentered.
+        self.boss_distance = boss_distance
+        self.blind_frontier = blind_frontier
+        # The level-entry dialogs. Off is a run without them, which exists to
+        # measure what they change and for checks of other mechanics.
+        self.dialogs = dialogs
+        # The quests, likewise: off generates every level without one.
+        self.quests = quests
+        # The persistent flag a won level 4 leaves for the next run (see
+        # `RunState.long_run_reward`): False never sets it, which is a fresh
+        # save and keeps every seed's run independent of the episodes before
+        # it; True sets it on every run; "carry" keeps it between episodes the
+        # way the game's save does, so an episode that beats level 4 opens the
+        # next one with a consumable shop.
+        self.long_run_reward = long_run_reward
+        self._long_run_flag = False
         # "flat": +10 a level. "rising": +10 x the level reached, so the fifth
         # level is worth five times the first. Levels get exponentially harder
         # (a room is 800 Power at level 1 and 24,600 by level 6) while a flat
@@ -167,6 +214,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.move_names = MOVE_NAMES
         self.n_actions = self.n_moves + len(NON_MOVE_ACTIONS)
         most = max(portals_count(int(r.get("MaxRooms") or r.get("MinRooms") or 7)) + 1
+                   + secret_room_count(r, None)
+                   + max([int((quest_spec(self.tables, q) or {}).get("SecretRooms") or 0)
+                          for q in shortlist(r)] or [0])
                    for r in self.tables["Levels"])
         if most > TELEPORT_SLOTS:
             raise ValueError(f"a level can hold {most} portals, "
@@ -189,6 +239,15 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.item_quality = {i["Name"]: int(i.get("Quality") or 1)
                              for i in self.tables["Items"]}
 
+        # Every dialog node that shows two or more choices, for the one-hot that
+        # says which question is on screen. The player reads the text; this is
+        # the same information as a fixed index, and the choice index means the
+        # same button every time that node comes up.
+        self.dialog_nodes = {key: i for i, key in
+                             enumerate(decision_nodes(dialog_pool(self.tables)))}
+        # The same for the quest dialogs, whose nodes are NodeCanvas ids.
+        self.quest_nodes = {key: i for i, key in enumerate(quest_decision_nodes())}
+
         self.state: RunState | None = None
         self.steps = 0
         obs_dim = len(self._encode(probe))
@@ -201,6 +260,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
 
     # -- encoding ----------------------------------------------------------
     def _encode(self, st: RunState) -> np.ndarray:
+        """The observation, of the level as the fog leaves it or, for the
+        `lights_on` arm, of the level with every room revealed."""
+        if not self.lights_on:
+            return self._encode_view(st)
+        with self.lit_view(st):
+            return self._encode_view(st)
+
+    def _encode_view(self, st: RunState) -> np.ndarray:
         f = st.food
         # Progression, which the observation had no way to see: how far the
         # squad's levels have come, how strong it is against the room it is
@@ -238,6 +305,10 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             st.shop_level / max(1, st.max_shop_level),
             np.log1p(st.squad_power()) / 12.0,
             float(np.clip(np.log1p(st.squad_power() / max(1.0, room)) / 4.0, -10.0, 10.0)),
+            # The squad's wounds, which carry from fight to fight. The health
+            # bars are on screen, so these are fair to show.
+            sum(h.hp for h in st.squad) / max(1, len(st.squad)),
+            min((h.hp for h in st.squad), default=0.0),
         ]
 
         # squad composition by class
@@ -285,7 +356,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # does not stand in for it, because 96 of the 603 modelled offers attach
         # no passive and are exactly the ones measuring at zero.
         per_m = 7
-        shelf_m = np.zeros(MUTATION_SLOTS * per_m + 2, dtype=np.float32)
+        shelf_m = np.zeros(MUTATION_SLOTS * per_m + 3, dtype=np.float32)
         room_now = st.rooms.rooms[st.room]
         if room_now.kind == "mutation_shop":
             st.ensure_stock(room_now)
@@ -309,6 +380,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                 shelf_m[base + 6] = 1.0 if e["passive"] else 0.0
             shelf_m[MUTATION_SLOTS * per_m] = (
                 room_now.takes_left / max(1, int(MUTATION_SHOP["BuyCount"])))
+            # The rerolls left, which the shop shows on its button.
+            shelf_m[MUTATION_SLOTS * per_m + 2] = (
+                room_now.rolls_left / max(1, int(MUTATION_SHOP["RollCount"])))
         elif room_now.kind == "mutation":
             # The shrine's one free mutation. Without this a stocked shrine and
             # a spent one encode identically and only the action mask separates
@@ -348,7 +422,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         #
         # Every door neighbour of the room the squad stands in was revealed by
         # `set_current` on entry, so these are always at least `UNEXPLORED` and
-        # reading them leaks nothing.
+        # reading them leaks nothing. The one exception is a quest's extra
+        # room, which the walk-past reveal skips: a door to one shows as a door
+        # and nothing more until the quest puts the room on the map.
         #
         # The teleport slots describe the level's portals the same way, and are
         # filled for every portal on the map, not only while the squad stands
@@ -357,26 +433,40 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # and an `explored-teleport` sprite. The mask says when they are legal.
         # Whether a room is a portal is the fifth bit, for a door neighbour as
         # much as for a slot.
-        per = 5 + len(ROOM_KINDS)
+        per = 7 + len(ROOM_KINDS)
         around = np.zeros(self.n_moves * per, dtype=np.float32)
         known = st.rooms.known_to_boss
         far = max(1, max(known.values(), default=1))
         d_here = known.get(st.room, far)
+        # The same "nearer" bit toward the quest's rooms, over the revealed
+        # map, so the policy can be told where an accepted quest sends it.
+        to_quest, to_extra = self._quest_distances(st)
         for i, rid in enumerate(self._move_targets(st)):
             if rid is None:
                 continue
             room = st.rooms.rooms[rid]
             base = i * per
             around[base] = 1.0
+            # A door to a room the map does not show: a quest's extra room
+            # before the quest reveals it (`NEVER_REVEALED`). The door is
+            # there; nothing behind it is.
+            if room.state == UNKNOWN:
+                continue
             around[base + 1] = 1.0 if room.cleared else 0.0
             # Unexplored means never entered, which is what the minimap shows
             # and what `cleared` cannot say on its own: a room walked into and
             # lost in is explored and uncleared both.
             around[base + 2] = 1.0 if room.state == UNEXPLORED else 0.0
-            around[base + 3] = (1.0 if known and known.get(rid, far) < d_here
-                                else 0.0)
+            around[base + 3] = (1.0 if known and self.boss_distance
+                                and known.get(rid, far) < d_here else 0.0)
             around[base + 4] = 1.0 if st.rooms.is_portal(rid) else 0.0
-            around[base + 5:base + per] = self._kinds(room)
+            if to_quest:
+                around[base + 5] = 1.0 if (to_quest.get(rid, far + 1)
+                                           < to_quest.get(st.room, far + 1)) else 0.0
+            if to_extra:
+                around[base + 6] = 1.0 if (to_extra.get(rid, far + 1)
+                                           < to_extra.get(st.room, far + 1)) else 0.0
+            around[base + 7:base + per] = self._kinds(room)
 
         # and where this room sits in the level **as far as it has been seen**.
         # Every one of these used to be computed over `st.rooms.rooms`, the
@@ -394,8 +484,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # Without the flag a distance of 0 means "standing on the boss" and
             # "no idea where the boss is" at once, and the two want opposite
             # moves.
-            boss_found,
-            (d_here / far) if boss_found else 0.0,
+            boss_found if self.boss_distance else 0.0,
+            (d_here / far) if boss_found and self.boss_distance else 0.0,
             sum(1 for r in seen if r.cleared) / max(1, len(seen)),
             len(seen) / 20.0,
             sum(1 for r in pantries
@@ -405,11 +495,72 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # frontier the exploration decision is actually made against, and
             # with the level size hidden it is the only sense of "how much is
             # left" the policy has.
-            sum(1 for r in seen if r.state == UNEXPLORED) / max(1, len(seen)),
+            0.0 if self.blind_frontier
+            else sum(1 for r in seen if r.state == UNEXPLORED) / max(1, len(seen)),
             # Standing on a portal, which is what makes the teleport slots
             # legal. The `current-teleport` sprite shows it.
             1.0 if st.rooms.is_portal(st.room) else 0.0,
         ]
+
+        # The consumables: what the run carries, with its charges, what the boss
+        # room's shop is showing, and what is waiting on the next room or
+        # fight. All of it is on screen. `level_won` is the open pipe.
+        fams = len(CONSUMABLE_FAMILIES)
+        carried = np.zeros(CONSUMABLE_SLOTS * (2 + fams), dtype=np.float32)
+        for k, c in enumerate(st.consumables[:CONSUMABLE_SLOTS]):
+            base = k * (2 + fams)
+            carried[base] = 1.0
+            carried[base + 1] = min(1.0, c.charges / 3.0)
+            carried[base + 2 + CONSUMABLE_FAMILIES.index(consumable_family(c.row))] = 1.0
+        on_shelf = np.zeros(CONSUMABLE_SHELF * (1 + fams), dtype=np.float32)
+        if st.consumable_shelf(room_now):
+            st.ensure_stock(room_now)
+            for i, row in enumerate((room_now.consumable_offer or [])[:CONSUMABLE_SHELF]):
+                if row is None:
+                    continue
+                base = i * (1 + fams)
+                on_shelf[base] = 1.0
+                on_shelf[base + 1 + CONSUMABLE_FAMILIES.index(consumable_family(row))] = 1.0
+        waiting = np.asarray([
+            1.0 if st.level_won else 0.0,
+            1.0 if st.armed.get("cleaner") else 0.0,
+            1.0 if st.armed.get("anti_hunger") else 0.0,
+            min(1.0, len(st.armed.get("allies") or []) / 3.0),
+            1.0 if room_now.corpses else 0.0,
+        ], dtype=np.float32)
+
+        # The dialog on screen, if any: a flag and which decision node it is at.
+        talk = np.zeros(1 + len(self.dialog_nodes), dtype=np.float32)
+        if st.dialog is not None:
+            talk[0] = 1.0
+            i = self.dialog_nodes.get((st.dialog.name, st.dialog.path))
+            if i is not None:
+                talk[1 + i] = 1.0
+
+        # The level's quest: which one, where it stands, how many companions it
+        # put in the team, and the quest dialog on screen if there is one.
+        quest = np.zeros(1 + len(QUEST_NAMES) + len(QUEST_STATUSES) + 4, dtype=np.float32)
+        q = st.quest
+        if q is not None:
+            quest[0] = 1.0
+            if q.name in QUEST_NAMES:
+                quest[1 + QUEST_NAMES.index(q.name)] = 1.0
+            if q.status in QUEST_STATUSES:
+                quest[1 + len(QUEST_NAMES) + QUEST_STATUSES.index(q.status)] = 1.0
+            base = 1 + len(QUEST_NAMES) + len(QUEST_STATUSES)
+            quest[base] = min(1.0, sum(1 for h in st.squad if h.cls) / 2.0)
+            quest[base + 1] = (min(1.0, to_quest.get(st.room, far + 1) / (far + 1))
+                               if to_quest else 1.0)
+            quest[base + 2] = (min(1.0, to_extra.get(st.room, far + 1) / (far + 1))
+                               if to_extra else 1.0)
+            quest[base + 3] = (1.0 if any(st.rooms.rooms[r].cleared for r in q.marked(st))
+                               else 0.0)
+        qtalk = np.zeros(1 + len(self.quest_nodes), dtype=np.float32)
+        if st.quest_dialog is not None:
+            qtalk[0] = 1.0
+            i = self.quest_nodes.get((st.quest_dialog.stem, st.quest_dialog.at))
+            if i is not None:
+                qtalk[1 + i] = 1.0
 
         # Which squad this run is playing. The policy has to know: the eight
         # differ in size, in whether they field a frontline and in whether they
@@ -424,6 +575,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             np.asarray(level_view, dtype=np.float32),
             np.asarray(comp, dtype=np.float32),
             here_kind, shelf, larder, shelf_m, around, who,
+            carried, on_shelf, waiting, talk, quest, qtalk,
         ]).astype(np.float32)
 
     @staticmethod
@@ -434,6 +586,22 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             if room.has(kind):
                 out[i] = 1.0
         return out
+
+    @staticmethod
+    def _quest_distances(st: RunState) -> tuple[dict, dict]:
+        """Distances over the revealed map to the quest room and to the nearest
+        room the quest points at (`Quest.marked`: its extra rooms, or the
+        Reaper's hater and the Bot); empty where nothing is on the map."""
+        q = st.quest
+        if q is None or q.room is None:
+            return {}, {}
+        to_quest = st.rooms._distances(q.room, known_only=True)
+        to_extra: dict = {}
+        for rid in q.marked(st):
+            for k, d in st.rooms._distances(rid, known_only=True).items():
+                if d < to_extra.get(k, 1 << 30):
+                    to_extra[k] = d
+        return to_quest, to_extra
 
     def _move_targets(self, st: RunState) -> list:
         """The room each move slot leads to from where the squad stands, or None.
@@ -505,6 +673,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             return ("buy_food", int(name.rsplit("_", 1)[1]))
         if name.startswith("buy_mutation_"):
             return ("buy_mutation", int(name.rsplit("_", 1)[1]))
+        for family in ("take_consumable", "use_consumable", "sell_consumable", "choose"):
+            if name.startswith(family + "_"):
+                return (family, int(name.rsplit("_", 1)[1]))
         return (name, None)
 
     def _index(self, action) -> int | None:
@@ -534,6 +705,10 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             if slot >= MUTATION_SLOTS:
                 return None
             kind = f"buy_mutation_{slot}"
+        if kind in ("take_consumable", "use_consumable", "sell_consumable", "choose"):
+            kind = f"{kind}_{int(arg or 0)}"
+            if kind not in NON_MOVE_ACTIONS:
+                return None
         return self.n_moves + NON_MOVE_ACTIONS.index(kind)
 
     def action_mask(self) -> np.ndarray:
@@ -558,32 +733,50 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             self._seed = seed
         self.squad_name = (self.squad if self.squad is not None
                            else self.squads[self._seed % len(self.squads)])
+        if self.long_run_reward == "carry":
+            prev = getattr(self, "state", None)
+            flag = self._long_run_flag or bool(prev and prev.long_run_reward_earned)
+        else:
+            flag = bool(self.long_run_reward)
         self.state = RunState.new(self.tables, seed=self._seed,
-                                  squad_name=self.squad_name)
+                                  squad_name=self.squad_name, dialogs=self.dialogs,
+                                  quests=self.quests, long_run_reward=flag)
+        # `C_Rooms.Generate` clears the flag when it takes it.
+        self._long_run_flag = flag and not self.state.long_run_reward_used
         self.state.use_fast_core = self.fast_core
         if self.placement_policy is not None:
             self.state.placement_policy = self.placement_policy
-        self._light_up()
         self._seed += 1
         self.steps = 0
         self._mask_cache = None
         return self._encode(self.state), {"action_mask": self.action_mask()}
 
-    def _light_up(self) -> None:
-        """Reveal the level, for the `lights_on` ablation arm.
+    @staticmethod
+    @contextlib.contextmanager
+    def lit_view(st: RunState):
+        """The level with every room revealed, for as long as the block runs.
 
-        `EXPLORED` rather than `UNEXPLORED` so the frontier fraction reads zero
-        and the arm sees the level the way the pre-fog env did: entirely known.
-        The current room keeps its own state, which `set_current` has already
-        written.
+        The `lights_on` arm encodes inside it, and a policy that reads the run
+        state (the heuristic) can decide inside it. `EXPLORED` rather than
+        `UNEXPLORED` so the frontier fraction reads zero and the level looks
+        the way the pre-fog env showed it: entirely known. Only the view is
+        lit. The states go back afterwards, because since
+        `RoomTransition.CheckDirection` a move into an `Unknown` room is
+        illegal and the Teleport consumable draws from the `Unknown` rooms, so
+        a reveal written into the run (as this arm used to do) changes what
+        the arm can do as well as what it knows.
         """
-        if not self.lights_on or self.state is None:
-            return
-        rooms = self.state.rooms
-        for room in rooms.rooms.values():
-            if room.state == UNKNOWN:
-                room.state = EXPLORED
+        rooms = st.rooms
+        hidden = [r for r in rooms.rooms.values() if r.state == UNKNOWN]
+        for room in hidden:
+            room.state = EXPLORED
         rooms._refresh_known()
+        try:
+            yield
+        finally:
+            for room in hidden:
+                room.state = UNKNOWN
+            rooms._refresh_known()
 
     def step(self, action: int):
         st = self.state
@@ -606,7 +799,6 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         squad_before = len(st.squad)
         phi_before = self.potential(st)
         result = st.apply(self._decode(action))
-        self._light_up()                 # after `apply`, which is what moves rooms
         self._mask_cache = None          # the state moved; the mask is stale
         self.steps += 1
 

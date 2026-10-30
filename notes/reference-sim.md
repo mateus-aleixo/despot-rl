@@ -654,7 +654,8 @@ saying *when* the shop refills a bought-out slot. It is modelled as one free
 refill of empty slots the first time you enter a shop room, tracked per room so
 that leaving and coming back is not a free reroll. And within one quality the
 game draws from a `DynamicWeightedList` with factor 2, which biases against
-repeating a recent draw; the sim draws uniformly.
+repeating a recent draw; the sim draws uniformly. (Read and modelled since,
+see "The anti-repeat weighting, read (2026-10-30)" below.)
 
 The pool itself is measured, not assumed: `M_Item.neverGiven` comes from
 `Meta.Items[name].NeverGiven`, true for exactly six rows (plant-leaf, leaflet,
@@ -713,7 +714,10 @@ maxSquaresAtOnce`. Those two rations of 2x2 blocks are what keep the tenth power
 from filling in a rectangle, and they are why a level comes out a thin winding
 web rather than a blob: mean degree 2.17, about 2.8 dead ends, and no room with
 four neighbours (`CheckNeighborCount`). `Adjust` cuts dead ends and `CloseLoops`
-closes them into cycles. The boss room is what `CouldBeFinishRoom` allows --
+closes them into cycles. (Corrected 2026-10-30: `CheckNeighborCount` has no
+caller, so rooms with four neighbours are allowed and common, and `Adjust` and
+`CloseLoops` work differently from this description; see "The generator's last
+two steps" below.) The boss room is what `CouldBeFinishRoom` allows --
 never an articulation point, either a dead end or a room with exactly two
 neighbours -- chosen by `ChooseFinishRoom`'s average distance, with the start
 furthest from it and the shops spread by `ChooseDiversePositions`' relaxing
@@ -794,7 +798,11 @@ These are places the run layer is thinner than the game, and each is visible in
 - A generated room covers one grid square. `maxSquares` and `maxSquaresAtOnce`
   are honoured as constraints on 2x2 blocks of rooms, which is what
   `CalculateSquares` and `RoomNode.get_squares` count, rather than as a budget
-  for rooms that cover several squares.
+  for rooms that cover several squares. (Settled 2026-10-30: `RoomNode` and
+  `M_Room` each hold a single grid position, `CreateRooms` makes one node per
+  `Yes` cell and links it to the cells beside it, and `get_squares` counts the
+  2x2 blocks of rooms around its one cell. A room is one square in the game
+  too, and the assumption is gone.)
 - `maxDeadEnds` could not be recovered -- see `sim/mapgen.py` and the
   assumptions -- so `Adjust` prunes only while the map is over its room count.
 - Portals, treasure rooms, secret rooms and quests are not placed. `portalsCount`
@@ -1005,7 +1013,8 @@ that was always 0.
 
 Only row 263 sets `percentage: false`, and the game's `Meta` calls that variant
 FixedVampirism, so the unset majority is a percentage share: that is the reading
-`vampirism_percentage_default` records. Nothing in this sim fills the healer
+`vampirism_percentage_default` recorded, and the model's default confirmed it
+(see "The model defaults, read" at the end of this file). Nothing in this sim fills the healer
 list, so the attacker keeps the whole heal (`vampirism_shares_with_healers`).
 
 The victim-health cap is real and worth keeping: a 20% vampirism swing into a
@@ -1025,7 +1034,8 @@ use it -- mutation 221 (35% under 30% health, the variant `Meta` calls
 LastSecondChance) and the Novice row -- and the sim had been giving both of them
 away at full health. `healthThreshold` is a `[DefaultValueAttribute]` the dump
 does not print; 100 is the only value that leaves a plain evasion always on,
-which is `evasion_health_threshold_default`.
+which is what `evasion_health_threshold_default` assumed and the model's
+default turned out to be.
 
 `OnTryToEvade` gates on the damage itself before it rolls:
 
@@ -1258,6 +1268,9 @@ at level 1 and 0 after, while `RerollShrines` is 1 from level 2 on, so the shrin
 family after level 1 is the **reroll** shrine, which we conflate with the plain
 one. `StatShops` is 0 on all twelve, which is the earlier finding that
 consumables are unreachable in Default play.
+(**Wrong, 2026-10-29**: every boss room but the last builds a consumable
+shop, and the mutation shop's placement is right; see "What `C_Room..ctor`
+builds" at the end of this file.)
 
 ### `FightInFirst`, and the first room of a level
 
@@ -1641,6 +1654,8 @@ twelve level rows, `C_Consumables.Add` has exactly one caller
 consumables are unreachable. Implementing them would add code that can never
 execute and a maintenance surface that can never be tested. That is not
 fidelity.
+(**Wrong, 2026-10-29**: the shop is also built in every boss room but the
+last, from the `ConsumableShop` bit `ChooseFinishRoom` sets.)
 
 **Every environment change invalidates every agent and every number.** This has
 happened four times in a day. The cost is not the implementation, it is the
@@ -1902,5 +1917,817 @@ still open.
   likely place). **The note above that consumables cannot be reached in Default
   play rested on `InitShop` alone and is open again.**
 - With `longRunReward` set, the level-1 start room is a `ConsumableShop` too.
+  (Modelled since, see "The long-run reward" under the boss room section.)
 - The quest choosers between the start and the shops, the secret-room branch of
   the portal step, and Arcade's own predicates for the finish and the start.
+
+## What `C_Room..ctor` builds, and what nothing heals (2026-10-29, later)
+
+Reading `C_Rooms.FromGeneratedData` to settle the consumable shop question led
+into `C_Room..ctor`, which is where every room's shop model is made, and from
+there to three corrections.
+
+### The constructor dispatches on the room bits
+
+`FromGeneratedData` builds an `M_Room` per generator node, copies the node's
+type onto it, and constructs a `C_Room(room, levelData)`, handing it the level
+data only when the type carries `FoodShop`. The constructor then takes the
+first branch that matches:
+
+    type & 8                 FoodShop        C_FoodShop, budget from the level data
+    type & 4                 ItemShop        the run's one C_ItemShop
+    bt type, 14              ConsumableShop  M_Shop<M_Consumable>, quantity 2 + (~type & 1)
+    (type & 0x140) == 0x140  MutationShop    see below
+    (type & 0x1040) == 0x1040 TalentShop     C_TalentShop
+
+`ChooseFinishRoom` made every boss but the last `Boss | ConsumableShop`
+(`0x4002`), and that is neither a food shop nor an item shop, so **every boss
+room before the last builds a consumable shop**: three slots (two in a start
+room, where `type & 1` is set), roll cost 0, opened at construction. The note
+earlier in this file that consumables cannot be reached in Default play was
+wrong.
+
+The run also does not leave the boss room when the boss dies. `C_Fight.AfterFight`
+calls `C_Levels.WinLevel`, which marks the level won (and, on level 4 in
+Default, sets the persistent flag behind `longRunReward`) and ends the session
+only on the last level. The only gameplay caller of `C_Levels.ChangeLevel` is
+`V_Pipes.<MoveInternal>`, the pipe in the boss room. So the squad stays on the
+level until it takes the pipe, with the consumable shop open and the doors
+open behind it; the sim moves to the next level the moment the boss falls.
+Both are still to be modelled.
+
+### A generated mutation shop is 3, 1 and 2
+
+The mutation branch reads `ShowCount`, `BuyCount`, `RollCount` and `RollCost`
+from the level data when there is any, which for a generated room there never
+is, and otherwise uses its own defaults: a shelf of 3 (4 in a secret room, 6 in
+Arcade), 1 take, 2 rerolls (0 in a secret room), roll cost 0, and a pool named
+`default` (or `secret`). The sim had been using `Rooms.Shops.Mutations.m1`,
+`{ShowCount 10, BuyCount 2, RollCount 0}`, which belongs to the shipped fixed
+map's one mutation room: three times the shelf and twice the takes.
+
+`C_MutationShop.Roll` needs `gold >= rollCost` and `rollCount > 0`, pays,
+decrements `rollCount` unless it is 90 or more, and builds a whole new shelf
+(`UnregisterMutations`, then `CreateMutations`). `BaseMutationShop.Buy` refuses
+a bought item, a short purse or `buyCount <= 0`, decrements `buyCount` and
+closes the shop at zero; with takes left and the shelf bought out, `Buy` rolls a
+fresh shelf for free.
+
+What a shelf is drawn from: `C_Mutations.OnLevelChange` rebuilds the available
+mutations for the level, per mutation and per class, filtered by the player's
+unlocks, and finishes by reserving every mutation the run holds and every one
+already on a shelf in the level's shops. `ReserveMutation` takes an (id, class)
+out of the pool. So nothing the run holds is offered again. The sim now draws
+by id with the same two exclusions; the per-class granularity and the unlock
+state are in `sim/assumptions.py`.
+
+The shop has a `reroll_mutations` action, and the env four mutation slots
+instead of ten. `tools/mutation_value.py --runs 600`, heuristic taking against
+ignoring: **+0.04 [-0.02, +0.10]** levels, 2.2 mutations a run. On the old
+shelf the same test gave +0.13.
+
+### Nothing heals a unit between fights
+
+`C_Unit.BeforeFight` sets `health = min(desiredHealth, totalMaxHealth)` only
+when the mode is KingOfTheHill, or Arcade in a boss room for team 1.
+`C_Unit.AfterFight` refills mana and resets traits, actions and passives, and
+never writes health. `M_Unit.set_health` has 22 callers and the `_health`
+property is written directly through `ModelExtensions.Set<float>` in 17 more
+places (a scan for functions that load `M_Unit`'s statics at `+0x68` and call
+`Set<float>`); none of them is a routine heal. Health comes back only from
+`UnitExtensions.Heal` (a heal consumable, the Medic's channelled heal, and
+`HealAfterFight`, which is the "Regeneration" perk of the meta-progression
+grid in `MutationGrid.json`, not a run mutation), from in-fight healing,
+resurrection, and mutation 356 `FoodPackHeal`. `CS_Units.LevelUp` and
+`CS_Item.ApplyBonus` both rescale it as `totalMaxHealth * ratio`.
+
+So in Default **wounds carry over**, and the sim had been rebuilding every unit
+at full health for every fight. `Human.hp` is now the share of health a unit
+carries, set from the survivors after each fight and handed to the next;
+`RunState.carry_hp = False` is the old behaviour, kept for measuring. A share
+rather than a number of hit points is exactly what level-ups and item swaps
+preserve. The pit takes the most wounded human. `FoodPackHeal` is implemented:
+`UpdateHealth` heals every unit `goldSpent * koefficient / 100` of its health
+when a pack is bought.
+
+`tools/hp_cost.py --seeds 240 --fast`, the heuristic on seeds 30,000 to
+30,239:
+
+    wounds carried       2.688  (sd 0.746)   lowest health in a run, mean 0.12
+    healed every fight   3.688  (sd 0.903)
+
+    paired -1.000 [-1.105, -0.895], better on 1 of 240, worse on 169
+
+A full level, the largest effect any single change has had in this project, and
+in the direction of a harder game: the sim was handing out a free full heal
+after every fight. It also changes what several things are worth. Heal
+consumables, the Medic, vampirism, `FoodPackHeal` and resurrection all heal
+something that now stays hurt.
+
+The observation carries the squad's mean and lowest health share; `obs_dim`
+217 to 219.
+
+### The boss room, the pipe and the consumables, implemented
+
+**The pipe.** A boss win calls `RunState.win_level`, which ends the run on the
+last level and otherwise sets `level_won`. The squad stays where it is, doors
+open; `descend` (legal in the won boss room) is the pipe, and calls
+`next_level`. Before this the next level started the moment the boss fell.
+
+**The shop.** On every level but the last the won boss room shows three
+consumables, drawn from `ConsumablesByLevel` for the level (a consumable
+listed twice weighs twice), no consumable twice and nothing the run carries.
+`C_ConsumableShop.Buy` never reads the purse and every shipped row costs 0, so
+taking one is free and the only limit is room: `M_Consumables..cctor` builds
+the inventory size as `new ReactiveProperty<int>(2)`. `C_Consumable.Sell`
+removes one and pays `Rooms.Shops.Consumables.SellCost`, 5 gold.
+
+**The fourteen**, from each controller's `Use` (`C_Consumable.Use` spends a
+charge of the row's `Count` and the item goes when they run out):
+
+    1  Heal, Direct      one unit +100%                    C_HealConsumable, target = a unit
+    2  Heal              every unit +30%                   range 0, so the whole team
+    3  RoomCleaner       an unfought, non-boss room won     C_Room.AfterFight(true), the room's exp
+                         without a fight
+    4  Reserve           three Novices join                kind TeamMember|Human
+    5-7 Reserve          one temporary ally for a fight    no TeamMember bit; C_Team.AfterFight
+                         (Dalek, FireHead, SwoopBird)      removes temporary units
+    8  Resurrection      the corpses in this room revive   C_Room.CreateCorpse, after the fight only
+    9  Teleport          a random room nobody has seen     collects UNKNOWN rooms, RND.Element
+    10 DejaVu            a dialog                          not modelled (no dialogs yet)
+    11 AntiHunger        hunger penalties held off         M_AntiHungerStatus wraps hunger
+    12 DamageAllEnemies  -                                 on no Default level's list
+    13 Event             a dialog                          not modelled
+    14 Reroll            a free reroll of this shop        RoomType.ShopWithChoices
+
+RoomCleaner and Resurrection both check the room: the cleaner does nothing
+(and still spends its charge) in a room whose fight has a result or in a boss
+room, and the resurrection only works in one whose fight has. The sim has no
+stage between entering a room and fighting it, so a cleaner is used beforehand
+and spent on the next room entered; `sim/assumptions.py` lists that and the
+other choices.
+
+Corpses are kept per room (`Room.corpses`), the observation shows the two
+carried consumables with their charges, the shelf, and what is waiting on the
+next fight, and the env has `descend`, three `take_consumable`, two
+`use_consumable` and two `sell_consumable` actions: `obs_dim` 219 to 281,
+actions 31 to 39. The heuristic takes the shelf best first, sells what it has
+no rule for, heals below half health (one unit) or 70% (the team), resurrects
+where corpses lie, calls reserves at once, and arms a cleaner or an AntiHunger
+just before walking into a fight.
+
+`tools/consumable_value.py --seeds 240 --fast`, the shop against the same
+seeds with `take_consumable` struck out:
+
+    takes them    3.367  (sd 1.080)   uses a run: heal_one 1.35, heal_all 1.12,
+                                      reserve_humans 1.12, reserve_ally 0.90,
+                                      cleaner 0.59, resurrection 0.42, anti_hunger 0.36
+    ignores them  2.646  (sd 0.704)
+
+    paired +0.721 [+0.597, +0.844], better on 116 of 240, worse on 8
+
+Most of that is healing: with wounds carried between fights, a free heal in
+every boss room is the only routine way to get health back.
+
+### The long-run reward (2026-10-30)
+
+`C_Levels.WinLevel` checks `M_Levels.currentLevel == 4` and the mode, and in
+Default it sets `M_PersistentData._longRunReward`, a saved flag, to true.
+`C_Rooms.Generate` reads it back when it fills `GenerationParams`: in Default,
+on level 1 (`params.level == 1`), with any chip but `crazy` (an inlined string
+compare), a set flag sets `params.longRunReward` and is written back to false.
+`ChooseStartRoom` then ors `ConsumableShop` (0x4000) into the start room, and
+`C_Room..ctor` builds the shop with `2 + (~type & 1)` = 2 slots, since `Start`
+is bit 1, open from construction. So a run that beats level 4 opens the next
+one standing in a two-slot consumable shop, drawn from level 1's list, and the
+reward is spent.
+
+In the sim, `RunState.long_run_reward` is the flag as the run found it,
+`win_level` on level 4 sets `long_run_reward_earned`, and the boss room's shop
+code now asks `consumable_shelf(room)`, which answers for either shop. Carrying
+the flag between runs is the environment's: `DespotRunEnv(long_run_reward=...)`
+is False by default (a fresh save, and every seed's run independent of the
+episodes before it), True for every run, or "carry" for the save's behaviour.
+
+`tools/ablate.py long_run_reward --seeds 2400 --start 40000 --fast --jobs 8`:
+
+    with the reward     3.363  (sd 1.117)
+    without             3.216  (sd 1.157)
+    paired +0.147 [+0.090, +0.205], better on 915 of 2400, worse on 748
+
+The heuristic beats level 4 in 16% of runs (384 of 2400), so under "carry" a
+heuristic player would hold the reward about one run in six and gain about
++0.02 levels from it on average.
+
+## The level-entry dialogs, implemented (2026-10-30)
+
+`sim/dialogs.py` runs the 46 dialogs of `Game.Dialogs` from
+`EncryptedMainGroup/dialogs.json`. What was read for it, beyond the schema
+section earlier in this file:
+
+- **The draw.** `C_Levels.StartDialog` loops over random picks from the pool,
+  asks `C_Dialogs.StartDialog` to start each, and removes only the one that
+  starts. A dialog whose gates fail stays in the pool for a later level. It
+  runs on every level change, the first included, since `C_Session.Begin`
+  calls `ChangeLevel`.
+- **The gates.** `C_Dialogs.PrepareEvents(M_Dialog)` walks each choice's
+  outcomes and prepares their events with the choice index as `num`, folding
+  `C_Event.GetEnabledState` into `enableds` and `hiddens`. So a choice is gated
+  by what it leads to: `MinusGold` is a `CheckGold`, which is why "buy for 5"
+  greys out on a short purse. The body's own gates decide whether the dialog
+  starts (`Stores` needs 5 gold, `Mushrooms` 20 food). Events are prepared in
+  order and `DefineVariables` defines while preparing, so a node can define a
+  variable and test it (`OneHandBandit`'s `robotsGold`).
+- **Links** name a path in the localization-key scheme; a path that ends on a
+  choice with several outcomes means taking that choice again, which is how
+  `RedStringsBar` and `OneHandBandit` loop back to a coin flip. `#` is the body.
+- **The events.** `GetNames` picks random units into the dialog's `units`,
+  which `RemoveUnit`, `CloneUnit` and `RemoveHealth` act on by 1-based `id`;
+  `RemoveHealth` multiplies health by `1 - percent / 100`, every unit when it
+  names none; `RemoveItem` is `C_Player.DownGradeUnit` and leaves the item's
+  cost in `itemCost`; `HasSlot` counts the team's cells against 49; `Ambush`
+  resets the current room's `fightResult` and closes its doors, so the start
+  room's pack attacks (and `CalculatePower` gives a start room `ItemsMult` of
+  Power, though no gold). A `MinusFood` with no amount spends the dialog's own
+  `CheckFood` amount. `GiveUnit` gives `numberOfUnitsToGive` units when the
+  dialog defines it (`Reproductor`: half the team).
+- **Consumable 13**, `Event`, opens a pool dialog (`C_EventConsumable.Use`
+  calls `C_Levels.StartDialog`). `DejaVu` (10) is a rewind to a save after a
+  wipe and is still not modelled.
+
+In the run, a dialog is modal: while one is open the only legal actions are
+`("choose", i)`. Nodes with a single choice are taken without spending a step.
+The env has four `choose` actions and the observation a flag plus a one-hot over
+the 69 decision nodes; `obs_dim` 281 to 356, actions 39 to 43. The heuristic
+takes the choice with the best expected immediate value, one node deep, in
+guessed gold equivalents (`rl/heuristic.py`, `_EVENT_GOLD`).
+
+A random walk of every dialog from varied states runs each to its end with no
+error; 44 of the 46 change gold, food, the squad, the mutations or the items on
+some path. `tools/dialog_value.py --seeds 240 --fast`:
+
+    no dialogs         3.367  (sd 1.080)
+    heuristic chooses  3.562  (sd 1.146)   5.03 dialog choices a run
+    random choices     3.408  (sd 1.162)
+
+    dialogs, heuristic against none     +0.196 [+0.021, +0.370]
+    choosing, heuristic against random  +0.154 [+0.012, +0.296]
+
+The no-dialog arm reproduces `tools/consumable_value.py`'s 3.367 to the last
+digit, which is the check that turning the dialogs off leaves the rest alone.
+The choice matters: about five decisions a run, worth a sixth of a level
+between a rough heuristic and a coin.
+
+## The pack chooses the room (2026-10-30)
+
+`M_EnemyPack` carries `layouts`, and `ChooseLayout` takes one of them (at random
+among those whose player cells match, logging "Pack id=... does not have any
+associated layouts" when there are none). `LayoutsByPack.json` gives every
+shipped pack exactly one, so **the pack fixes the battlefield**. Each
+`EnemyPacks` row also names a `Zone`, `e1` to `e3`, and every zone a Default
+pack's rows name exists in that pack's layout. The 11 packs with no layout are
+ids 1001 to 1011, which no Default level draws.
+
+The sim used to fight every room in any of the 77 layouts at random, 35 of
+which no pack uses at all, with every enemy in `e1`. Now a fight is fought in
+its pack's layout with each enemy in its row's zone; `RunState.pack_layouts`
+keeps the old draw for measuring. `SpecialRoomLayouts.csv` (`sci-quest` and
+the like) belongs to the quest rooms and waits on them.
+
+`tools/ablate.py pack_layouts --seeds 240 --fast`, the heuristic on seeds
+30,000 to 30,239:
+
+    pack layouts   3.300  (sd 1.137)
+    random layout  3.562  (sd 1.146)
+
+    paired -0.263 [-0.439, -0.086], better on 63 of 240, worse on 94
+
+The packs' own rooms are harder for this squad than a random room was; why has
+not been measured. `tools/ablate.py` is the general form of `tools/hp_cost.py`, for any of the
+`RunState` switches that keep an old behaviour for measuring (`carry_hp`,
+`pack_layouts`, `dialogs_on`).
+
+## DejaVu, the fourteenth consumable (2026-10-30)
+
+`C_DejaVuConsumable` is never used by hand. `Take` enables it, and `Enable`
+saves the run (`PrepareData`), subscribes to `C_Session.OnLoss`, and saves again
+whenever a level starts while it is carried. `OnLoss` catches the loss and opens
+the `DejaVu` dialog ("Now let's backstep a bit and imagine you NOT losing all
+your puny humans"), whose one choice fires the `DejaVu` event, and `Use` loads
+the save with `Loader.LoadGameFromData`. So it is a second life: a wipe while
+carrying one goes back to the last save.
+
+The sim keeps the save in `RunState.dejavu_save` and rewinds in
+`dejavu_rewind` on a wipe (not on its own stranded rule, which the game does
+not have). Two choices, both in `sim/assumptions.py`: the DejaVu is spent by the
+rewind, and the random stream keeps running rather than being rewound with the
+rest. The second matters: with the stream rewound a deterministic policy replays
+the level move for move and dies in the same place, which a reloaded game does
+not do (`notes/rust-core.md`, a 1e-4 nudge flips one fight in twelve). On the
+heuristic over 240 seeds, with the stream rewound the DejaVu fired in 91 runs
+and the mean moved only from 3.300 to 3.317 (unpaired, against the run before
+DejaVu was modelled); with it kept, 96 rewinds and
+
+    DejaVu on against off, paired  +0.071 [+0.034, +0.107]
+
+The heuristic takes it before anything else on a shelf. All fourteen consumables
+but `DamageAllEnemies`, which no Default level lists, now do what they do in
+the game. With them all, the shop is worth +0.692 [+0.569, +0.814] to the
+heuristic (`tools/consumable_value.py`, dialogs and pack layouts on).
+
+## Quests, all eleven implemented (2026-10-30)
+
+### Where the dialogs were
+
+The quest dialogs are in neither `dialogs.json` nor any table under the
+encrypted groups, and only four of their localization keys appear as string
+literals in the code. They are NodeCanvas `DialogueTree` graphs serialized into
+the quest prefabs, each a `DialogueTreeController` whose `_serializedGraph` is
+a JSON string inside a MonoBehaviour of `sharedassets2.assets` or
+`sharedassets3.assets`. The MonoBehaviours have no type trees (IL2CPP strips
+them), so `tools/dump_dialogue_trees.py` reads the string by hand after the
+fixed header and names each graph `<prefab root>.<GameObject>`. 34 come out;
+32 belong to the eleven quests (the Spider quest's keys say `Monster`), two to
+the despot's own dialogues. The same `CheckQuestStatus : DialogConditionTask`
+class in `dump.cs` is what pointed at NodeCanvas.
+
+A graph is walked as NodeCanvas walks it: an action node runs its action list
+and goes to its child, a condition node to its first child when the condition
+holds and its second when not, a statement to its child, and a
+multiple-choice node waits for the player. Every graph has node 0 as its only
+root, every condition node exactly two children, and no node more than three
+choices, so the existing `choose_0..3` actions cover them. Of the 31 action
+types only `SetStatus`, `ApplyOutcome`, `CallFunction` (and its
+`CallFunctionAndWaitForEvent` and generic forms) and `CheckEndGame` touch the
+game; the rest are camera, sound, animation and input. `ApplyOutcome(i)`
+applies `outcomes[i - 1]` through `C_Dialogs.ApplyEvents`, the event engine
+the level dialogs already use. `CheckQuestStatus` is an equality test whose
+unset parameter is 0 (Uninitialized), and `DeselectNovices` starts a UI
+coroutine and returns true.
+
+### Which quest, and when its dialog runs
+
+`DataLoaders.LevelData.Load` splits each `Levels.Quest` shortlist on commas into
+a `DynamicWeightedList<string>` (factor 2), keeps it in a static dictionary
+keyed by the shortlist's text, and draws one name per level into
+`M_LevelData.randomizedQuestNames`; `C_Levels.CreateQuestModel` writes that
+quest's row into the level data. The sim draws uniformly. The list's bias works
+across the runs of one launch, which independent runs cannot carry; within one
+run each shortlist is drawn from once, so the bias never acts inside a run.
+
+`V_Rooms.MoveCamera` calls `V_Quest.Launch` on every arrival in a room that has
+a `V_Quest`, and `Launch` runs the dialog `GetDialogIndex(room)` names, none at
+-1. Only the quest room gets the prefab: `TryGetPrefabName` answers for
+`model.room` alone. An extra room's dialog is started by the controller after
+its fight.
+
+### The map
+
+`C_Rooms.Generate` copies the quest's row into `GenerationParams`
+(`questCount` 1, `extraQuestRoomCount = ExtraRooms`, `secretRoomCount` = the
+row's flag plus `SecretRooms`, the allowed and guaranteed doors, and the
+`Quest` enum), and `PositionRooms` places the quest between the start and the
+shops:
+
+  * `ChooseQuestRoom`: an untyped room whose doors all lie in `Doors` and which
+    has every one of `GuaranteedDoors`, drawn uniformly, except that Flight's
+    list is sorted by `pos.x` and its leftmost room is taken. The room gets
+    `Quest` (512).
+  * `ChooseQuestExtraRoom`, once per extra room: untyped, not an articulation
+    point, a dead end or two neighbours, more than one room from the quest
+    room; uniform, except Flight takes the rightmost candidate and only when it
+    lies left of the quest room and at most three rows off. `QuestExtra`
+    (1024).
+  * `CountValidPaths(start, quest, QuestRoomCondition)` must be positive: some
+    simple path from the start reaches the quest room without stepping on the
+    boss or an extra room (`test type, 0x402`).
+
+Any of the three failing fails the generation, which is retried as before. All
+eleven quests place on every one of 40 seeds; Flight needs 5.7 attempts on
+average, the rest about one. `Direction` maps to the sim's (row, col) with Up a
+row less, since `RoomNode.GetName` prints `topBorder - pos.y`.
+
+### The rooms
+
+`C_GameMode.GenerateRoom` gives a quest room its `RoomParams` layout from
+`SpecialRoomLayouts.csv` and, only when the block has `Packs`, exactly that
+pack: the quest room never fights; the extra rooms of Sci (five level-3
+Zombies), Cube (six Daleks), Rat (four Mancracks) and SecretRoom (four
+FireHeads) do; Flight's and Bot's do not. `C_Rooms.CalculatePower` leaves both
+quest kinds out of its weight total, gives them an `expectedPower` of 0, pays a
+quest room nothing and an extra room the plain room's gold share (nothing for
+Flight and Bot).
+
+The fog had the rule half done: the walk-past reveal already skipped
+`QuestExtra`. The other half is `RoomTransition.CheckDirection`, which refuses a
+move into a room still at `Unknown`, so an extra room cannot be entered until
+the quest puts it on the map (`OnStatus(Accepted)` sets it to `Unexplored`).
+The sim had let a move go through any door, and the baseline walked into the
+Sci lab before meeting the scientist in 20 of 120 runs. The environment's
+neighbour block now shows a door into an unrevealed room as a door and nothing
+more.
+
+### The four of level 2
+
+  * **Pit** (`GetDialogIndex` 0 while Uninitialized or Accepted). Five Novices
+    (`classValue == 1`, a human holding nothing) jump for mutation 306; with
+    nobody else in the team there is no choice, all five die and
+    `CheckEndGame` ends the run. With company the player may let them jump or
+    stop them; "throw a couple of tokens" pays outcome 2, 30 gold, on every
+    branch but the jump.
+  * **Cube**: accepting reveals the extra room; winning it, or arriving in it
+    already won, while Accepted plays the extra dialog, which sets Acquired and
+    adds `cube-part`. Back in the quest room: 25 gold or mutation 328.
+  * **Sci**: the beginning offers two lines that both accept. In the lab, a win
+    while Accepted runs `Quest-two-units` (`ReplaceUnit`: `FindWeakestUnit`,
+    Novices before the armed, then by level and health or item quality and
+    cost, becomes a level-1 Zombie through `C_Player.DownGradeUnit`) or, with a
+    team of one, `Quest-one-unit` (`CreateZombie`). Back with the Zombie alive:
+    mutation 218 or 25 gold, and the Zombie leaves; dead, nothing. Unlike
+    Cube's, Sci's controller has no branch for a lab won before acceptance;
+    with `CheckDirection` that cannot happen by walking.
+  * **Rat**: accepting adds `rat-flute`; winning the extra room adds the Rat
+    (class 79, level 1) to the team and sets Acquired. Back with it: mutation
+    233 or 25 gold; without it, nothing.
+
+Nothing removes a companion at the level change: the Zombie and the Rat stay in
+the team until returned or killed.
+
+Nine of the eleven quest reward mutations are not modelled by the mutation
+layer (230 and 668 are, both level-6 rewards), all four of level 2 among them,
+so for now a level-2 mutation reward is a mutation that does nothing, and the
+baseline takes the gold.
+
+### Levels 6 and 10, later the same day
+
+Six more controllers, read the same way; only SecretRoom is left, because it
+needs the secret room itself (below).
+
+  * **Reaper.** The beginning spawns a hater (a level-1 Novice) in the
+    Reaper's room and `Run` sends him through a door at once. `ChooseNextRoom`
+    draws uniformly among the room's neighbours, never the room the squad came
+    from (`OnRoomChange` stores it as `prevRoom` on every move) and never the
+    Reaper's room. Each arrival in his room makes him run again while
+    `movesMade < maxMoves` (5, the first escape included) and a room
+    qualifies; then he stays and offers 50 gold to be let go. Refused,
+    `PrepareToFight` turns the room's fight on him (`OnEnemyTeamCreation`),
+    the quest is Acquired, and the Reaper pays mutation 230.
+  * **Spider.** The monster grabs a unit and throws it back (a knockback, no
+    damage). Accepting hands over three leaflets, and every room the squad
+    then enters that is not the quest room and has none yet gets one; the third
+    sets Acquired. 50 gold or mutation 346.
+  * **Bot.** The bot waits in the extra room, which accepting puts on the map.
+    Met there it asks for 5 gold: the option shows only with that much in hand
+    (`IsOptionEnabled("Quest.Bot.Meet.3.2")`, the one override of the base
+    method), and paid it joins the team. Threatened, it runs like the hater
+    (`maxMoves` 3); cornered, it fights (a level-1 `Bot`, 1,101 health), and
+    beaten it changes sides (`OnBotDeath` recreates it in the player's team).
+    Brought back alive: 50 gold or mutation 22.
+  * **Nurgle.** While Accepted every enemy that dies adds a `plant-leaf`
+    (`OnDeadUnit` on each new enemy team, no condition on the unit); five buy
+    35 gold or mutation 302. `AdditionalLevels` 1 keeps the model into the next
+    level, whose map places the room again from `Overrides` (`nurgle-quest-2`)
+    with its own not-finished, ending and finished dialogs.
+  * **Flight.** On foot, accepting reveals the extra room and its dialog plays
+    on arrival. By cannon the status is left alone, the squad lands in the
+    extra room and `WaitForArrival` sets each unit's health to
+    `health * (100 - hpLossPercent) / 100`, 10% off. Either way the helm, then
+    35 gold or mutation 237.
+  * **Sword.** The sword's "extra" room is the boss room. Taken, a level-1
+    `TalkingSword` (4,000 health) joins the team, and arriving in the boss
+    room adds a level-1 `DeathSword` to the boss's pack. After the boss falls,
+    35 gold or mutation 358, from the sword or its ghost, and Finished takes
+    the sword away. Met after the boss is dead, `CheckBossRoomStatus` sets
+    Declined and the dialog ends unpaid.
+
+Three generic hooks came with them: kills reach the quest, a quest can add
+units to a room's enemy team, and a quest dialog can be followed by another
+(the Bot's after-fight dialog) or by an action (the cannon).
+
+### The secret room, and the SecretRoom quest
+
+`LevelGenerator.Generate` makes `secretRoomCount` secret rooms after the shape
+and before `PositionRooms`: it puts every position beside a room back on the
+open list, draws by `WeighPositions`' weight, and `MaybeMakeSecretRoom` takes
+the first cell one step past the draw, in `RoomsDirections` order (Left, Up,
+Right, Down: `C_DefaultMode`'s static array, read from its metadata
+initialiser), whose four neighbours and four diagonals hold no room. The room
+is `Secret | Portal` from birth, plus `MutationShop | Treasure` unless the
+level's quest is SecretRoom, so it has no door and is reached by teleport.
+`ChoosePortals` counts it among the portals and skips it as a candidate, and
+with one on the level (not the quest's) `PositionRooms` asks for at least two
+more portals, retrying at shrinking distances, and fails the level without
+them. `FromGeneratedData` flags two of the other portals, drawn without
+replacement, `activatesSecret`; `C_Rooms.MaybeActivateSecretRoom` counts the
+ones the squad stands in and at `roomsToActivateSecret` (2) switches on every
+secret room that is not a quest's, which puts it on the map. `CalculatePower`
+gives it no Power and no gold, so `GenerateRoom` gives it its layout
+(`regular-secret-room`) and no fight. The `directions` order now drives every
+neighbour walk in the generator.
+
+What the level-7 room holds is not settled. Its mutation shop shows four and
+takes one with no rerolls, from a pool named `secret`, with the
+`goldinsecretroom` treasure in the first slot; no shipped ruleset gives any
+mutation that pool or any level a `Treasures` block, so the sim leaves it
+empty (`sim/assumptions.py`).
+
+The SecretRoom quest uses its own secret room. The quest room ("a mysterious
+room") sets Initialized. A unit sacrificed there (`OnUnitRemoved`) sends the
+squad to the secret room (`PlayAnimationAndTeleport`), where the Doctor gives
+the quest; `FinishSecretRoomDialog` brings it back. The extra room's fight
+(four FireHeads) yields the book, and a second sacrifice takes it to the
+Doctor for 35 gold or mutation 668. So all eleven controllers are ported.
+
+### What it is worth
+
+On the heuristic, paired by seed, with the fast core (`tools/ablate.py
+quests_on`, and a third arm in which the baseline is told to follow the
+quests), first over 240 seeds from 30000 and then, with every quest in, over
+2400 seeds from 40000:
+
+                                          240 from 30000           2400 from 40000
+    quests on, passed by, against off     -0.121 [-0.286, +0.044]  -0.072 [-0.124, -0.020]
+    quests on, followed, against passed   -0.113 [-0.199, -0.026]  -0.028 [-0.049, -0.007]
+
+The first is the map and the economy; on 240 seeds it did not clear zero, on
+2400 it does, at about half the size. Its sign has
+a plain source in `CalculatePower`: a quest room takes a plain room out of the
+weight total while the level's Power stays `(num - 1) * PowerPerRoom`, so every
+remaining fight on a quest level is a little bigger. Deaths on level 2 went
+from 66 to 81 of 240. The second is the baseline walking to the lab and back
+for 25 or 30 gold and a mutation the sim does not model, and it loses, so the
+baseline's default is to answer a quest dialog when it walks into one and to go
+no further (`heuristic_action(quests="pass")`). Whether finishing a quest pays
+is left to the agent; once the four level-2 mutations are modelled it is worth
+measuring again.
+
+With the six controllers of levels 6 and 10 in, the same measurement reads the
+same, -0.121 [-0.286, +0.044], and it has to: with quests on, none of the 240
+heuristic runs reaches level 6. Those quests are held to the checks in
+`tools/validate_sim.py`, not to this number.
+
+**240 seeds is too few at this size.** With the secret room and the
+generator's direction order in, seeds 30000 to 30239 read -0.358
+[-0.515, -0.202], a jump that sent this looking for a bug. There was none: the
+2400 seeds from 40000 read -0.072 [-0.124, -0.020], their ten 240-seed windows
+spread from 0.000 to -0.154, and the old direction order on the same 2400
+reads -0.056 [-0.109, -0.003], so the order changes nothing measurable and the
+30000 window simply sits low on this effect (every quest measurement taken on
+it has). Playing the two arms alternately rather than one after the other
+gives the same levels, so no state leaks between episodes.
+`tools/ablate.py --jobs 8` runs the 2400 in about a minute.
+
+## The generator's last two steps, read (2026-10-30)
+
+`LevelGenerator.Generate` grows the map once, until it holds `num` rooms, then
+calls `Adjust`, `CloseLoops`, `CreateRooms` and `InitRooms` once each, makes the
+secret rooms, and runs `PositionRooms`. The port had repeated grow, close and
+cut until the count came out right, on a reading of the two steps that was
+wrong in both directions.
+
+  * **`Adjust`** never shrinks the map. While there are more dead ends than
+    `maxDeadEnds`, which really is 0, it marks the farthest one `Never`
+    (`GetDeadends` sorts by `RoomNode.distance`, largest first), drops every
+    grid position left touching no room, and puts a replacement room on an
+    open position drawn uniformly (`RND.Element`, where growth draws by
+    weight), retrying through `MaybeMakeRoom` until one is accepted. When none
+    is, it undoes the last cut and stops. That last clause is how a 7-room
+    level, which cannot be all loops, comes through a target of zero.
+  * **`CloseLoops`** never adds a room either. For each grid position it looks
+    at the ring of eight cells around the cell diagonally below and right of
+    it; when that centre is empty and exactly seven of the eight are rooms, the
+    farthest dead end becomes `No` and the eighth cell becomes a room, written
+    directly with no shape check. It repeats while a pass moves something, ten
+    passes at most.
+  * **`GetDeadends`**, called by both, also turns every `No` position back to
+    `Maybe` and puts it on the open list, so a refusal by `MaybeMakeRoom` holds
+    only until the next call.
+  * **`CheckNeighborCount` has no caller**, direct or through a delegate (there
+    is no `Method$` entry for it), and `MaybeMakeRoom` checks only the two
+    2x2 rations. The port had applied a ceiling of three room-neighbours.
+    Without it most maps have a crossroads room (44 of 60 level-1 maps, 59 of
+    60 at level 12), which fits the Pit quest's room allowing doors on all
+    four sides.
+
+The count is now `num` on every map. Dead ends per level-1 map went from 2.25
+to 2.17, and about 2% of level-1 maps are now compact enough that
+`ChoosePortals` lands fewer than two portals and the step is undone. The
+heuristic reaches 3.237 on the new maps against 3.183 on the old, over the same
+240 seeds but unpaired (the maps differ), so nothing beyond noise.
+
+## The anti-repeat weighting, read (2026-10-30)
+
+`DynamicWeightedList<T>` is the only weighted list in the game with a memory,
+and it has two users: `M_ItemData.weightedTemplatesByQuality`, one list per
+item quality, and `LevelData`'s static `questLists`, one per quest shortlist.
+
+  * **Its weights.** `WeightedList.PopulateEntity` gives each entry
+    `GetWeight(element)`, or 1 when no weight function is passed, and
+    `ItemData.Load` passes none, so a quality's items start equal.
+    `DynamicWeightedList.GetElement(index)` (the virtual override) adds one to
+    the entry's `pickCount` and calls `AdjustWeights`, which rewrites every
+    weight as `1 / powf(factor, pickCount - minPickCount)` and rebuilds the
+    cumulative sums. `factor` is the constructor's 2. The weight function's
+    values are gone after the first pick, which matters only for a list built
+    with one; neither user is.
+  * **The draw.** `GetRandomIndex` takes `rnd.NextDouble() * totalSum` and
+    binary-searches the cumulative sums. `C_ItemShop.Roll` draws the quality
+    from `weightedQualities`, a plain `WeightedList<int>` (its weights stay the
+    shop level's probabilities), then the index from the quality's list, then
+    calls the list's own `GetElement(index)`, so every item the shop shows is
+    a pick, bought or not. Both draws use the current room's `rnd`.
+  * **Its lifetime.** `ItemData.Load` builds new lists each time
+    `RootLoader.LoadData` runs, and `Loader._NewGame` calls that, so the item
+    history is the run's. The quest lists are static and outlive the run.
+
+So the shop cycles through a quality: an item shown k more times than the
+least-shown one in its quality is drawn at `2^-k` of that one's weight. The sim
+keeps `RunState.item_picks` and draws with those weights (`item_weights`).
+Against a uniform draw inside the quality, on the heuristic over 2400 seeds
+from 40000, it is worth -0.005 [-0.035, +0.025]: fidelity with nothing
+measurable behind it, as expected of a rule that only reorders which of ten
+equally priced items of a quality turns up.
+
+## The model defaults, read (2026-10-30)
+
+A skill or mutation row fills a model, and a field the row leaves out keeps
+the value its property was built with. Four of `sim/assumptions.py`'s entries
+were guesses at such values, argued from what a shipped row would do under
+each reading, because the dump prints `[DefaultValueAttribute]` without its
+argument. The argument is in code: each attribute line in `dump.cs` carries
+the RVA of the generator that builds it, and the generator passes the value
+to `DefaultValueAttribute..ctor` as an immediate (a `movss` constant, a `dl`
+for a bool, a boxed enum built from `mov dword [rsp+0x30], n`). The models'
+static constructors build the properties with the same constants
+(`M_VampirismSkill..cctor`: `new ReactiveProperty<DamageType>(1)`), and
+`Model.CreateSettings` sets `DefaultValueHandling.Ignore`, so the JSON never
+populates anything and the constructor's value is the one a row gets.
+
+All four guesses stand: evasion's `healthThreshold` is 100, a damage
+reaction's `chance` 100, Craggy's `debuff` Stun (1), vampirism's `percentage`
+true. They are facts now and live in `sim/model_defaults.py`.
+
+The read found what the guesses had missed: `damageType`. It gates a passive
+the same way in every handler read (`C_VampirismSkill.OnDamageCreated`,
+`C_BuffAttackSkill.OnDamageCreated`, `C_DamageReactionSkill.OnDamageInternal`):
+the passive fires only when `(damage.type & damageType) == damageType` and the
+damage is not `Secondary`. A model without the attribute starts at `Empty`,
+which passes everything, and that is what the port gave every row that left
+the field out. The defaults are not empty:
+
+    Physical   Vampirism, BuffAttack, PassiveStun, PassiveBurn, PassiveKnockback,
+               and the damage reactions (Craggy, Untouchable, LoveOfPain)
+    Magical    AggressiveDodge, ReinforcedDamage, PassiveBlock, Blurp,
+               M_DamageOverTimeStatus
+
+Shipped rows that leave it out and are live in the sim: every Vampirism row
+(two skills, four mutations), six BuffAttack rows (one skill, five
+mutations), the Untouchable mutation, and the one Blurp skill. So vampirism
+now heals off physical hits only (a mage with a vampirism mutation heals
+nothing), and never off `Secondary` damage, which the port had not gated
+either; BuffAttack and Untouchable fire on physical damage only; Blurp hits as
+magical damage, through resistance rather than armour. `with_model_defaults`
+writes the default into a row's parameters when it is parsed, so the oracle
+and the core read the same thing.
+
+It changes no heuristic run. Over 2400 seeds from 40000, with the defaults and
+with an empty table, every seed ends on the same level, although 79 of 300
+runs hold a BuffAttack mutation, 18 Untouchable and 13 Vampirism: the squads
+the heuristic builds hit physically, the Vampirism mutation does not attach
+to Mage units at all, and the reactions are rarely hit by magic on the levels
+these runs reach. `tools/diff_core.py` prints the same table before and
+after. The gates matter to a policy that fields mages or meets magic users,
+which is where an agent would find the difference.
+
+## HoboFury and HungerFury, implemented (2026-10-30)
+
+Two of the 44 mutation names the sim did nothing with, offered once a level
+each, and both a stat bonus that follows the run rather than the fight.
+
+  * **HoboFury** (239: Damage +30, flat, `goldAmount` 10).
+    `C_HoboFuryMutation.OnGold` floors the team's gold (`roundss` mode 9) and,
+    whenever `goldAmount >= floor(gold)` flips, adds or removes a "HoboFury"
+    `StatBonus` status on every unit that is not `Dead` or `DeSpawning`
+    (traits `0x401`). So the squad hits 30 harder while it holds under 11
+    gold.
+  * **HungerFury** (227: AttackSpeed, `lowValue` 40, `highValue` 60,
+    percentage). The mutation hands its units `C_HungerFurySkill`, whose
+    `Food_HungerLevelChanged` sets the status to nothing at hunger level 0,
+    `lowValue` at 1 and `highValue` at 2 and up.
+
+`apply_to_specs` takes the run's gold and hunger level and applies both when
+the squad's specs are built for a fight, and the spec cache keys on whether
+HoboFury is on. Gold and hunger change between fights here, never inside one,
+so reading them once per fight loses nothing the sim could show.
+
+On the heuristic over 2400 seeds from 40000, implemented against
+unimplemented: -0.006 [-0.012, +0.001], with 293 runs ending holding one of
+them. The heuristic takes a shelf's implemented mutation that covers most of
+the squad, so these displace other picks about as often as they help.
+
+**Intelligence** (289: +50% for every class; 270: +100% for a random one),
+filed under "mana economy" until now, composes `M_Unit._experience` (static
++0x138): `C_IntelligenceMutation.Modify(comingExp, currentExp)` turns a rise
+of `g` into `g * (1 + value / 100)` (`percentage`, true by default) or
+`g + value`, never below zero, for units of the mutation's class. Bought
+experience goes through the same property, so it grows too.
+`RunState.experience_gain` applies it per human. The random class is the one
+the shelf description draws off the mutation's id, since the sim keeps no
+offered class (`mutation_pool_by_id_all_unlocked`). Implemented against not:
+-0.003 [-0.007, +0.000] over 2400 seeds from 40000, 102 runs ending with it.
+
+**UnderFeed** ("Living on Scraps", 269: 20% less food, 30% slower in a fight;
+the job-offer variant 286: 10% more food). `C_UnderFeedMutation` composes
+`M_Food._needed` (static +0x80), the food a move eats, with `Modify(int)`:
+`needed * (1 - value / 100)` (or `needed - value` without `percentage`),
+through `Math.Round`, which rounds to even, then at least 1, and when that
+leaves a number above 1 unchanged it steps once the way `value` points. So
+20% less is 1, 1, 2, 3, 4, 8 for 1, 2, 3, 4, 5, 10 humans, and 10% more is
+3 for 2. Every unit also gets an "UnderFeeding" `StatBonus` of
+`-slowValue` percent on Speed when `slowValue` is set, which is the "slower in
+a fight" half of the description. `RunState.feed_cost` runs the compositor and
+`apply_to_specs` the slow. Implemented against not: -0.003 [-0.009, +0.003]
+over 2400 seeds from 40000, 283 runs ending with it.
+
+## A mutation is offered for one class (2026-10-30)
+
+`Class` is not a flags enum, and `M_Mutation` carries one `_classValue`. What
+the rows' `Class` strings mean is `C_Mutations.ExtractClasses`: "all" adds
+`Class.Empty`, which every unit matches; "random" adds every class in
+`Const.UpgradedClassValues` (Tank to Scientist, ten, built in `Const..cctor`);
+a comma list adds its classes; a name adds itself. `OnLevelChange` keeps that
+list per mutation the level offers (filtered by the save's unlocks), and
+`TryGetTreasureParameters` draws an (id, class) pair from what is not
+reserved, through `WeightedList.GetElementUsingHistory` with factor 2 against
+`M_Mutations.pickCountByIdAndClass`, and writes the class into the offer.
+`C_MutationShop.CreateMutations` excludes the shelf's own pairs, so one
+mutation can sit on a shelf twice for two classes. Held and shown pairs are
+reserved, the mutation itself is not.
+
+So a row listing seven classes is not a buff to seven classes: it is seven
+offers, each for one of them, and seven times as likely to come up as a row
+for every unit. A "random" row is ten such offers. The port had drawn whole
+rows uniformly by id and applied a listed row to every class in it, and
+re-drew a "random" row's class at every fight.
+
+`RunState.mutation_pool` now lists pairs, `draw_mutation` draws one with the
+history weights and counts it, shelves and shrines both draw that way, and an
+offer is its row with its one class, so everything downstream (the specs, the
+agents, the shelf description) reads a single class as it already could. A
+dialog's `GiveMutation` takes the same draw over the mutation's own pairs.
+
+At level 5 the 98 mutations on offer are 316 pairs, and a shelf comes out 96%
+single-class. On the heuristic over 2400 seeds from 40000, against the id-level
+draw: -0.018 [-0.065, +0.028], mutations held 2.61 against 2.66 a run.
+
+**ChanceIncrease** (215: +15%, 284: +5%, every class).
+`C_ChanceIncreaseMutation` decorates the `chance` of every held simple
+mutation (and of combined mutations' descendants) and of every one inserted
+later, and hands its units `C_ChanceIncreaseSkill`, which decorates the
+`chance` of every action and passive skill (`IProbable`) the unit has or gains.
+`Modify` is `chance * (1 + value / 100)` with `percentage`, `chance + value`
+without, held to 0..100. `boost_agent_chances` runs it over everything a
+squad unit carries once the fight's agents are built, so both engines read
+the raised numbers: crit, evasions, knockbacks, explosions, resurrection and
+the hooks' rolls. A chance left at its default 100 stays 100. Whether a
+mutation's own skill takes the bonus twice is open
+(`chance_increase_applies_once`). Implemented against not: -0.000
+[-0.004, +0.003] over 2400 seeds from 40000, 190 runs ending with one.
+
+**Underdog** (259: +10 armour for each enemy beyond the squad's count).
+`C_UnderdogMutation.OnFightBegin` takes the enemy team's unit count less the
+squad's and, when that `diff` is positive, gives every unit an "Underdog"
+`StatBonus` of `amount * diff * coefficient` (the model's `coefficient`
+defaults to 1), flat. `underdog` does the same once the fight's agents are
+built, on their specs, which both engines read. No heuristic run over the
+2400 seeds holds it (it is offered from level 5), so the measurement against
+not, +0.000, says nothing about its worth; `tools/validate_sim.py` holds it to
+the arithmetic.
+
+**Revenge** (316: radius 100, amount 80, a "random" class). The registry had
+it as "stat not in the data". `C_RevengeSkill.OnDeath` collects the dead
+unit's living allies within `radius` and gives each a "Revenge"
+`StatBonusStatus` set up with `amount`, duration -1 (the fight's length); the
+description names the stat ("increase the damage of allies") and says the
+bonus does not stack, which an ally that already holds one keeps to. Both
+engines now carry it as an on-death passive (`P_REVENGE` in the core), with a
+per-unit flag for the no-stacking. `tools/diff_core.py` has a Revenge row and
+agrees as the other on-death rows do (16/16 at 1v1 and 2v2, 12/16 at 4v6
+against BuffOnDeath's 12/16). On the heuristic, against not: -0.001
+[-0.006, +0.004] over 2400 seeds from 40000, 241 runs ending with it.
+
+**Sustain** (242: slowMult 6.5, Warrior, Tank, Dodger and Monk; "can't be
+knocked down"). The registry had it as "conditional healing", which it is not.
+`C_SustainSkill.OnBeforeKnockback` leaves a `Dodge` knockback (`type & 2`) and
+one with `disableGrid` set alone; otherwise it multiplies a negative
+acceleration `a` by `slowMult`, divides a positive one, and when `a` is about
+zero divides `speed` and `originalSpeed` instead. Every shipped knockback
+decelerates (EventualKnockback 236 and 338 both carry -300), so in both engines
+a knockback addon's push on a unit holding it lasts `1 / slowMult` as long
+(`P_SUSTAIN` in the core), and an evasion's jump back keeps its length.
+`tools/validate_sim.py` checks the lengths, that the core reproduces it
+exactly at 1v1, and that it changes the fight (10 of 10). No `diff_core.py`
+row, since that tool gives mutations to the squad only; the 1v1 check puts
+Sustain on the side being pushed instead. On the heuristic, against not:
+-0.000 [-0.003, +0.002] over 2400 seeds from 40000, 113 runs ending with it.
+

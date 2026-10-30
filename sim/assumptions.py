@@ -126,31 +126,13 @@ class Assumptions:
     mana_per_damage_dealt: float = 0.5
     mana_per_damage_taken: float = 0.5
 
-    # `GenerationParams.maxDeadEnds`, the budget `LevelGenerator.Adjust` prunes
-    # dead ends down to. `C_Rooms.Generate` never writes the field, which reads
-    # as zero, and zero cannot be right: a map with no dead ends is a union of
-    # cycles, and an exhaustive search over 7-cell shapes finds none that also
-    # satisfies the neighbour ceiling of 3 and `maxSquares = 1` -- while level 1
-    # is exactly 7 rooms. `sim/mapgen.py` prunes only while the map is over its
-    # room count instead, which keeps the count exact and leaves the growth
-    # rule to decide how many dead ends survive (about 2.8 a map).
-    #
-    # The obvious writers are ruled out. The struct is zeroed with a `movups`
-    # over `rsp + 0x40`, which covers the field, and the one subscriber to
-    # `BeforeGenerationDelegate` is `C_RoomCountMutation.OnBeforeGeneration`,
-    # which adds to `num` and the shop counts and to nothing else. So the field
-    # really is 0, and what has to give is this port's reading of `Adjust`.
-    # Settle by: reading `LevelGenerator.Adjust` (off 0x674460) for whatever
-    # stops it short of zero dead ends.
-    map_max_dead_ends: int | None = None
-
-    # Rooms covering more than one grid square. `maxSquares = num / 10 + 1` and
-    # `maxSquaresAtOnce = 1 + (num >= 15)` are read as constraints on how many
-    # 2x2 blocks of rooms a layout may contain, which is what `CalculateSquares`
-    # and `RoomNode.get_squares` count. If they instead budget *large rooms*,
-    # the constraint is the same shape but the rooms it applies to are not.
-    # Settle by: reading `CreateRooms` and how `M_Room` stores its squares.
-    map_rooms_are_one_square: bool = True
+    # The order of positions in `openPositions` and on the grid. `Adjust` and
+    # `CloseLoops` draw from and walk them, and the sim keeps one dictionary
+    # in insertion order where the game keeps a list that positions leave and
+    # rejoin at the end; and `RoomNode.distance`, which orders the dead ends, is
+    # read here as the walk from the seed (or any room once the seed is cut).
+    # Settle by: reading `AddOpenPosition` and the writers of `distance`.
+    map_adjust_order_approximate: bool = True
 
     # `M_Room.expectedPower`. `C_Rooms.CalculatePower` gives every room a share
     # of `(num - 1) * PowerPerRoom` by the same weights it splits the gold with,
@@ -163,13 +145,30 @@ class Assumptions:
     # Settle by: finding the read of `M_Room.expectedPower`.
     shops_hold_no_enemies: bool = True
 
-    # A mutation shop's shelf. `Rooms.Shops.Mutations` ships `m1` as
-    # `{RollCost 0, RollCount 0, BuyCount 2, ShowCount 10}` and leaves the
-    # generic `m` entry null, so what a generated shop shows is a code default
-    # that is not in the data. `m1` is the only shipped example and is used for
-    # every shop; `RollCount 0` is why there is no reroll action.
-    # Settle by: reading `M_MutationShop`'s defaults out of `C_MutationShop..ctor`.
-    mutation_shop_from_m1: bool = True
+    # How a shelf is drawn, beyond what `MUTATION_SHOP` settles (the shelf of 3,
+    # one take, two rerolls are read out of `C_Room..ctor`). The game's pool is
+    # per mutation *and per class*, and that part is ported: an offer is one
+    # (id, class) pair (`RunState.draw_mutation`). What stays assumed: every
+    # mutation is unlocked (`Stats.MutationUnlocker.GetMutationState` filters
+    # the pool by the player's save), the treasure kind drawn first
+    # (`GetElementUsingHistory<string>` over the level's treasures) is always
+    # the shop's own, a dialog's `GiveMutation` picks its class the way a shelf
+    # does, and a shelf is drawn when the shop is first entered rather than
+    # when the level is built. In Default the last changes nothing, since no
+    # level has two mutation sources.
+    # Settle by: reading `MutationUnlocker.GetMutationState` against a save,
+    # the treasure-kind draw in `TryGetTreasureParameters` and
+    # `C_GiveMutationEvent.Apply`.
+    mutation_pool_by_id_all_unlocked: bool = True
+
+    # ChanceIncrease raises each chance a unit carries once. The game decorates
+    # the `chance` of every held mutation (`C_ChanceIncreaseMutation`) and,
+    # through `C_ChanceIncreaseSkill`, of every action and passive skill on its
+    # units; a mutation that hands its unit a skill of its own (Evasion, say)
+    # may pass through both, if the skill reads the mutation's decorated value.
+    # Settle by: reading how `C_PassiveSkillMutation` builds the unit's skill
+    # model from the mutation's.
+    chance_increase_applies_once: bool = True
 
     # The order among equal keys in `LevelGenerator`'s sorts. `ChoosePortals`
     # sorts the room list by average distance twice and its candidates by
@@ -187,28 +186,72 @@ class Assumptions:
     # Settle by: reading `LevelGenerator.CreateRooms` (off 0x673f50).
     map_room_list_order_by_touch: bool = True
 
+    # Consumables, where the port has to choose. (1) A RoomCleaner is used in
+    # the room it clears, during the placement stage, after the pack is on
+    # screen; the sim has no stage between entering and fighting, so it is used
+    # beforehand and spent on the next room entered, which decides it without
+    # seeing the pack. (2) A resurrected unit comes back whole; `ResurrectData`
+    # carries a `health` field whose writer was not read. (3) AntiHunger lasts
+    # one fight (`WaitExpire` was not read in full). (4) The shelf draw is
+    # weighted by how often the level lists a consumable, without the
+    # `WeightedList` history that discourages repeats. (5) A Teleport with no
+    # hidden room left goes to any other room. (6) The run layer picks the
+    # target of a one-unit heal: the most wounded.
+    # Settle by: modelling the placement stage as its own decision, and reading
+    # `C_Room.CreateCorpse` and `C_AntiHungerConsumable.WaitExpire`.
+    consumables_used_before_entering: bool = True
+
+    # Dialogs, where the port chooses. (1) A node with a single choice is taken
+    # without spending a policy step; no information is lost, the game only
+    # waits for a click. (2) A dialog closes after 40 choices, since
+    # `GuidingStone` can loop back to its start for ever. (3) A dialog's
+    # `RemoveUnit` never removes the last human. (4) `GiveItem` goes to the
+    # human who gains most, as a bought item does; the game hands it to the
+    # player to place. (5) The pool draw is uniform over the dialogs that can
+    # start; `M_Dialog.weight` is unset in the shipped file. (6) Text
+    # interpolation is ignored, except where a variable also counts something
+    # (`numberOfUnitsToGive`, `itemCost`, `foodToRemove`). (7) A `DejaVu`
+    # rewind spends the DejaVu (whether `PrepareData`'s save still carries it
+    # was not read) and keeps the random stream running, since a reloaded
+    # game does not replay its fights bit for bit.
+    # Settle by: reading `C_Dialogs.Choose`, `GiveItem.Apply` and `RemoveUnit.Apply`
+    # in full.
+    dialogs_single_choice_auto: bool = True
+
+    # Quests, where the port chooses (`sim/quests.py`). (1) The quest of a level
+    # is drawn uniformly from its shortlist; the game's `DynamicWeightedList`
+    # is static across the runs of one launch and biases against a quest drawn
+    # in an earlier run, which independent runs cannot carry. (2) The five
+    # Novices the Pit kills are the first five in squad order; the game kills
+    # whoever stands on the room's first five `guaranteedPositions`, which the
+    # dungeon placement decides and the sim does not model. (3) A quest
+    # companion (the Sci Zombie, the Rat) takes no experience and no items,
+    # and counts as a unit for food; `C_Team.GetExperience`'s eligibility and
+    # the trait `InitZombie` sets were not read. (4) A quest prop
+    # (`cube-part`, `rat-flute`) is a flag on the quest, since the sim has no
+    # inventory. (5) A human `ReplaceUnit` turns into the Zombie loses the item
+    # it held; `C_Player.DownGradeUnit` was not read for where it goes. (6) A
+    # secret room's mutation shop (level 7) is left empty: its pool is named
+    # `secret` and its first slot is the `goldinsecretroom` treasure, and no
+    # shipped ruleset defines either (no `Pool` column value, no `Treasures`),
+    # so what the game shows there was not settled. (7) The room
+    # the Reaper's hater or the runaway Bot is in shows on the map once that
+    # room is revealed; how the game shows a runaway was not read. (8) A fight
+    # a quest starts (the hater, the Bot) puts its unit in e1 of a random
+    # layout, since the room's own layout is the pack's and these have none;
+    # the Sword's twin joins the boss in e1. (9) The Flight quest's cannon
+    # costs no food, the way a teleport does not; the flight's path was read
+    # for its health loss and not for `C_Food.Move`.
+    # Settle by: reading `C_UnitLayout`'s use of `guaranteedPositions`,
+    # `C_Team.GetExperience`, `C_Player.DownGradeUnit`, the minimap's quest
+    # markers and `C_FlightQuest.ShootUnit`, and `C_MutationShop.CreateMutations`
+    # with an empty pool.
+    quests_partly_ported: bool = True
+
     # A fight is called a draw if neither side dies within this long. The game
     # has some real timeout or sudden-death rule.
     # Settle by: finding the fight timeout in the fight controller.
     max_fight_seconds: float = 120.0
-
-    # `Craggy`'s debuff when the row does not name one. `M_CraggySkill.debuff`
-    # is a `DebuffType` (None/Stun/Silence) carrying a [DefaultValue] whose
-    # value the dump does not give. Read as Stun: the one shipped row without a
-    # `debuff` is a 30% reaction to physical damage, which would do nothing
-    # whatever if the default were None, and a shipped mutation that does
-    # nothing is the less likely reading.
-    # Settle by: resolving the [DefaultValue] attribute on M_CraggySkill.debuff.
-    craggy_default_debuff: str = "Stun"
-
-    # A damage reaction with no `chance` in its row always fires.
-    # `M_DamageReactionSkill.chance` carries a [DefaultValue] the dump does not
-    # give; Untouchable ships without one, and a reaction that never fires is
-    # the less likely reading of a shipped mutation. Same argument as the line
-    # above, and the two would be settled by the same read.
-    # Settle by: resolving the [DefaultValue] attribute on
-    # M_DamageReactionSkill.chance.
-    reaction_default_chance: float = 100.0
 
     # `ClassDiversity` is applied once, before the fight. The game subscribes to
     # fight start and re-picks its target when that unit dies, so a squad that
@@ -238,21 +281,6 @@ class Assumptions:
     # So Rat and PoringSmall2 are stronger here than they are in the game.
     # Settle by: modelling NC-Fear's panic target, or timing a Rat in game.
     panic_flees: bool = False
-
-    # `M_EvasionSkill.healthThreshold` carries `[DefaultValueAttribute]`, whose
-    # value the dump does not print, and only two of the seven shipped rows set
-    # it. `C_EvasionSkill.OnHealthChanged` sets `_active = healthThreshold >=
-    # health / totalMaxHealth * 100`, so a default below 100 would switch plain
-    # evasion off at full health, which it plainly is not in game. 100 is the
-    # smallest value that keeps every other row always-on.
-    # Settle by: reading the DefaultValue attribute's blob out of the metadata.
-    evasion_health_threshold_default: float = 100.0
-
-    # `M_VampirismSkill.percentage` is likewise defaulted. Only the rows the
-    # game's Meta calls FixedVampirism set it, and they set it to false, so the
-    # unset majority reads as a percentage share of the damage.
-    # Settle by: the same metadata read.
-    vampirism_percentage_default: bool = True
 
     # `C_VampirismSkill.Addon.OnApply` divides the heal by one plus the length
     # of a list carried on the damage and heals each of its members as well as

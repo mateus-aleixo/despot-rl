@@ -193,7 +193,7 @@ class Agent:
     evasions: list = field(default_factory=list)   # (chance, threshold, jump_back)
     # Same reasoning for vampirism: one `C_VampirismSkill` per source, each
     # with its own damage addon, so two sources heal twice.
-    vampirisms: list = field(default_factory=list)  # (value, percentage)
+    vampirisms: list = field(default_factory=list)  # (value, percentage, damage mask)
     fury_per_stack: float = 0.0
     fury_stacks: int = 0
     regen: tuple[str, float, float] | None = None  # (stat, period, value)
@@ -227,6 +227,13 @@ class Agent:
     # ResurrectionChance: (chance%, health value, percentage)
     resurrect: tuple[float, float, bool] | None = None
     resurrected: bool = False
+    # Holds a Revenge bonus already, which does not stack.
+    revenged: bool = False
+    # Sustain's `slowMult` ("can't be knocked down"), 1 without it.
+    # `C_SustainSkill.OnBeforeKnockback` multiplies a decelerating knockback's
+    # (negative) acceleration by it, so the push stops that many times sooner;
+    # a `Dodge` knockback (an evasion's jump back) it leaves alone.
+    sustain: float = 1.0
     # CSLinkStatBonus: params applied to the class skill's targets on cast
     cs_link_bonus: list = field(default_factory=list)
 
@@ -543,7 +550,12 @@ class Battle:
             attacker.hp -= back                     # Reflection: raw, not re-mitigated
             self.damage_done[tgt.team] += back
         if attacker is not None:
-            for value, percentage in attacker.vampirisms:
+            for value, percentage, mask in attacker.vampirisms:
+                # `C_VampirismSkill.OnDamageCreated` attaches the heal only to
+                # damage of the skill's type (Physical unless the row says
+                # otherwise) that is not `Secondary`.
+                if (dtype & mask) != mask or dtype & DT_SECONDARY:
+                    continue
                 # `C_VampirismSkill.Addon.OnApply`: a percentage share of the
                 # damage, capped at what the victim actually had left, or a
                 # flat `value` when `percentage` is false (the FixedVampirism
@@ -572,9 +584,9 @@ class Battle:
                         if o.team != tgt.team or not o.alive:
                             continue
                         if (o.x - tgt.x) ** 2 + (o.y - tgt.y) ** 2 <= r2:
-                            self.push(o, attacker.x, attacker.y, speed, secs)
+                            self.push(o, attacker.x, attacker.y, speed, secs / o.sustain)
                 elif tgt.alive:
-                    self.push(tgt, attacker.x, attacker.y, speed, secs)
+                    self.push(tgt, attacker.x, attacker.y, speed, secs / tgt.sustain)
         self._gain_mana(tgt, dealt * self.a.mana_per_damage_taken)
         if attacker is not None:
             self._gain_mana(attacker, dealt * self.a.mana_per_damage_dealt)

@@ -192,7 +192,7 @@ class RoomLayout:
     'p:N' a numbered player corner, 's' the shop/door marker, 'e1'/'e2' enemy
     zones. `tags` are the trailing header codes (a6, b6, f3, ...).
     """
-    id: int
+    id: int | str
     type: int
     tags: list[str]
     grid: list[list[str]] = field(default_factory=list)
@@ -226,14 +226,21 @@ def parse_room_layouts(text: str) -> list["RoomLayout"]:
 
 
 def _parse_room_layouts(text: str) -> list[RoomLayout]:
-    """Split the CSV into layout blocks. A block starts at an `id,N,type,T` row."""
+    """Split the CSV into layout blocks. A block starts at an `id,N,type,T` row.
+
+    `RoomLayouts.csv` numbers its blocks; `SpecialRoomLayouts.csv` names them
+    (`sci-quest`, `sci-quest-extra`, ...), so a name that is not a number is
+    kept as the id.
+    """
     rows = list(csv.reader(io.StringIO(text)))
     layouts: list[RoomLayout] = []
     current: RoomLayout | None = None
     for row in rows:
         if row and row[0] == "id":
             tags = [c.strip() for c in row[4:] if c.strip()]
-            current = RoomLayout(id=int(row[1]), type=int(row[3]), tags=tags)
+            ident = row[1].strip()
+            current = RoomLayout(id=int(ident) if ident.lstrip("-").isdigit() else ident,
+                                 type=int(row[3] or 0), tags=tags)
             layouts.append(current)
         elif current is not None:
             if not any(c.strip() for c in row):

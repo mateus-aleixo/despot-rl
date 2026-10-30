@@ -26,7 +26,15 @@ def play(env, seed):
     obs, info = env.reset(seed=seed)
     mask = info["action_mask"]
     while mask.any():
-        obs, _, term, trunc, info = env.step(heuristic(env, obs, mask))
+        # The heuristic reads the run state rather than the observation, so
+        # the lit arm decides inside the lit view; what is legal is still the
+        # fog's.
+        if env.lights_on:
+            with env.lit_view(env.state):
+                a = heuristic(env, obs, mask)
+        else:
+            a = heuristic(env, obs, mask)
+        obs, _, term, trunc, info = env.step(a)
         mask = info["action_mask"]
         if term or trunc:
             break

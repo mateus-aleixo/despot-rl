@@ -96,6 +96,10 @@ const P_EVASION: i32 = 16;
 const P_VAMPIRISM: i32 = 17;
 const P_EXPLODE: i32 = 18;
 const P_KNOCKBACK: i32 = 19;
+/// `C_RevengeSkill`: on death, damage to the allies around, once each.
+const P_REVENGE: i32 = 20;
+/// `C_SustainSkill`: a knockback-addon push lasts `1 / slowMult` as long.
+const P_SUSTAIN: i32 = 21;
 
 /// `DamageType`, the flags enum from the game. Only the bits the gates read.
 const DT_PHYSICAL: i32 = 1;
@@ -201,7 +205,7 @@ struct Agent {
     dodge_ready_in: f32,
     unit_dodge_cooldown: f32,
     unit_dodge_ready_in: f32,
-    vampirisms: Vec<(f32, bool)>, // (value, percentage)
+    vampirisms: Vec<(f32, bool, i32)>, // (value, percentage, damage mask)
     fury_per_stack: f32,
     fury_stacks: i32,
     reflect_pct: f32,
@@ -245,6 +249,10 @@ struct Agent {
     /// ResurrectionChance: (chance%, health value, percentage).
     resurrect: Option<(f32, f32, bool)>,
     resurrected: bool,
+    /// Holds a Revenge bonus already, which does not stack.
+    revenged: bool,
+    /// Sustain's `slowMult`, 1.0 without it.
+    sustain: f32,
     death_handled: bool,
 }
 
@@ -679,9 +687,27 @@ impl Sim {
                         })
                         .collect()
                 }
+                // `C_RevengeSkill.OnDeath`: allies inside `radius` that hold
+                // no Revenge bonus yet.
+                P_REVENGE => {
+                    let r2 = p.radius * p.radius;
+                    (0..self.agents.len())
+                        .filter(|&j| {
+                            self.agents[j].team == team
+                                && self.agents[j].hp > 0.0
+                                && !self.agents[j].revenged
+                                && (self.agents[j].x - ax).powi(2)
+                                    + (self.agents[j].y - ay).powi(2)
+                                    <= r2
+                        })
+                        .collect()
+                }
                 _ => Vec::new(),
             };
             for j in victims {
+                if p.kind == P_REVENGE {
+                    self.agents[j].revenged = true;
+                }
                 self.add_stat_buff(j, p.duration, &p);
             }
         }
@@ -870,7 +896,12 @@ impl Sim {
             // `C_VampirismSkill.Addon.OnApply`: a share of the damage capped
             // at what the victim had left, or a flat value for FixedVampirism.
             for k in 0..self.agents[a].vampirisms.len() {
-                let (value, percentage) = self.agents[a].vampirisms[k];
+                let (value, percentage, mask) = self.agents[a].vampirisms[k];
+                // `C_VampirismSkill.OnDamageCreated`: only damage of the
+                // skill's type, and never `Secondary`.
+                if dtype & mask != mask || dtype & DT_SECONDARY != 0 {
+                    continue;
+                }
                 let heal = if percentage {
                     (dealt * value / 100.0).min(victim_hp.max(0.0))
                 } else {
@@ -905,10 +936,12 @@ impl Sim {
                         })
                         .collect();
                     for o in hits {
-                        self.push(o, ax, ay, speed, secs);
+                        let s = secs / self.agents[o].sustain;
+                        self.push(o, ax, ay, speed, s);
                     }
                 } else if self.agents[tgt].hp > 0.0 {
-                    self.push(tgt, ax, ay, speed, secs);
+                    let s = secs / self.agents[tgt].sustain;
+                    self.push(tgt, ax, ay, speed, s);
                 }
             }
         }
@@ -1695,6 +1728,8 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         damage_bonus: Vec::new(),
         resurrect: None,
         resurrected: false,
+        revenged: false,
+        sustain: 1.0,
         death_handled: false,
     }
 }
@@ -1765,7 +1800,7 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
             }
             P_CRAGGY | P_UNTOUCHABLE => a.on_damaged.push(p),
             P_BUFF_ON_CAST | P_MULTICAST => a.on_cast.push(p),
-            P_BUFF_ON_DEATH | P_STICKY_BLOOD | P_DEATH_DAMAGE | P_DEATH_SUMMON => {
+            P_BUFF_ON_DEATH | P_STICKY_BLOOD | P_DEATH_DAMAGE | P_DEATH_SUMMON | P_REVENGE => {
                 a.on_death.push(p)
             }
             P_COMPENSATION => a.standing.push(p),
@@ -1773,12 +1808,13 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
             P_MODIFY_DAMAGE => a.damage_bonus.push((p.damage_mask, p.amount, p.flag)),
             P_RESURRECT => a.resurrect = Some((p.chance, p.amount, p.flag)),
             P_EVASION => a.evasions.push((p.chance, p.amount, p.flag)),
-            P_VAMPIRISM => a.vampirisms.push((p.amount, p.flag)),
+            P_VAMPIRISM => a.vampirisms.push((p.amount, p.flag, p.damage_mask)),
             P_EXPLODE => a.explodes.push((p.amount, p.radius, p.chance, p.damage_mask)),
             P_KNOCKBACK => {
                 a.knockbacks
                     .push((p.chance, p.radius, p.amount, p.amount2, p.damage_mask))
             }
+            P_SUSTAIN => a.sustain = p.amount,
             _ => {}
         }
     }

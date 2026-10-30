@@ -1122,7 +1122,8 @@ Two findings and one new decision for the policy.
 **Consumables are unreachable in Default play**, so the "unmodelled income" the
 section above blamed for the small margin is not income at all: `C_Consumables.Add`
 has one caller (`C_ConsumableShop.Buy`), that shop is built only in a `TalentShop`
-room, and `StatShops` is 0 on all twelve level rows. Nothing to wire.
+room, and `StatShops` is 0 on all twelve level rows. Nothing to wire. (**Retracted 2026-10-29**:
+every boss room but the last builds a consumable shop; see `notes/reference-sim.md`.)
 
 **Treasure rooms are the shrine family**, placed at random by
 `ChooseTreasureRooms`: a `Shrine` on level 1, a `MutationShop` on every level
@@ -2595,3 +2596,77 @@ behavioural rather than a training-length problem: the agent saturates at 2.68
 mutations held against the heuristic's 4.23 and still cannot clear a greedy
 baseline, so the next thing to try is the reward or the low level, not more
 steps.
+
+### The fog fork at 2M: the boss distance buys nothing
+
+`runs/fog2m_{revealed,noboss,nofrontier,lit}_s0..s11.pt`: the four
+information-only arms of 534e0b9, twelve seeds each at 2M with
+`--checkpoint-every 1000000`, unshaped, Rust core, frontline placement, squads
+cycled, 455 observations and 44 actions in every arm. `revealed` is the shipped
+observation (distance to the boss over the revealed map, the found flag, the
+frontier share); `noboss` holds every boss-distance entry at zero,
+`nofrontier` the frontier share, and `lit` lights the whole map for the
+encoding only. Each arm is graded greedy on the vector it trained on over 2400
+seeds from 40000, which is `tools/sweep_arms.py score --sweep fog --tag fog2m
+--start 40000 --runs 2400` (run here by a parallel copy of its loop, identical
+to it seed for seed on one agent over 100 seeds), and every arm is paired with
+`revealed` by training seed. The heuristic is 3.358 [3.311, 3.405] on the same
+seeds (`tools/baseline.py`, same commit).
+
+The last wave (s9 to s11 of every arm) died at 1M when the session that
+launched it closed. It was re-run with `--resume` on the untouched tree, and
+all twelve re-run 1M checkpoints are byte-identical to the dead runs' ones, so
+nothing moved under the sweep.
+
+| arm | 1M | 2M | sd at 2M | held at 2M | against `revealed` at 2M | against the heuristic at 2M |
+|---|---|---|---|---|---|---|
+| revealed | 2.207 | 2.580 | 0.195 | 1.26 | | -0.778 [-0.888, -0.667] |
+| noboss | 2.309 | 2.733 | 0.225 | 1.29 | +0.153 [-0.012, +0.318], 8/12 | -0.625 [-0.752, -0.497] |
+| nofrontier | 2.284 | 2.626 | 0.178 | 1.19 | +0.045 [-0.097, +0.188], 6/12 | -0.732 [-0.833, -0.632] |
+| lit | 2.365 | 2.779 | 0.207 | 1.17 | +0.199 [+0.062, +0.336], 10/12 | -0.579 [-0.696, -0.461] |
+
+At 1M against `revealed`: noboss +0.102 [+0.016, +0.189] (10/12), nofrontier
++0.077 [-0.029, +0.184] (8/12), lit +0.159 [+0.048, +0.269] (11/12). From 1M to
+2M within run: +0.374, +0.424, +0.342 and +0.414, positive in 12, 12, 12 and 11
+of 12.
+
+**The shipped observation is the worst arm.** Holding the boss-distance block
+at zero is at least as good at both budgets, and resolvably better at 1M. The
+frontier share measures null at both. Lighting the map is worth about a fifth
+of a level (+0.199 at 2M), an upper bound at this budget on what any feature
+about the unseen map could add, and the shipped boss and frontier features add
+none of it.
+
+**Every arm loses to the heuristic, by 0.58 to 0.78 levels, and none of the 48
+agents beats it.** Before batch 1 the same budget lost by 0.149 (`roomfight2m`,
+3.797 against 3.946, on a different environment and heuristic). The run layer
+since then (fog, portals, quests, the long-run reward; observations 203 to 455,
+actions 33 to 44) has widened the gap by about 0.6 levels, and 1M to 2M still
+gains +0.34 to +0.42 with 47 of 48 runs improving, so 2M has not converged
+here.
+
+**How to apply.** The boss-distance entries have no measured case: at the
+batch-1 re-baseline, drop them or repeat this fork past 2M before keeping
+them, since an arm comparison taken before the budget is spent can still turn
+(the 2026-08-31 lesson). Size the next sweep at 4M at least. These numbers
+belong to 534e0b9's environment, and the mutation work merged after it moves
+the game, so re-baseline before comparing anything against them.
+
+### The batch-1 boundary, 2026-10-30
+
+Batch 1 is closed. The shipped observation is now the fork's `noboss` arm: the
+boss-distance entries are held at zero unless `boss_distance=True`
+(`--boss-distance`), and the `fog` sweep in `tools/sweep_arms.py` names the
+flag on its other arms, so it still grades each agent on the vector it trained
+on. 455 observations and 44 actions, as before.
+
+Baselines at the merge, `tools/baseline.py` over 2400 seeds from 40000, squads
+cycled, frontline placement, Rust core:
+
+    random     1.235 [1.218, 1.252]   (sd 0.425)
+    heuristic  3.350 [3.303, 3.397]   (sd 1.173)
+
+At 534e0b9 the same seeds gave 1.253 and 3.358; the mutation work merged since
+moved neither by a resolvable amount. The heuristic by squad runs from 3.03
+(Squad6) to 3.74 (Squad2), and its runs end on level 2 to 5 in 2306 of 2400,
+never past level 6. These are the numbers Batch 2 measures against.

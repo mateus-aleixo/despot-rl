@@ -82,7 +82,7 @@ print("\n== teleports ==")
 from sim.run import UNEXPLORED, UNKNOWN
 from rl.env import MOVES, TELEPORT_SLOTS
 
-_te = DespotRunEnv(tables=TABLES)
+_te = DespotRunEnv(tables=TABLES, dialogs=False)
 for _seed in range(200):
     _te.reset(seed=_seed)
     # level 1 is 7 rooms and always holds exactly two portals; level 2 holds
@@ -142,9 +142,16 @@ from sim.run import RunState
 def snapshot(st):
     return (st.level, st.room, st.gold, st.food.amount, st.food.hunger_level,
             st.food.moves_left, len(st.squad), len(st.mutations),
-            st.shop_level, tuple(st.offer),
-            tuple((h.item, h.level, round(h.experience, 6)) for h in st.squad),
-            tuple(sorted((r.id, r.cleared, r.stock, tuple(r.food_stock or ()))
+            st.shop_level, tuple(st.offer), st.level_won,
+            (st.dialog.name, st.dialog.path, st.dialog.steps) if st.dialog else None,
+            tuple((c.name, c.charges) for c in st.consumables),
+            tuple(sorted((k, str(v)) for k, v in st.armed.items())),
+            tuple((h.item, h.level, round(h.experience, 6), round(h.hp, 6))
+                  for h in st.squad),
+            tuple(sorted((r.id, r.cleared, r.stock, tuple(r.food_stock or ()),
+                          tuple(m["ID"] if m else None for m in r.offer_mutations or ()),
+                          r.takes_left, r.rolls_left, len(r.corpses),
+                          tuple(c["ID"] if c else None for c in r.consumable_offer or ()))
                          for r in st.rooms.rooms.values())))
 
 
@@ -214,6 +221,62 @@ def rollout(seed):
         if term or trunc: break
     return out
 check("same seed gives the same trajectory", rollout(7) == rollout(7))
+
+print("\n== the to_boss fork's arms ==")
+# Each arm differs from the observation it is compared with in information
+# only: the same run, step for step, with its own entries held at zero (or, for
+# `lights_on`, the whole level shown) and nothing else moved, the mask included.
+# The shipped observation is the fork's `noboss` arm, so the boss entries are
+# checked as the shipped env against `boss_distance=True`.
+def paired_obs(seed, steps=40, base_kw=None, **arm):
+    """Two envs, `base_kw` and `arm`, driven by the same actions."""
+    base = DespotRunEnv(tables=TABLES, **(base_kw or {}))
+    other = DespotRunEnv(tables=TABLES, **arm)
+    o1, i1 = base.reset(seed=seed)
+    o2, i2 = other.reset(seed=seed)
+    rng = random.Random(seed)
+    pairs = [(o1, o2, i1["action_mask"], i2["action_mask"])]
+    for _ in range(steps):
+        m = i1["action_mask"]
+        if not m.any():
+            break
+        a = int(rng.choice(list(np.flatnonzero(m))))
+        o1, _, t1, _, i1 = base.step(a)
+        o2, _, t2, _, i2 = other.step(a)
+        pairs.append((o1, o2, i1["action_mask"], i2["action_mask"]))
+        if t1 or t2:
+            break
+    return pairs, base, other
+
+for name, base_kw, arm in (("no boss distance", {"boss_distance": True}, {}),
+                           ("blind_frontier", None, {"blind_frontier": True}),
+                           ("lights_on", None, {"lights_on": True})):
+    moved, masks_same, zeroed = set(), True, True
+    for seed in (3, 11, 29):
+        pairs, base, other = paired_obs(seed, base_kw=base_kw, **arm)
+        masks_same &= all((m1 == m2).all() for _, _, m1, m2 in pairs)
+        for o1, o2, _, _ in pairs:
+            idx = set(np.flatnonzero(o1 != o2).tolist())
+            moved |= idx
+            if name != "lights_on":
+                zeroed &= all(o2[i] == 0.0 for i in idx)
+        same_run = (base.state.level == other.state.level
+                    and base.state.room == other.state.room
+                    and len(base.state.squad) == len(other.state.squad))
+        masks_same &= same_run
+    check(f"{name}: the same run and the same mask, step for step", masks_same)
+    if name == "lights_on":
+        check("lights_on: shows more than the fog does", len(moved) > 0,
+              f"{len(moved)} entries")
+    else:
+        check(f"{name}: what moves is only zeroed, and something does", zeroed and moved,
+              f"{sorted(moved)[:12]}")
+_e = DespotRunEnv(tables=TABLES, lights_on=True)
+_e.reset(seed=5)
+from sim.run import UNKNOWN as _UNKNOWN
+_hidden = sum(1 for r in _e.state.rooms.rooms.values() if r.state == _UNKNOWN)
+check("lights_on lights the view and leaves the run in the fog", _hidden > 0,
+      f"{_hidden} rooms still unknown to the run")
 
 print("\n== placement policies ==")
 layout = parse_room_layouts(TABLES["RoomLayouts"])[0]
