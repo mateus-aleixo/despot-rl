@@ -222,6 +222,58 @@ def rollout(seed):
     return out
 check("same seed gives the same trajectory", rollout(7) == rollout(7))
 
+print("\n== the to_boss fork's arms ==")
+# Each arm differs from the shipped observation in information only: the same
+# run, step for step, with its own entries held at zero (or, for `lights_on`,
+# the whole level shown) and nothing else moved, the mask included.
+def paired_obs(seed, steps=40, **arm):
+    """The shipped env and an arm, driven by the same actions."""
+    base, other = DespotRunEnv(tables=TABLES), DespotRunEnv(tables=TABLES, **arm)
+    o1, i1 = base.reset(seed=seed)
+    o2, i2 = other.reset(seed=seed)
+    rng = random.Random(seed)
+    pairs = [(o1, o2, i1["action_mask"], i2["action_mask"])]
+    for _ in range(steps):
+        m = i1["action_mask"]
+        if not m.any():
+            break
+        a = int(rng.choice(list(np.flatnonzero(m))))
+        o1, _, t1, _, i1 = base.step(a)
+        o2, _, t2, _, i2 = other.step(a)
+        pairs.append((o1, o2, i1["action_mask"], i2["action_mask"]))
+        if t1 or t2:
+            break
+    return pairs, base, other
+
+for arm in ({"blind_boss": True}, {"blind_frontier": True}, {"lights_on": True}):
+    name = next(iter(arm))
+    moved, masks_same, zeroed = set(), True, True
+    for seed in (3, 11, 29):
+        pairs, base, other = paired_obs(seed, **arm)
+        masks_same &= all((m1 == m2).all() for _, _, m1, m2 in pairs)
+        for o1, o2, _, _ in pairs:
+            idx = set(np.flatnonzero(o1 != o2).tolist())
+            moved |= idx
+            if name != "lights_on":
+                zeroed &= all(o2[i] == 0.0 for i in idx)
+        same_run = (base.state.level == other.state.level
+                    and base.state.room == other.state.room
+                    and len(base.state.squad) == len(other.state.squad))
+        masks_same &= same_run
+    check(f"{name}: the same run and the same mask, step for step", masks_same)
+    if name == "lights_on":
+        check("lights_on: shows more than the fog does", len(moved) > 0,
+              f"{len(moved)} entries")
+    else:
+        check(f"{name}: what moves is only zeroed, and something does", zeroed and moved,
+              f"{sorted(moved)[:12]}")
+_e = DespotRunEnv(tables=TABLES, lights_on=True)
+_e.reset(seed=5)
+from sim.run import UNKNOWN as _UNKNOWN
+_hidden = sum(1 for r in _e.state.rooms.rooms.values() if r.state == _UNKNOWN)
+check("lights_on lights the view and leaves the run in the fog", _hidden > 0,
+      f"{_hidden} rooms still unknown to the run")
+
 print("\n== placement policies ==")
 layout = parse_room_layouts(TABLES["RoomLayouts"])[0]
 grid = Grid.from_layout(layout)

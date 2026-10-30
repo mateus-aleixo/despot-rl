@@ -28,6 +28,8 @@ picks the human who gains the most Power by it. See `best_item_target`.
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 
 try:
@@ -116,7 +118,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  lights_on: bool = False,
                  dialogs: bool = True,
                  quests: bool = True,
-                 long_run_reward: bool | str = False):
+                 long_run_reward: bool | str = False,
+                 blind_boss: bool = False,
+                 blind_frontier: bool = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -167,6 +171,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # `to_boss` fork to the batch-1 boundary; this is the control that lets
         # it be run as arms rather than as a code change.
         self.lights_on = lights_on
+        # The other two arms of the `to_boss` fork, in the same shape: hold the
+        # entries at zero and keep them in the vector. `blind_boss` zeroes every
+        # entry read off the distance to the boss (the found flag, this room's
+        # distance, each neighbour's "nearer" bit), which leaves the policy the
+        # local view and the frontier; `blind_frontier` zeroes the share of the
+        # revealed map still unentered, which leaves the boss distance alone.
+        self.blind_boss = blind_boss
+        self.blind_frontier = blind_frontier
         # The level-entry dialogs. Off is a run without them, which exists to
         # measure what they change and for checks of other mechanics.
         self.dialogs = dialogs
@@ -246,6 +258,14 @@ class DespotRunEnv(gym.Env if gym is not None else object):
 
     # -- encoding ----------------------------------------------------------
     def _encode(self, st: RunState) -> np.ndarray:
+        """The observation, of the level as the fog leaves it or, for the
+        `lights_on` arm, of the level with every room revealed."""
+        if not self.lights_on:
+            return self._encode_view(st)
+        with self.lit_view(st):
+            return self._encode_view(st)
+
+    def _encode_view(self, st: RunState) -> np.ndarray:
         f = st.food
         # Progression, which the observation had no way to see: how far the
         # squad's levels have come, how strong it is against the room it is
@@ -435,8 +455,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # and what `cleared` cannot say on its own: a room walked into and
             # lost in is explored and uncleared both.
             around[base + 2] = 1.0 if room.state == UNEXPLORED else 0.0
-            around[base + 3] = (1.0 if known and known.get(rid, far) < d_here
-                                else 0.0)
+            around[base + 3] = (1.0 if known and not self.blind_boss
+                                and known.get(rid, far) < d_here else 0.0)
             around[base + 4] = 1.0 if st.rooms.is_portal(rid) else 0.0
             if to_quest:
                 around[base + 5] = 1.0 if (to_quest.get(rid, far + 1)
@@ -462,8 +482,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # Without the flag a distance of 0 means "standing on the boss" and
             # "no idea where the boss is" at once, and the two want opposite
             # moves.
-            boss_found,
-            (d_here / far) if boss_found else 0.0,
+            0.0 if self.blind_boss else boss_found,
+            (d_here / far) if boss_found and not self.blind_boss else 0.0,
             sum(1 for r in seen if r.cleared) / max(1, len(seen)),
             len(seen) / 20.0,
             sum(1 for r in pantries
@@ -473,7 +493,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # frontier the exploration decision is actually made against, and
             # with the level size hidden it is the only sense of "how much is
             # left" the policy has.
-            sum(1 for r in seen if r.state == UNEXPLORED) / max(1, len(seen)),
+            0.0 if self.blind_frontier
+            else sum(1 for r in seen if r.state == UNEXPLORED) / max(1, len(seen)),
             # Standing on a portal, which is what makes the teleport slots
             # legal. The `current-teleport` sprite shows it.
             1.0 if st.rooms.is_portal(st.room) else 0.0,
@@ -723,27 +744,37 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.state.use_fast_core = self.fast_core
         if self.placement_policy is not None:
             self.state.placement_policy = self.placement_policy
-        self._light_up()
         self._seed += 1
         self.steps = 0
         self._mask_cache = None
         return self._encode(self.state), {"action_mask": self.action_mask()}
 
-    def _light_up(self) -> None:
-        """Reveal the level, for the `lights_on` ablation arm.
+    @staticmethod
+    @contextlib.contextmanager
+    def lit_view(st: RunState):
+        """The level with every room revealed, for as long as the block runs.
 
-        `EXPLORED` rather than `UNEXPLORED` so the frontier fraction reads zero
-        and the arm sees the level the way the pre-fog env did: entirely known.
-        The current room keeps its own state, which `set_current` has already
-        written.
+        The `lights_on` arm encodes inside it, and a policy that reads the run
+        state (the heuristic) can decide inside it. `EXPLORED` rather than
+        `UNEXPLORED` so the frontier fraction reads zero and the level looks
+        the way the pre-fog env showed it: entirely known. Only the view is
+        lit. The states go back afterwards, because since
+        `RoomTransition.CheckDirection` a move into an `Unknown` room is
+        illegal and the Teleport consumable draws from the `Unknown` rooms, so
+        a reveal written into the run (as this arm used to do) changes what
+        the arm can do as well as what it knows.
         """
-        if not self.lights_on or self.state is None:
-            return
-        rooms = self.state.rooms
-        for room in rooms.rooms.values():
-            if room.state == UNKNOWN:
-                room.state = EXPLORED
+        rooms = st.rooms
+        hidden = [r for r in rooms.rooms.values() if r.state == UNKNOWN]
+        for room in hidden:
+            room.state = EXPLORED
         rooms._refresh_known()
+        try:
+            yield
+        finally:
+            for room in hidden:
+                room.state = UNKNOWN
+            rooms._refresh_known()
 
     def step(self, action: int):
         st = self.state
@@ -766,7 +797,6 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         squad_before = len(st.squad)
         phi_before = self.potential(st)
         result = st.apply(self._decode(action))
-        self._light_up()                 # after `apply`, which is what moves rooms
         self._mask_cache = None          # the state moved; the mask is stale
         self.steps += 1
 

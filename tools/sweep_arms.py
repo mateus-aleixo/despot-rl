@@ -80,6 +80,23 @@ SWEEPS = {
         "flags": {"long": []},
         "env": {"long": {}},
     },
+    # The `to_boss` fork, Batch 1's boundary sweep (`notes/roadmap.md`): what
+    # the policy is told about where the boss is under the fog. `revealed` is
+    # what shipped (distance over the revealed map, a found flag, the share of
+    # the map still unentered); `noboss` holds every boss-distance entry at
+    # zero and navigates on the local view and the frontier; `nofrontier`
+    # keeps the boss distance alone; `lit` reveals the whole level in the
+    # observation, the control for what the fog's information is worth. All
+    # four differ only in information, so each is graded on the vector it
+    # trained on, as `shelf` is, and every other arm is paired against the
+    # first.
+    "fog": {
+        "arms": ("revealed", "noboss", "nofrontier", "lit"),
+        "flags": {"revealed": [], "noboss": ["--blind-boss"],
+                  "nofrontier": ["--blind-frontier"], "lit": ["--lights-on"]},
+        "env": {"revealed": {}, "noboss": {"blind_boss": True},
+                "nofrontier": {"blind_frontier": True}, "lit": {"lights_on": True}},
+    },
 }
 PY_EXE = sys.executable
 
@@ -166,7 +183,7 @@ def do_score(args) -> None:
 
     tables = load_ruleset(strict=True)
     placement = POLICIES["frontline"]
-    seeds = list(range(30_000, 30_000 + args.runs))
+    seeds = list(range(args.start, args.start + args.runs))
     arms = SWEEPS[args.sweep]["arms"]
     arm_env = SWEEPS[args.sweep]["env"]
 
@@ -236,17 +253,12 @@ def do_score(args) -> None:
     # comparison there is between checkpoints of the same runs, made by scoring
     # the tag at several `--at` marks, so print the per-seed column and skip the
     # paired block rather than unpacking two arms that do not exist.
-    paired: list[float] = []
     if len(arms) >= 2:
-        a, b = arms[0], arms[1]
-        paired = [means[a][s] - means[b][s] for s in SEEDS
-                  if s in means[a] and s in means[b]]
-        print(f"\n| init seed | {a} | {b} | {a} minus {b} |")
-        print("|---|---|---|---|")
+        print("\n| init seed | " + " | ".join(arms) + " |")
+        print("|---" * (len(arms) + 1) + "|")
         for s in SEEDS:
-            if s in means[a] and s in means[b]:
-                print(f"| {s} | {means[a][s]:.2f} | {means[b][s]:.2f} | "
-                      f"{means[a][s] - means[b][s]:+.2f} |")
+            if all(s in means[x] for x in arms):
+                print(f"| {s} | " + " | ".join(f"{means[x][s]:.2f}" for x in arms) + " |")
     else:
         only = arms[0]
         print(f"\n| init seed | {only} |")
@@ -264,21 +276,26 @@ def do_score(args) -> None:
         if means[arm]:
             print(f"{arm + ' arm':11s} {statistics.mean(means[arm].values()):.3f}")
     print(f"{'heuristic':11s} {statistics.mean(base):.3f}")
-    if len(paired) > 1:
+    # Every arm after the first against the first, paired on the init seed.
+    a = arms[0]
+    for b in arms[1:]:
+        paired = [means[a][s] - means[b][s] for s in SEEDS
+                  if s in means[a] and s in means[b]]
+        if len(paired) < 2:
+            continue
         lo, hi = ci95(paired)
-        print(f"\npaired difference, per training seed   "
-              f"{statistics.mean(paired):+.2f} [{lo:+.2f}, {hi:+.2f}]")
+        print(f"\n{a} minus {b}, per training seed   "
+              f"{statistics.mean(paired):+.3f} [{lo:+.3f}, {hi:+.3f}], "
+              f"{sum(1 for d in paired if d > 0)} of {len(paired)} positive")
         # Per eval seed: the same difference resolved seed by seed, which is a
         # tighter interval on a sample that is not independent -- twelve agents
         # an arm share it -- so it is quoted as the lower bound it is.
-        by_eval = [statistics.mean(per_seed[a][s][i] - per_seed[b][s][i]
-                                   for s in SEEDS if s in per_seed[a])
-                   for i in range(len(seeds))]
         flat = [per_seed[a][s][i] - per_seed[b][s][i]
-                for s in SEEDS if s in per_seed[a] for i in range(len(seeds))]
+                for s in SEEDS if s in per_seed[a] and s in per_seed[b]
+                for i in range(len(seeds))]
         lo, hi = ci95(flat)
         print(f"per eval seed (n={len(flat):,}, not independent) "
-              f"{statistics.mean(flat):+.2f} [{lo:+.2f}, {hi:+.2f}]")
+              f"{statistics.mean(flat):+.3f} [{lo:+.3f}, {hi:+.3f}]")
 
     print(f"\n| arm | mutations held | `take_mutation` | any mutation |")
     print("|---|---|---|---|")
@@ -314,6 +331,9 @@ t.set_defaults(fn=do_train)
 c = sub.add_parser("score")
 c.add_argument("--sweep", default="passives", choices=sorted(SWEEPS))
 c.add_argument("--runs", type=int, default=240)
+c.add_argument("--start", type=int, default=30_000,
+               help="first eval seed; 240 seeds is a small sample for an "
+                    "effect under 0.2 levels (see tools/ablate.py)")
 c.add_argument("--tag", default="arm2")
 c.add_argument("--at", type=int, default=0,
                help="score the `<out>.<steps>.pt` checkpoint at this many "

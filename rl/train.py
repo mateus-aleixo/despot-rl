@@ -188,6 +188,14 @@ def main():
                     help="reveal the whole level instead of playing under the "
                          "fog, at the same obs_dim, which is the pre-fog "
                          "observation and the control arm for what the fog costs")
+    ap.add_argument("--blind-boss", action="store_true",
+                    help="hold every entry read off the distance to the boss at "
+                         "zero, at the same obs_dim: the to_boss fork's arm "
+                         "that navigates on the local view and the frontier")
+    ap.add_argument("--blind-frontier", action="store_true",
+                    help="hold the share of the revealed map still unentered at "
+                         "zero, at the same obs_dim: the to_boss fork's arm "
+                         "that keeps only the boss distance")
     ap.add_argument("--blind-shelf", action="store_true",
                     help="hold the five description floats and the passive bit "
                          "at zero for every mutation slot, leaving `present`, "
@@ -228,7 +236,9 @@ def main():
                          blind_shelf=args.blind_shelf,
                          squad=args.squad,
                          blind_squad=args.blind_squad,
-                         lights_on=args.lights_on)
+                         lights_on=args.lights_on,
+                         blind_boss=args.blind_boss,
+                         blind_frontier=args.blind_frontier)
             for i in range(args.envs)]
 
     states = np.zeros((args.envs, envs[0].obs_dim), dtype=np.float32)
