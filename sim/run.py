@@ -877,8 +877,15 @@ class RunState:
 
     @property
     def feed_cost(self) -> float:
-        """`M_Food.needed`: one food per human in the squad."""
-        return float(max(1, len(self.squad)))
+        """`M_Food.needed`: one food per human in the squad, through each held
+        UnderFeed's compositor (`sim.mutations.under_feed`)."""
+        needed = max(1, len(self.squad))
+        if self.mutations:
+            from .mutations import mutation_params, under_feed
+            for m in self.mutations:
+                if m["Name"] == "UnderFeed":
+                    needed = under_feed(needed, mutation_params(m))
+        return float(needed)
 
     def item_power(self, item: str | None, level: int) -> float:
         """Power of one human holding `item` at `level`.

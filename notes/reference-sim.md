@@ -2636,3 +2636,16 @@ the shelf description draws off the mutation's id, since the sim keeps no
 offered class (`mutation_pool_by_id_all_unlocked`). Implemented against not:
 -0.003 [-0.007, +0.000] over 2400 seeds from 40000, 102 runs ending with it.
 
+**UnderFeed** ("Living on Scraps", 269: 20% less food, 30% slower in a fight;
+the job-offer variant 286: 10% more food). `C_UnderFeedMutation` composes
+`M_Food._needed` (static +0x80), the food a move eats, with `Modify(int)`:
+`needed * (1 - value / 100)` (or `needed - value` without `percentage`),
+through `Math.Round`, which rounds to even, then at least 1, and when that
+leaves a number above 1 unchanged it steps once the way `value` points. So
+20% less is 1, 1, 2, 3, 4, 8 for 1, 2, 3, 4, 5, 10 humans, and 10% more is
+3 for 2. Every unit also gets an "UnderFeeding" `StatBonus` of
+`-slowValue` percent on Speed when `slowValue` is set, which is the "slower in
+a fight" half of the description. `RunState.feed_cost` runs the compositor and
+`apply_to_specs` the slow. Implemented against not: -0.003 [-0.009, +0.003]
+over 2400 seeds from 40000, 283 runs ending with it.
+

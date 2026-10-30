@@ -61,7 +61,6 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "FearsomeAttack": Handler(PASSIVE, note="on-attack fear"),
     "ChanceIncrease": Handler(UNIMPLEMENTED, note="raises another mutation's chance"),
     "PassiveStun": Handler(PASSIVE, note="on-attack stun"),
-    "UnderFeed": Handler(UNIMPLEMENTED, note="food economy"),
     "ManaBreak": Handler(PASSIVE, note="mana burn on hit"),
     "RailProjectile": Handler(UNIMPLEMENTED, note="piercing projectile"),
     "RubberProjectile": Handler(UNIMPLEMENTED, note="bouncing projectile"),
@@ -78,6 +77,8 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "HoboFury": Handler(PASSIVE, note="stat bonus while the purse is nearly empty"),
     # Run layer: `RunState.gain_experience` applies it.
     "Intelligence": Handler(PASSIVE, note="more experience per gain"),
+    # Run layer and fight: `RunState.feed_cost` and `apply_to_specs`.
+    "UnderFeed": Handler(PASSIVE, note="food needed per move, and a slow"),
     "CSRange": Handler(UNIMPLEMENTED, note="class-skill range"),
     "ChainLightning": Handler(UNIMPLEMENTED, note="chaining projectile"),
     "PlagueAntiHeal": Handler(UNIMPLEMENTED, note="swaps the Medic class skill"),
@@ -232,6 +233,9 @@ def apply_to_specs(specs: list, mutations: list[dict],
       * `HoboFury`: `C_HoboFuryMutation.OnGold` turns a `StatBonus` status on
         for every live unit while `goldAmount >= floor(gold)` and off again
         above it. The shipped row is Damage +30, flat, at 10 gold or less.
+      * `UnderFeed` slows every covered unit by `slowValue` percent in a
+        fight ("UnderFeeding", a `StatBonus` on Speed); its other half, the
+        food, is `under_feed` on `RunState.feed_cost`.
       * `HungerFury` hands its units `C_HungerFurySkill`, whose
         `Food_HungerLevelChanged` sets the bonus to nothing at hunger level 0,
         `lowValue` at 1 and `highValue` above. The shipped row is AttackSpeed
@@ -264,12 +268,36 @@ def apply_to_specs(specs: list, mutations: list[dict],
             if gold is not None and param(p, "goldAmount") >= math.floor(gold):
                 out = [apply_stat_bonus(s, p) if applies_to(m, s.cls, rng) else s
                        for s in out]
+        elif name == "UnderFeed":
+            slow = param(p, "slowValue")
+            if slow:
+                bonus = {"stat": "Speed", "value": -slow,
+                         "percentage": p.get("percentage", "true")}
+                out = [apply_stat_bonus(s, bonus) if applies_to(m, s.cls, rng) else s
+                       for s in out]
         elif name == "HungerFury":
             if hunger:
                 value = param(p, "lowValue") if hunger == 1 else param(p, "highValue")
                 bonus = dict(p, value=value)
                 out = [apply_stat_bonus(s, bonus) if applies_to(m, s.cls, rng) else s
                        for s in out]
+    return out
+
+
+def under_feed(needed: int, params: dict) -> int:
+    """`C_UnderFeedMutation.Modify`, the compositor on `M_Food.needed`.
+
+    `needed * (1 - value / 100)` when `percentage` (the model's default),
+    `needed - value` otherwise, through `Math.Round` (to even) and up to at
+    least 1. When the rounding leaves the number where it was and it is above
+    1, it moves one step the way `value` points, so a small cut on a small
+    squad still cuts.
+    """
+    v = param(params, "value")
+    pct = str(params.get("percentage", "true")).lower() == "true"
+    out = max(1, int(round(needed * (1.0 - v / 100.0) if pct else needed - v)))
+    if out == needed and needed > 1:
+        out += -1 if v > 0 else (1 if v < 0 else 0)
     return out
 
 

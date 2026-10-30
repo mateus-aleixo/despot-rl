@@ -568,6 +568,22 @@ _ri.gain_experience(4.0)
 check("Intelligence turns 4 experience into 6", _plain_exp == 4.0
       and abs(_ri.squad[0].experience - 6.0) < 1e-9, f"{_ri.squad[0].experience}")
 
+# UnderFeed: 269 eats 20% less and slows 30% in a fight; 286 eats 10% more.
+# The compositor on `M_Food.needed` rounds to even, keeps at least 1, and
+# steps once when rounding would leave a number above 1 unchanged.
+from sim.mutations import under_feed as _uf
+check("UnderFeed's food: 20% less is 1,1,2,3,4,8 for 1,2,3,4,5,10 humans",
+      [_uf(n, {"value": 20}) for n in (1, 2, 3, 4, 5, 10)] == [1, 1, 2, 3, 4, 8])
+check("and 10% more is 1,3,5,6,11 for 1,2,4,5,10 (5.5 rounds to 6, to even)",
+      [_uf(n, {"value": -10}) for n in (1, 2, 4, 5, 10)] == [1, 3, 5, 6, 11])
+_ru = _RS.new(_STRICT, seed=7)
+_ru.squad = _ru.squad[:1] * 5
+_ru.mutations = [next(m for m in _STRICT["SimpleMutations"] if m["ID"] == 269)]
+_slow = apply_to_specs(_specs, _ru.mutations, random.Random(0))
+check("the run feeds 4 for 5 humans, and the squad fights 30% slower",
+      _ru.feed_cost == 4.0 and abs(_slow[0].speed - _specs[0].speed * 0.7) < 1e-9,
+      f"{_ru.feed_cost}, speed {_specs[0].speed} -> {_slow[0].speed}")
+
 # and it becomes a castable action instead
 _rngM = random.Random(2)
 _monks = build_player_squad(_STRICT, [("gloves", 1)] * 3)      # Monk class
