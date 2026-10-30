@@ -72,9 +72,9 @@ matching, and every constant either read from the shipped data or recorded in
 `sim/assumptions.py` as a choice.** That is checkable, and `tools/diff_core.py`
 already works to exactly this standard for the battle loop.
 
-Some constants will never be recovered: whether a room may cover several
-squares, the anti-repeat weighting inside a quality. (`maxDeadEnds` and
-`minFinishDistance`, once on this list, were both recovered.) `sim/assumptions.py` is the honest boundary of the work, not a list
+Some constants will never be recovered: the anti-repeat weighting inside a
+quality. (`maxDeadEnds`, `minFinishDistance` and whether a room may cover
+several squares, once on this list, were all recovered.) `sim/assumptions.py` is the honest boundary of the work, not a list
 that eventually empties.
 
 ## The rule that makes completeness real
@@ -180,7 +180,7 @@ thrown away.
   level-2 reward mutations (306, 218, 328, 233, Batch 2's mutation work) and
   the placement layer's `guaranteedPositions`.
 - ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26
-  of their event types, plus consumable 13; `DejaVu` still open. Worth +0.196
+  of their event types, plus consumable 13 (`DejaVu` followed, see Consumables). Worth +0.196
   [+0.021, +0.370] levels to the heuristic, and choosing well +0.154 over
   random. Details in `notes/reference-sim.md`. The original plan follows.
   `C_Levels.StartDialog` fires one on every level change, drawn
@@ -218,8 +218,8 @@ thrown away.
   wrong was `Adjust`, which trades each cut dead end for a room on a uniformly
   drawn open position, keeping the count, and stops when none is accepted
   (undoing the last cut). `CloseLoops` moves dead ends into the gap of a ring
-  of seven rooms. Growth, `Adjust`, `CloseLoops` run once each. Still open:
-  multi-square rooms.
+  of seven rooms. Growth, `Adjust`, `CloseLoops` run once each. Multi-square
+  rooms do not exist: `RoomNode` and `M_Room` hold one grid position each.
 
 **Boundary:** re-baseline random + heuristic over 240 seeds, squads cycled, then
 one sweep for the `to_boss` question, which is a genuine fork rather than a

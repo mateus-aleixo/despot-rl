@@ -797,7 +797,11 @@ These are places the run layer is thinner than the game, and each is visible in
 - A generated room covers one grid square. `maxSquares` and `maxSquaresAtOnce`
   are honoured as constraints on 2x2 blocks of rooms, which is what
   `CalculateSquares` and `RoomNode.get_squares` count, rather than as a budget
-  for rooms that cover several squares.
+  for rooms that cover several squares. (Settled 2026-10-30: `RoomNode` and
+  `M_Room` each hold a single grid position, `CreateRooms` makes one node per
+  `Yes` cell and links it to the cells beside it, and `get_squares` counts the
+  2x2 blocks of rooms around its one cell. A room is one square in the game
+  too, and the assumption is gone.)
 - `maxDeadEnds` could not be recovered -- see `sim/mapgen.py` and the
   assumptions -- so `Adjust` prunes only while the map is over its room count.
 - Portals, treasure rooms, secret rooms and quests are not placed. `portalsCount`

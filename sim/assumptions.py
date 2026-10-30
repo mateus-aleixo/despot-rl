@@ -134,14 +134,6 @@ class Assumptions:
     # Settle by: reading `AddOpenPosition` and the writers of `distance`.
     map_adjust_order_approximate: bool = True
 
-    # Rooms covering more than one grid square. `maxSquares = num / 10 + 1` and
-    # `maxSquaresAtOnce = 1 + (num >= 15)` are read as constraints on how many
-    # 2x2 blocks of rooms a layout may contain, which is what `CalculateSquares`
-    # and `RoomNode.get_squares` count. If they instead budget *large rooms*,
-    # the constraint is the same shape but the rooms it applies to are not.
-    # Settle by: reading `CreateRooms` and how `M_Room` stores its squares.
-    map_rooms_are_one_square: bool = True
-
     # `M_Room.expectedPower`. `C_Rooms.CalculatePower` gives every room a share
     # of `(num - 1) * PowerPerRoom` by the same weights it splits the gold with,
     # including the shops -- but what reads that field was not found, and using
