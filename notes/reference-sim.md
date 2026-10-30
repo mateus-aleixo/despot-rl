@@ -2680,3 +2680,17 @@ At level 5 the 98 mutations on offer are 316 pairs, and a shelf comes out 96%
 single-class. On the heuristic over 2400 seeds from 40000, against the id-level
 draw: -0.018 [-0.065, +0.028], mutations held 2.61 against 2.66 a run.
 
+**ChanceIncrease** (215: +15%, 284: +5%, every class).
+`C_ChanceIncreaseMutation` decorates the `chance` of every held simple
+mutation (and of combined mutations' descendants) and of every one inserted
+later, and hands its units `C_ChanceIncreaseSkill`, which decorates the
+`chance` of every action and passive skill (`IProbable`) the unit has or gains.
+`Modify` is `chance * (1 + value / 100)` with `percentage`, `chance + value`
+without, held to 0..100. `boost_agent_chances` runs it over everything a
+squad unit carries once the fight's agents are built, so both engines read
+the raised numbers: crit, evasions, knockbacks, explosions, resurrection and
+the hooks' rolls. A chance left at its default 100 stays 100. Whether a
+mutation's own skill takes the bonus twice is open
+(`chance_increase_applies_once`). Implemented against not: -0.000
+[-0.004, +0.003] over 2400 seeds from 40000, 190 runs ending with one.
+

@@ -161,6 +161,15 @@ class Assumptions:
     # `C_GiveMutationEvent.Apply`.
     mutation_pool_by_id_all_unlocked: bool = True
 
+    # ChanceIncrease raises each chance a unit carries once. The game decorates
+    # the `chance` of every held mutation (`C_ChanceIncreaseMutation`) and,
+    # through `C_ChanceIncreaseSkill`, of every action and passive skill on its
+    # units; a mutation that hands its unit a skill of its own (Evasion, say)
+    # may pass through both, if the skill reads the mutation's decorated value.
+    # Settle by: reading how `C_PassiveSkillMutation` builds the unit's skill
+    # model from the mutation's.
+    chance_increase_applies_once: bool = True
+
     # The order among equal keys in `LevelGenerator`'s sorts. `ChoosePortals`
     # sorts the room list by average distance twice and its candidates by
     # spread once, and `List.Sort` is an introsort, which does not keep equal

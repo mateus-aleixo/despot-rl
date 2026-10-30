@@ -59,7 +59,7 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "SwapAttack": Handler(UNIMPLEMENTED, note="replaces the default attack"),
     "BeforeFightSummon": Handler(UNIMPLEMENTED, note="summons before the fight starts"),
     "FearsomeAttack": Handler(PASSIVE, note="on-attack fear"),
-    "ChanceIncrease": Handler(UNIMPLEMENTED, note="raises another mutation's chance"),
+    "ChanceIncrease": Handler(PASSIVE, note="raises every chance its units carry"),
     "PassiveStun": Handler(PASSIVE, note="on-attack stun"),
     "ManaBreak": Handler(PASSIVE, note="mana burn on hit"),
     "RailProjectile": Handler(UNIMPLEMENTED, note="piercing projectile"),
@@ -514,6 +514,59 @@ def _gate(battle, params: dict, dtype: int, name: str = "") -> bool:
         return False
     chance = chance_of(name, params)
     return chance >= 100.0 or battle.rng.random() * 100.0 < chance
+
+
+def chance_bonuses(mutations: list[dict], cls: str) -> list[tuple[float, bool]]:
+    """The held ChanceIncrease mutations covering `cls`, as (value, percentage)."""
+    out = []
+    for m in mutations:
+        if m["Name"] == "ChanceIncrease" and applies_to(m, cls):
+            p = mutation_params(m)
+            out.append((param(p, "value"),
+                        str(p.get("percentage", "true")).lower() == "true"))
+    return out
+
+
+def boost_chance(chance: float, bonuses) -> float:
+    """`C_ChanceIncreaseSkill.Modify`: `chance * (1 + value / 100)` with
+    `percentage`, `chance + value` without, held to 0..100, once per bonus."""
+    for value, pct in bonuses:
+        chance = chance * (1.0 + value / 100.0) if pct else chance + value
+        chance = min(100.0, max(0.0, chance))
+    return chance
+
+
+def _boost_hook(name: str, p: dict, bonuses) -> dict:
+    for key in CHANCE_PARAM.get(name, ("chance", "Chance")):
+        if p.get(key) is not None:
+            return {**p, key: boost_chance(float(p[key]), bonuses)}
+    return p      # no chance named: the default 100 stays 100
+
+
+def boost_agent_chances(agent, bonuses) -> None:
+    """ChanceIncrease on one unit, after its skills and mutations are on it.
+
+    `C_ChanceIncreaseSkill` decorates the `chance` of every action and
+    passive skill its unit has or gains (`IProbable`), and the mutation side
+    the `chance` of every held mutation, so here every chance the agent
+    carries goes through `boost_chance` once: the crit, each evasion,
+    knockback and explosion, the resurrection, and the hooks' rolls. Whether
+    a mutation's own skill gets the bonus twice, once on the mutation and
+    once on the unit's copy, was not read (`chance_increase_applies_once`).
+    """
+    if not bonuses:
+        return
+    if agent.crit_chance:
+        agent.crit_chance = boost_chance(agent.crit_chance, bonuses)
+    agent.evasions = [(boost_chance(c, bonuses), t, j) for c, t, j in agent.evasions]
+    agent.knockbacks = [(boost_chance(c, bonuses), r, s, a, m)
+                        for c, r, s, a, m in agent.knockbacks]
+    agent.explodes = [(d, r, boost_chance(c, bonuses), m) for d, r, c, m in agent.explodes]
+    if agent.resurrect:
+        c, hp, pct = agent.resurrect
+        agent.resurrect = (boost_chance(c, bonuses), hp, pct)
+    for attr in ("on_attack", "on_damaged", "on_cast"):
+        setattr(agent, attr, [(n, _boost_hook(n, p, bonuses)) for n, p in getattr(agent, attr)])
 
 
 def status_stats(params: dict, numbered: bool = False) -> tuple:

@@ -896,6 +896,17 @@ _t0n, _t1n, _bn = _mut_fight([])
 _bn.run()
 check("the same fight without it heals nothing", _bn.healing_done[0] == 0.0)
 
+# ChanceIncrease (215: +15%, every class) raises every chance a unit carries,
+# clamped at 100: LastSecondChance's 35% evasion (221) becomes 40.25%.
+from sim.mutations import boost_agent_chances as _boost, chance_bonuses as _bonuses
+_ci = [m for m in _STRICT["SimpleMutations"] if m["ID"] == 215]
+_t0c, _t1c, _bc = _mut_fight([221])
+_before = [e[0] for e in _t0c[0].evasions]
+_boost(_t0c[0], _bonuses(_ci, _t0c[0].spec.cls))
+check("ChanceIncrease turns a 35% evasion into 40.25%",
+      _before == [35.0] and abs(_t0c[0].evasions[0][0] - 40.25) < 1e-9,
+      f"{_before} -> {[e[0] for e in _t0c[0].evasions]}")
+
 # `C_VampirismSkill.OnDamageCreated` attaches the heal only to damage of the
 # model's type, Physical unless the row says otherwise, and never to
 # `Secondary` damage: a magical hit or a splash feeds nobody.
