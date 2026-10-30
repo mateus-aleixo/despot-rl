@@ -268,6 +268,11 @@ class RoomMap:
         # The quest's rooms on a generated level, see `sim/quests.py`.
         self.quest_room: str | None = None
         self.quest_extras: list[str] = []
+        # The secret rooms (`Secret | Portal`, off the door graph) and the two
+        # portals flagged `activatesSecret`, with the ones stood in so far.
+        self.secret_rooms: list[str] = []
+        self.activators: list[str] = []
+        self.activated: set = set()
         # The portals on the player's map, in the order they came onto it. See
         # `revealed_portals`.
         self._seen_portals: list[str] = []
@@ -303,6 +308,8 @@ class RoomMap:
         out = cls(rooms, spec["start"], spec["boss"], spec.get("portals"))
         out.quest_room = spec.get("quest_room")
         out.quest_extras = list(spec.get("quest_extras") or [])
+        out.secret_rooms = list(spec.get("secret_rooms") or [])
+        out.activators = list(spec.get("activators") or [])
         return out
 
     def _distances(self, source: str, known_only: bool = False) -> dict[str, int]:
@@ -367,11 +374,26 @@ class RoomMap:
             self.rooms[self.current].state = EXPLORED
         self.current = rid
         self.rooms[rid].state = CURRENT
+        self.maybe_activate_secret_room(rid)
         for n in self._ortho[rid]:
             room = self.rooms[n]
             if room.kind not in NEVER_REVEALED and room.state == UNKNOWN:
                 room.state = UNEXPLORED
         self._refresh_known()
+
+    def maybe_activate_secret_room(self, rid: str) -> None:
+        """`C_Rooms.MaybeActivateSecretRoom`: standing in a room flagged
+        `activatesSecret` counts it, and at `roomsToActivateSecret` (2) every
+        secret room that is not a quest's switches on (`secretIsActive`) and
+        goes on the map, where a teleport can reach it."""
+        if rid not in self.activators:
+            return
+        self.activated.add(rid)
+        if len(self.activated) >= 2:
+            for sid in self.secret_rooms:
+                room = self.rooms[sid]
+                if room.state == UNKNOWN:
+                    room.state = UNEXPLORED
 
     def reveal_boss(self) -> bool:
         """`C_BossVisionMutation.OnNewLevel`, mutation 188 `BossVision`.
@@ -778,6 +800,8 @@ class RunState:
         if self.quest is not None:
             self.quest.room = self.rooms.quest_room
             self.quest.extras = list(self.rooms.quest_extras)
+            if hasattr(self.quest, "secret"):
+                self.quest.secret = (self.rooms.secret_rooms or [None])[0]
 
     @property
     def level_row(self) -> dict:
@@ -916,7 +940,7 @@ class RunState:
         gives both kinds an `expectedPower` of 0 (an extra room's gold is the
         exception, see `room_gold`).
         """
-        if kind in ("start", "quest", "quest_extra"):
+        if kind in ("start", "quest", "quest_extra", "secret"):
             return 0.0
         lvl = self.level_row
         return float(lvl.get(self.ROOM_MULT.get(kind, "DefaultMult")) or 0.0)
@@ -934,9 +958,15 @@ class RunState:
         """
         return sum(self.room_mult(r.kind) for r in self.rooms.rooms.values()) or 1.0
 
+    @property
+    def num_rooms(self) -> int:
+        """`num`: the level's rooms, the secret ones (made on top of it) left
+        out."""
+        return len(self.rooms.rooms) - len(self.rooms.secret_rooms)
+
     def room_share(self, column: str, kind: str) -> float:
         """One room's share of `(num - 1) * <column>`, by weight."""
-        total = float(self.level_row.get(column) or 0.0) * (len(self.rooms.rooms) - 1)
+        total = float(self.level_row.get(column) or 0.0) * (self.num_rooms - 1)
         return total * self.room_mult(kind) / self.level_weight
 
     def room_power(self, room_kind_: str = "fight") -> float:
@@ -972,7 +1002,7 @@ class RunState:
         is an `Ambush` from a dialog.
         """
         if kind == "start":
-            total = float(self.level_row.get("PowerPerRoom") or 0.0) * (len(self.rooms.rooms) - 1)
+            total = float(self.level_row.get("PowerPerRoom") or 0.0) * (self.num_rooms - 1)
             return total * float(self.level_row.get("ItemsMult") or 0.0) / self.level_weight
         return self.room_share("PowerPerRoom", kind)
 
@@ -993,7 +1023,7 @@ class RunState:
             # room's share, except on Flight and Bot (`quest == 9 or 11`).
             if self.quest is None or self.quest.name in ("Flight", "Bot"):
                 return 0.0
-            total = float(self.level_row.get("GoldPerRoom") or 0.0) * (len(self.rooms.rooms) - 1)
+            total = float(self.level_row.get("GoldPerRoom") or 0.0) * (self.num_rooms - 1)
             return total * float(self.level_row.get("DefaultMult") or 0.0) / self.level_weight
         return self.room_share("GoldPerRoom", room_kind_)
 
@@ -1681,6 +1711,8 @@ class RunState:
                         key=lambda i: (self.squad[i].hp, -i))
             self.squad.pop(worst)
             self.food.amount += self.food.per_sacrifice
+            if self.quest is not None:
+                self.quest.sacrificed(self)
         elif kind == "buy_mutation":
             # `BaseMutationShop.Buy`: refuse one already taken, refuse one the
             # purse does not cover, then gold -= cost and the mutation is the
@@ -1848,6 +1880,11 @@ class RunState:
         keep = max(0.0, 1.0 - hp_loss_percent / 100.0)
         for h in self.squad:
             h.hp = max(0.01, h.hp * keep)
+
+    def quest_teleport(self, rid: str) -> None:
+        """A teleport a quest makes (the SecretRoom quest's sacrifice and its
+        way back): into `rid` as `C_Rooms.TeleportTo` does, with no food."""
+        self._arrive(rid, {})
 
     def queue_quest_dialog(self, stem: str) -> None:
         """Open `stem` once the quest dialog on screen has ended."""
@@ -2111,6 +2148,10 @@ class RunState:
             self._last_pack = (None, ["e1"] * len(enemies))
         elif room.kind in ("quest", "quest_extra"):
             enemies, quest_layout = self.quest_enemies(room)
+        elif room.kind == "secret":
+            # `CalculatePower` gives it no Power, so `GenerateRoom` gives it
+            # its layout (`regular-secret-room`, or the quest's) and no pack.
+            enemies = []
         else:
             enemies = self.enemy_specs(room.kind)
             # `OnEnemyTeamCreation`: the Sword quest's twin joins the boss.

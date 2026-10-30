@@ -40,8 +40,8 @@ except ImportError:  # the env is usable without gymnasium installed
 from sim.data import load_ruleset
 from sim.dialogs import MAX_CHOICES as DIALOG_CHOICES
 from sim.dialogs import decision_nodes, pool as dialog_pool
-from sim.mapgen import portals_count
-from sim.quests import QUEST_ENUM, decision_nodes as quest_decision_nodes
+from sim.mapgen import portals_count, secret_room_count
+from sim.quests import QUEST_ENUM, decision_nodes as quest_decision_nodes, quest_spec, shortlist
 from sim.run import (CONSUMABLE_FAMILIES, CONSUMABLE_SHELF, CONSUMABLE_SLOTS,
                      EXPLORED, MAX_UNIT_LEVEL, UNEXPLORED, UNKNOWN, RunState,
                      consumable_family, squad_names)
@@ -86,9 +86,10 @@ MOVES = (("north", (-1, 0)), ("south", (1, 0)),
 
 # One teleport action per portal on the level. `ChoosePortals` places
 # `portalsCount = num / 7 + 1` and then one more in the middle, so a Default
-# level holds at most `MaxRooms / 7 + 2`: four at 18 rooms. Checked against the
-# level rows in `__init__` rather than trusted.
-TELEPORT_SLOTS = 4
+# level holds at most `MaxRooms / 7 + 2`: four at 18 rooms. A secret room is a
+# portal of its own on top (level 7, and the SecretRoom quest's level), which
+# makes five. Checked against the level rows in `__init__` rather than trusted.
+TELEPORT_SLOTS = 5
 MOVE_NAMES = tuple(name for name, _ in MOVES) + tuple(
     f"teleport_{i}" for i in range(TELEPORT_SLOTS))
 
@@ -190,6 +191,9 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         self.move_names = MOVE_NAMES
         self.n_actions = self.n_moves + len(NON_MOVE_ACTIONS)
         most = max(portals_count(int(r.get("MaxRooms") or r.get("MinRooms") or 7)) + 1
+                   + secret_room_count(r, None)
+                   + max([int((quest_spec(self.tables, q) or {}).get("SecretRooms") or 0)
+                          for q in shortlist(r)] or [0])
                    for r in self.tables["Levels"])
         if most > TELEPORT_SLOTS:
             raise ValueError(f"a level can hold {most} portals, "

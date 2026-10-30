@@ -1126,8 +1126,10 @@ for _seed in range(40):
     _rng = random.Random(_seed)
     for _row in _STRICT["Levels"]:
         _m = RoomMap.generate(_row, _rng)
-        if not (_row["MinRooms"] <= len(_m.rooms) <= _row["MaxRooms"]):
-            _bad_count.append((_row["ID"], len(_m.rooms)))
+        # `num`: the secret rooms are made on top of it
+        _num = len(_m.rooms) - len(_m.secret_rooms)
+        if not (_row["MinRooms"] <= _num <= _row["MaxRooms"]):
+            _bad_count.append((_row["ID"], _num))
         _kinds = collections.Counter(r.kind for r in _m.rooms.values())
         for _col, _kind in (("ItemShops", "item_shop"), ("FoodShops", "food_shop"),
                             ("Shrines", "mutation")):
@@ -1369,10 +1371,11 @@ from sim.mapgen import (MIN_PORTAL_DISTANCE, Generator, min_finish_distance,
 
 
 def _graph(m):
-    """Door distances between every pair of rooms, and the articulation points."""
-    _adj = {rid: list(m.doors(rid)) for rid in m.rooms}
+    """Door distances between every pair of rooms, and the articulation points.
+    Secret rooms have no door and are left out."""
+    _adj = {rid: list(m.doors(rid)) for rid in m.rooms if rid not in m.secret_rooms}
     _d = {}
-    for _src in m.rooms:
+    for _src in _adj:
         _out, _q = {_src: 0}, collections.deque([_src])
         while _q:
             _c = _q.popleft()
@@ -1390,13 +1393,13 @@ for _seed in range(40):
     for _row in _STRICT["Levels"]:
         _m = RoomMap.generate(_row, _rng)
         _d, _arts = _graph(_m)
-        _need = min_finish_distance(len(_m.rooms))
+        _need = min_finish_distance(len(_m.rooms) - len(_m.secret_rooms))
         # `ChooseFinishRoom`: the boss can see at least `minFinishDistance`
         if max(_d[_m.boss].values()) < _need:
             _short.append((_row["ID"], max(_d[_m.boss].values()), _need))
         # `ChooseStartRoom`: the start is at least the largest `d <= need` that
         # some eligible room clears, and is not always the furthest of them
-        _eligible = [r for r in _m.rooms if r not in (_m.boss,) and r not in _arts]
+        _eligible = [r for r in _d if r not in (_m.boss,) and r not in _arts]
         _best = max(_d[r][_m.boss] for r in _eligible)
         if _d[_m.start][_m.boss] < min(_need, _best):
             _below.append((_row["ID"], _d[_m.start][_m.boss], min(_need, _best)))
@@ -1435,9 +1438,11 @@ for _seed in range(40):
     for _row in _STRICT["Levels"]:
         _m = RoomMap.generate(_row, _rng)
         _d, _ = _graph(_m)
-        _p = _m.portals
+        _p = [p for p in _m.portals if p not in _m.secret_rooms]
         _counts[len(_p)] += 1
-        if _p and not (2 <= len(_p) <= portals_count(len(_m.rooms)) + 1):
+        _num = len(_m.rooms) - len(_m.secret_rooms)
+        _most = (max(portals_count(_num), 2) if _m.secret_rooms else portals_count(_num)) + 1
+        if _p and not (2 <= len(_p) <= _most):
             _bad_room.append((_row["ID"], "count", len(_p)))
         if _m.boss in _p:
             _bad_room.append((_row["ID"], "boss"))
@@ -2607,6 +2612,58 @@ _qw = _calm(_quest_level("Sword", seed=1, squad=[dataclasses.replace(h) for h in
 _walk_in(_qw, _qw.rooms.quest_room, talk=False)
 check("met after the boss is dead, the sword has nothing to give",
       _qw.quest.status == _Q.FINISHED and _qw.quest_dialog is None and not any(h.cls for h in _qw.squad))
+
+# The secret room. On level 7 it touches no room, is a portal, and two other
+# portals switch it on; on the SecretRoom quest's level a sacrifice opens it.
+_ls = RunState.new(_STRICT, seed=3)
+_ls.level = 7
+_ls.generate_level()
+_ls.room = _ls.rooms.start
+_ls.rooms.set_current(_ls.room)
+_calm(_ls)
+_sid = _ls.rooms.secret_rooms[0] if _ls.rooms.secret_rooms else None
+check("a level-7 map has one secret room, a portal with no door",
+      _sid is not None and _ls.rooms.doors(_sid) == [] and _ls.rooms.is_portal(_sid)
+      and _ls.rooms.rooms[_sid].kind == "secret" and len(_ls.rooms.activators) == 2,
+      f"{_sid} {_ls.rooms.activators}")
+_a1, _a2 = _ls.rooms.activators
+_walk_in(_ls, _a1)
+_half = _ls.rooms.rooms[_sid].state
+_walk_in(_ls, _a2)
+check("standing in both activators puts it on the map, where a teleport reaches it",
+      _half == _UNKNOWN and _ls.rooms.rooms[_sid].state != _UNKNOWN
+      and _sid in _ls.rooms.teleports(_a2))
+_g0 = _ls.gold
+_walk_in(_ls, _sid)
+check("the secret room fights nothing and pays nothing",
+      _ls.gold == _g0 and _ls.rooms.rooms[_sid].cleared and not _ls.finished)
+check("secret rooms are left out of the level's room count",
+      _ls.num_rooms == len(_ls.rooms.rooms) - 1)
+
+_qx = _calm(_quest_level("SecretRoom", seed=4,
+                         squad=[_QH(item="broadsword", level=5) for _ in range(10)]))
+_walk_in(_qx, _qx.rooms.quest_room)
+_init = _qx.quest.status
+_qx.apply(("sacrifice", None))
+check("a sacrifice in the mysterious room is a trip to the Moon and back, quest in hand",
+      _init == _Q.INITIALIZED and _qx.quest.status == _Q.ACCEPTED
+      and _qx.room == _qx.rooms.quest_room
+      and _qx.rooms.rooms[_qx.quest.extras[0]].state != _UNKNOWN,
+      f"status {_qx.quest.status}")
+_qx.rooms.rooms[_qx.quest.extras[0]].cleared = False
+_walk_in(_qx, _qx.quest.extras[0])
+check("the maze's fight hands over the book",
+      _qx.quest.status == _Q.ACQUIRED and "comic-book" in _qx.quest.items,
+      f"status {_qx.quest.status}, squad {len(_qx.squad)}")
+_walk_in(_qx, _qx.rooms.quest_room)
+_g0 = _qx.gold
+_qx.apply(("sacrifice", None))
+_opts = _qx.legal_actions()
+_qx.apply(("choose", 0))
+check("a second sacrifice takes the book to the Doctor, who pays 35 gold",
+      _opts == [("choose", 0), ("choose", 1)] and _qx.gold == _g0 + 35
+      and _qx.quest.status == _Q.FINISHED and _qx.room == _qx.rooms.quest_room,
+      f"{_opts}")
 
 # A companion is no human: no item goes to it, and it fights as its own row.
 _qz = _quest_level("Sci", seed=4, squad=[_QH(item=None, cls="Zombie")])

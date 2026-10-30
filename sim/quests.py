@@ -306,6 +306,9 @@ class Quest:
     def dialog_ended(self, st) -> None:
         """A quest dialog has just closed; what the controller does after."""
 
+    def sacrificed(self, st) -> None:
+        """A unit was just sacrificed in the room the squad stands in."""
+
     def set_status(self, st, status: int) -> None:
         self.status = int(status)
         self.on_status(st, self.status)
@@ -947,6 +950,57 @@ class SwordQuest(Quest):
 
 
 @dataclass
+class SecretRoomQuest(Quest):
+    """`C_SecretRoomQuest`: a mysterious room, a sacrifice, and the Moon.
+
+    The quest's secret room is made like any (`MaybeMakeSecretRoom`) but
+    typed `Secret | Portal` only, and no activator turns it on. The quest
+    room's dialog runs while Uninitialized or Initialized and sets
+    Initialized. A unit sacrificed in the quest room (`OnUnitRemoved`) sends
+    the squad to the secret room (`PlayAnimationAndTeleport`), whose dialog
+    gives the quest (Accepted, which reveals the extra room) or, once the book
+    is found, pays 35 gold (outcome 1) or mutation 668 (outcome 2); after it
+    `FinishSecretRoomDialog` teleports the squad back to the quest room. The
+    extra room ("Spot's maze") fights four FireHeads, and arriving in it won
+    while Accepted plays its dialog and sets Acquired with the `comic-book`.
+    """
+
+    MAIN = "Secret-quest-main.Dialog_Beginning"
+    SECRET = "Secret-quest-secret.Dialog"
+    EXTRA = "Secret-quest-extra.Dialog"
+
+    secret: str | None = None
+
+    def room_dialog(self, st):
+        return self.MAIN if self.status in (UNINITIALIZED, INITIALIZED) else None
+
+    def arrive(self, st, rid, fought, won):
+        if rid == self.secret:
+            return self.SECRET if self.status != FINISHED else None
+        if rid in self.extras and self.status == ACCEPTED and st.rooms.rooms[rid].cleared:
+            self.set_status(st, ACQUIRED)
+            return self.EXTRA
+        return super().arrive(st, rid, fought, won)
+
+    def on_status(self, st, status):
+        if status == ACCEPTED:
+            self.reveal_extras(st)
+        elif status == ACQUIRED:
+            self.items.add("comic-book")
+        elif status == FINISHED:
+            self.items.discard("comic-book")
+
+    def sacrificed(self, st):
+        if (st.room == self.room and self.secret is not None
+                and self.status != FINISHED and not st.finished):
+            st.quest_teleport(self.secret)
+
+    def dialog_ended(self, st):
+        if st.room == self.secret and self.room is not None:
+            st.quest_teleport(self.room)
+
+
+@dataclass
 class InertQuest(Quest):
     """A quest whose controller is not ported yet: its rooms are placed and
     typed, its extra rooms fight their packs, and its dialogs never run."""
@@ -954,7 +1008,8 @@ class InertQuest(Quest):
 
 QUESTS = {"Pit": PitQuest, "Cube": CubeQuest, "Sci": SciQuest, "Rat": RatQuest,
           "Reaper": ReaperQuest, "Spider": SpiderQuest, "Bot": BotQuest,
-          "Nurgle": NurgleQuest, "Flight": FlightQuest, "Sword": SwordQuest}
+          "Nurgle": NurgleQuest, "Flight": FlightQuest, "Sword": SwordQuest,
+          "SecretRoom": SecretRoomQuest}
 
 
 def make_quest(tables: dict, name: str | None) -> Quest | None:

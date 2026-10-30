@@ -96,16 +96,27 @@ On a level with a quest, `PositionRooms` places it between the start and the
 shops; see `choose_quest_room`, `choose_quest_extra_room` and `quest_reachable`.
 A quest that does not fit fails the generation like any other step.
 
+## Secret rooms
+
+`secretRoomCount` (the row's `SecretRoom` flag, level 7, plus the quest's
+`SecretRooms`) rooms are made after the shape and before placement, by
+`MaybeMakeSecretRoom` at weighted open positions: each is one step past an open
+position and touches no room, diagonals included, so it has no door. It is
+`Secret | Portal` from birth (plus `MutationShop | Treasure` unless it is the
+SecretRoom quest's), stays out of every placement step, and counts among the
+portals: a level with one asks `ChoosePortals` for at least two more, at
+shrinking distances. Two of the other portals become `activatesSecret`. See
+`Generator.make_secret_rooms` and `position_rooms`.
+
 ## What is still not ported
 
-`MaybeMakeSecretRoom`, `MaybeFlip` (a mirror, which changes nothing about the
-graph) and multi-square rooms: a room here covers exactly one square, so
-`maxSquares` and `maxSquaresAtOnce` are read as constraints on the layout rather
-than as a budget for large rooms. `StatShops` is counted and left as a fight
-room, because the sim does not model the talent shop. Two more room bits are
-read and not modelled: `ChooseFinishRoom` makes the boss `Boss | ConsumableShop`
-on every level but the last (`or edx, 0x4002`), and the final boss
-`Boss | FinalBoss`, plus an item shop unless the chip is `hard`.
+`MaybeFlip` (a mirror, which changes nothing about the graph). A room covers
+exactly one square: `CreateRooms` builds one room per generator cell and merges
+none, so `maxSquares` and `maxSquaresAtOnce` are constraints on the layout and
+not a budget for large rooms. `StatShops` is counted and left as a fight room,
+because the sim does not model the talent shop (no Default level asks for one).
+The final boss is `Boss | FinalBoss`, plus an item shop unless the chip is
+`hard`, which nothing can use: the run ends on that win.
 """
 from __future__ import annotations
 
@@ -131,8 +142,9 @@ TREASURE_ROOMS = (("StatShops", "talent_shop"),
 
 # `LevelGenerator.roomTypesWithNoPortal = 34307`, which is
 # `Start | Boss | Quest | QuestExtra | Secret`. Shops are not in it, so a shop can
-# carry a portal. Secret rooms are not generated here.
-NO_PORTAL = frozenset({"start", "boss", "quest", "quest_extra"})
+# carry a portal. A secret room is one already (`Secret | Portal`), so it is
+# never a candidate either.
+NO_PORTAL = frozenset({"start", "boss", "quest", "quest_extra", "secret"})
 
 # `Direction` as a step in (row, col). The game's rows count down from the top
 # (`RoomNode.GetName` prints `topBorder - pos.y`), so `Up`, which is `y + 1` in
@@ -150,7 +162,11 @@ MAX_ATTEMPTS = 200
 # `LevelGenerator.MakeRoom`
 MAYBE, NO, YES, NEVER = 0, 1, 2, 3
 
-DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+# `C_DefaultMode.RoomsDirections`, the order every neighbour walk in the
+# generator takes: a static array initialised to Left, Up, Right, Down (its
+# metadata blob reads 1, 2, 0, 3), here as (row, col) steps.
+DIRS = ((0, -1), (-1, 0), (0, 1), (1, 0))
+DIAGONALS = ((-1, -1), (-1, 1), (1, -1), (1, 1))
 
 
 def room_name(row: int, col: int) -> str:
@@ -371,6 +387,56 @@ class Generator:
             if not self.open_positions():
                 return
 
+    def make_secret_rooms(self, count: int) -> list | None:
+        """`Generate`'s secret-room step, after the shape and before placement.
+
+        Every position beside a room is put on the open list again and
+        weighed, and `MaybeMakeSecretRoom` is tried at weighted draws until
+        `count` rooms are made, failing the level when the list runs dry.
+        """
+        for p in self.rooms():
+            for d in DIRS:
+                n = (p[0] + d[0], p[1] + d[1])
+                if n not in self.state:
+                    self.state[n] = MAYBE
+        made: list = []
+        while len(made) < count:
+            options = self.open_positions()
+            if not options:
+                return None
+            depth = self.distances_from(self.anchor())
+            max_distance = max(depth.values(), default=0)
+            near = {}
+            for p in options:
+                d = [depth[(p[0] + dd[0], p[1] + dd[1])] for dd in DIRS
+                     if (p[0] + dd[0], p[1] + dd[1]) in depth]
+                near[p] = min(d) + 1 if d else max_distance
+            weights = [self.weigh(p, near, max_distance) for p in options]
+            cell = self.maybe_make_secret_room(self.rng.choices(options, weights=weights)[0])
+            if cell is not None:
+                made.append(cell)
+        return made
+
+    def maybe_make_secret_room(self, pos):
+        """`MaybeMakeSecretRoom(pos)`: a room one step past `pos`, touching
+        nothing.
+
+        `pos` leaves the open list either way. In `RoomsDirections` order, the
+        first cell beside it whose four neighbours and four diagonals hold no
+        room becomes the secret room, so it has no door at all.
+        """
+        self.state[pos] = NEVER
+        for d in DIRS:
+            c = (pos[0] + d[0], pos[1] + d[1])
+            if any(self.state.get((c[0] + e[0], c[1] + e[1])) == YES
+                   for e in DIRS + DIAGONALS):
+                continue
+            if self.state.get(c) == YES:
+                continue
+            self.state[c] = YES
+            return c
+        return None
+
     def build(self) -> None:
         """`Generate`'s shape: grow to `num`, then `Adjust`, then `CloseLoops`.
 
@@ -417,6 +483,13 @@ class Generator:
             if children > 1:
                 out.add(root)
         return out
+
+
+def secret_room_count(level_row: dict, quest: dict | None) -> int:
+    """`secretRoomCount`: the row's `SecretRoom` flag plus the quest's
+    `SecretRooms`, as `C_Rooms.Generate` adds them."""
+    flag = 1 if str(level_row.get("SecretRoom") or "").lower() == "true" else 0
+    return flag + int((quest or {}).get("SecretRooms") or 0)
 
 
 def portals_count(num: int) -> int:
@@ -636,14 +709,16 @@ def room_count(level_row: dict, rng: random.Random) -> int:
 
 
 def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
-                   chip: str = "default", quest: dict | None = None) -> dict | None:
+                   chip: str = "default", quest: dict | None = None,
+                   secret_rooms: list | None = None) -> dict | None:
     """`LevelGenerator.PositionRooms`, or None where the game's would fail.
 
     See the module docstring for the order. `quest` is the level's quest row
     with its `Name` (`sim/quests.py`), or None on a level without one.
     """
-    cells = gen.rooms()
-    adj = gen.adjacency()
+    secret = list(secret_rooms or [])
+    cells = [p for p in gen.rooms() if p not in secret]
+    adj = {p: ns for p, ns in gen.adjacency().items() if p not in secret}
     arts = gen.articulation_points(adj)
     dist = {p: gen.distances_from(p, adj) for p in cells}
     max_distance = {p: max(dist[p].values()) for p in cells}
@@ -712,11 +787,23 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
                                           shop_spread(kind, num), rng):
             kinds[p] = kind
 
-    # `ChoosePortals`, only when more than one is asked for. With a secret room
-    # the game retries at shrinking distances and fails the level unless
-    # `secretRoomCount + 2` portals land; secret rooms are not generated here.
+    # `ChoosePortals`, only when more than one is asked for, or always when a
+    # secret room needs portals to switch it on (below).
     portals: list = []
-    if portals_count(num) > 1:
+    if secret and not (quest and quest.get("Name") == "SecretRoom"):
+        # With secret rooms (not the SecretRoom quest's), `PositionRooms` asks
+        # for at least two portals at any count, retries at shrinking
+        # distances, and fails the level unless `secretRoomCount + 2` portals
+        # stand, the secret rooms counting among them.
+        for threshold in range(MIN_PORTAL_DISTANCE, 0, -1):
+            portals = choose_portals(cells, kinds, dist, avg_distance, dead_end,
+                                     boss, start, max(portals_count(num), 2),
+                                     threshold, start_is_portal(level, chip))
+            if len(portals) + len(secret) >= len(secret) + 2:
+                break
+        else:
+            return None
+    elif portals_count(num) > 1:
         portals = choose_portals(cells, kinds, dist, avg_distance, dead_end,
                                  boss, start, portals_count(num),
                                  MIN_PORTAL_DISTANCE, start_is_portal(level, chip))
@@ -732,17 +819,30 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
 
     for p in cells:
         kinds.setdefault(p, "fight")
+    for p in secret:
+        kinds[p] = "secret"
+    # `FromGeneratedData`: on a level whose row has a secret room, two of the
+    # other portals, drawn without replacement, become `activatesSecret`.
+    activators: list = []
+    if secret and str(level_row.get("SecretRoom") or "").lower() == "true":
+        pool = [p for p in portals if p not in secret]
+        for _ in range(2):
+            if len(pool) < 2 - len(activators):
+                break
+            activators.append(pool.pop(rng.randrange(len(pool))))
 
-    lo_r = min(r for r, _ in cells)
-    lo_c = min(c for _, c in cells)
+    lo_r = min(r for r, _ in cells + secret)
+    lo_c = min(c for _, c in cells + secret)
 
     def name(p):
         return room_name(p[0] - lo_r, p[1] - lo_c)
 
-    return {"rooms": {name(p): (p[0] - lo_r, p[1] - lo_c, kinds[p]) for p in cells},
+    return {"rooms": {name(p): (p[0] - lo_r, p[1] - lo_c, kinds[p]) for p in cells + secret},
             "start": name(start),
             "boss": name(boss),
-            "portals": [name(p) for p in portals],
+            "portals": [name(p) for p in portals + secret],
+            "secret_rooms": [name(p) for p in secret],
+            "activators": [name(p) for p in activators],
             "extras": {name(p): e for p, e in extras.items()},
             "quest_room": name(quest_room) if quest_room is not None else None,
             "quest_extras": [name(p) for p in quest_extras]}
@@ -762,7 +862,13 @@ def generate(level_row: dict, rng: random.Random, chip: str = "default",
         gen.build()
         if len(gen.rooms()) < 3:
             continue
-        level = position_rooms(gen, level_row, rng, chip, quest)
+        secret = []
+        count = secret_room_count(level_row, quest)
+        if count:
+            secret = gen.make_secret_rooms(count)
+            if secret is None:
+                continue
+        level = position_rooms(gen, level_row, rng, chip, quest, secret)
         if level is not None:
             return level
     raise RuntimeError(f"no level placed for row {level_row.get('ID')} "

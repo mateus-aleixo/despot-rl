@@ -2197,7 +2197,7 @@ but `DamageAllEnemies`, which no Default level lists, now do what they do in
 the game. With them all, the shop is worth +0.692 [+0.569, +0.814] to the
 heuristic (`tools/consumable_value.py`, dialogs and pack layouts on).
 
-## Quests, ten of the eleven implemented (2026-10-30)
+## Quests, all eleven implemented (2026-10-30)
 
 ### Where the dialogs were
 
@@ -2366,19 +2366,39 @@ Three generic hooks came with them: kills reach the quest, a quest can add
 units to a room's enemy team, and a quest dialog can be followed by another
 (the Bot's after-fight dialog) or by an action (the cannon).
 
-### The secret room, read and not built
+### The secret room, and the SecretRoom quest
 
-`LevelGenerator.Generate` makes `secretRoomCount` secret rooms after the
-growth and before `PositionRooms`: it draws a weighted open position and
-`MaybeMakeSecretRoom` puts the room on a cell beside it that touches no room,
-diagonals included, so a secret room is off the door graph. `C_Rooms`'
-`MaybeActivateSecretRoom` counts the rooms flagged `activatesSecret` the squad
-has stood in, and at `roomsToActivateSecret` (2) switches on every `Secret`
-room that is not a quest room; `ChoosePortals` needs `secretRoomCount + 2`
-portals on such a level, so the room is reached by teleport. Still to read:
-which rooms get `activatesSecret`, the portal branch, and what the room holds
-(the `regular-secret-room` pack style and a four-slot mutation shop). Level 7
-and the SecretRoom quest both wait on it.
+`LevelGenerator.Generate` makes `secretRoomCount` secret rooms after the shape
+and before `PositionRooms`: it puts every position beside a room back on the
+open list, draws by `WeighPositions`' weight, and `MaybeMakeSecretRoom` takes
+the first cell one step past the draw, in `RoomsDirections` order (Left, Up,
+Right, Down: `C_DefaultMode`'s static array, read from its metadata
+initialiser), whose four neighbours and four diagonals hold no room. The room
+is `Secret | Portal` from birth, plus `MutationShop | Treasure` unless the
+level's quest is SecretRoom, so it has no door and is reached by teleport.
+`ChoosePortals` counts it among the portals and skips it as a candidate, and
+with one on the level (not the quest's) `PositionRooms` asks for at least two
+more portals, retrying at shrinking distances, and fails the level without
+them. `FromGeneratedData` flags two of the other portals, drawn without
+replacement, `activatesSecret`; `C_Rooms.MaybeActivateSecretRoom` counts the
+ones the squad stands in and at `roomsToActivateSecret` (2) switches on every
+secret room that is not a quest's, which puts it on the map. `CalculatePower`
+gives it no Power and no gold, so `GenerateRoom` gives it its layout
+(`regular-secret-room`) and no fight. The `directions` order now drives every
+neighbour walk in the generator.
+
+What the level-7 room holds is not settled. Its mutation shop shows four and
+takes one with no rerolls, from a pool named `secret`, with the
+`goldinsecretroom` treasure in the first slot; no shipped ruleset gives any
+mutation that pool or any level a `Treasures` block, so the sim leaves it
+empty (`sim/assumptions.py`).
+
+The SecretRoom quest uses its own secret room. The quest room ("a mysterious
+room") sets Initialized. A unit sacrificed there (`OnUnitRemoved`) sends the
+squad to the secret room (`PlayAnimationAndTeleport`), where the Doctor gives
+the quest; `FinishSecretRoomDialog` brings it back. The extra room's fight
+(four FireHeads) yields the book, and a second sacrifice takes it to the
+Doctor for 35 gold or mutation 668. So all eleven controllers are ported.
 
 ### What it is worth
 

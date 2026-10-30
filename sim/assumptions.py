@@ -226,9 +226,11 @@ class Assumptions:
     # the trait `InitZombie` sets were not read. (4) A quest prop
     # (`cube-part`, `rat-flute`) is a flag on the quest, since the sim has no
     # inventory. (5) A human `ReplaceUnit` turns into the Zombie loses the item
-    # it held; `C_Player.DownGradeUnit` was not read for where it goes. (6) The
-    # SecretRoom quest is not ported, with the secret room it needs: its rooms
-    # are placed, typed and fought, and its dialogs never run. (7) The room
+    # it held; `C_Player.DownGradeUnit` was not read for where it goes. (6) A
+    # secret room's mutation shop (level 7) is left empty: its pool is named
+    # `secret` and its first slot is the `goldinsecretroom` treasure, and no
+    # shipped ruleset defines either (no `Pool` column value, no `Treasures`),
+    # so what the game shows there was not settled. (7) The room
     # the Reaper's hater or the runaway Bot is in shows on the map once that
     # room is revealed; how the game shows a runaway was not read. (8) A fight
     # a quest starts (the hater, the Bot) puts its unit in e1 of a random
@@ -238,7 +240,8 @@ class Assumptions:
     # for its health loss and not for `C_Food.Move`.
     # Settle by: reading `C_UnitLayout`'s use of `guaranteedPositions`,
     # `C_Team.GetExperience`, `C_Player.DownGradeUnit`, the minimap's quest
-    # markers and `C_FlightQuest.ShootUnit`, and porting the SecretRoom quest.
+    # markers and `C_FlightQuest.ShootUnit`, and `C_MutationShop.CreateMutations`
+    # with an empty pool.
     quests_partly_ported: bool = True
 
     # A fight is called a draw if neither side dies within this long. The game

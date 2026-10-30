@@ -143,10 +143,13 @@ thrown away.
   are worth +0.237 [+0.115, +0.360] levels to the heuristic, paired. `obs_dim`
   210 to 258, actions 33 to 36. Details in `notes/reference-sim.md`, "Portals,
   and `PositionRooms` read end to end".
-- **The remaining room types.** `Secret` (with `activatesSecret`,
-  `secretIsActive`, `roomsToActivateSecret = 2`, `secretRoomCount`, and
-  `SecretRoom: true` on level 7), `TalentShop`, `PermanentShop`,
-  `ConsumableShop`, `QuestExtra`, `FinalBoss`.
+- ~~**The remaining room types.**~~ **Done, 2026-10-30.** `Secret`: made by
+  `MaybeMakeSecretRoom` off the door graph, a portal, switched on by two
+  `activatesSecret` portals; its level-7 shop's pool has no data in any
+  ruleset, so it is empty (`sim/assumptions.py`). `ConsumableShop` and
+  `QuestExtra` landed earlier. `TalentShop` (`StatShops`) is 0 on every Default
+  level, `FinalBoss`'s item shop is past the end of the run, and
+  `PermanentShop` is not made by the Default generator.
 - ~~**The shrine split.**~~ **Done, 2026-10-29.** The placement was right
   (`ChooseTreasureRooms` gives `RerollShrines` the `MutationShop` bit), and the
   shop's own parameters were not: `C_Room..ctor` builds a generated mutation
@@ -163,20 +166,18 @@ thrown away.
   `ChangeLevel`. The run stays on the level after the boss until it takes the
   pipe (`descend`), and every boss room but the last has a free three-slot
   consumable shop.
-- **Quests.** Ten of eleven done, 2026-10-30. Every quest's rooms are placed
+- ~~**Quests.**~~ **Done, 2026-10-30**, all eleven. Every quest's rooms are placed
   (`ChooseQuestRoom`, `ChooseQuestExtraRoom`, `CountValidPaths`), typed, paid
   and fought as the game does; the dialogs are the NodeCanvas trees
   `tools/dump_dialogue_trees.py` pulls out of `sharedassets2/3.assets`, run by
   `sim/quests.py`; Pit, Sci, Cube, Rat, Reaper, Spider, Bot, Nurgle (into its
-  second level), Flight and Sword are ported, with their companions (Zombie,
-  Rat, Bot, TalkingSword). `RoomTransition.CheckDirection` turned out to
+  second level), Flight, Sword and SecretRoom are ported, with their
+  companions (Zombie, Rat, Bot, TalkingSword). `RoomTransition.CheckDirection` turned out to
   refuse moves into `Unknown` rooms, which the sim had allowed. Worth -0.121
   [-0.286, +0.044] to the heuristic, which passes quests by (following them
   cost it -0.113). Details in `notes/reference-sim.md`. Still open: the
-  SecretRoom quest with the secret room itself (`MaybeMakeSecretRoom`,
-  `activatesSecret`, the portal branch, the room's pack and shop), the
-  level-2 reward mutations (306, 218, 328, 233), and the placement layer's
-  `guaranteedPositions`.
+  level-2 reward mutations (306, 218, 328, 233, Batch 2's mutation work) and
+  the placement layer's `guaranteedPositions`.
 - ~~**Dialogs.**~~ **Done, 2026-10-30**, the 46 of the Default pool with all 26
   of their event types, plus consumable 13; `DejaVu` still open. Worth +0.196
   [+0.021, +0.370] levels to the heuristic, and choosing well +0.154 over
