@@ -61,6 +61,9 @@ const K_SUMMON: i32 = 8;
 const K_SPIRIT_LINK: i32 = 9;
 const K_STATUS: i32 = 10;
 const K_BLINK: i32 = 11;
+/// `C_SciCastSkill`: a percentage buff to the caster's side or a debuff to
+/// the other on one random stat (see `sim.unit_skills.make_sci_cast`).
+const K_SCI_CAST: i32 = 12;
 
 /// Heal scope: the class skill heals the whole team, unit heals use a radius.
 const SCOPE_TEAM: i32 = 0;
@@ -100,6 +103,8 @@ const P_KNOCKBACK: i32 = 19;
 const P_REVENGE: i32 = 20;
 /// `C_SustainSkill`: a knockback-addon push lasts `1 / slowMult` as long.
 const P_SUSTAIN: i32 = 21;
+/// `C_AoeBurnSkill`: on each hit, a burn around the target, for mana.
+const P_AOE_BURN: i32 = 22;
 
 /// `DamageType`, the flags enum from the game. Only the bits the gates read.
 const DT_PHYSICAL: i32 = 1;
@@ -217,6 +222,8 @@ struct Agent {
     knockbacks: Vec<(f32, f32, f32, f32, i32)>,
     // (damage, radius, chance, damage mask), one per source
     explodes: Vec<(f32, f32, f32, i32)>,
+    /// AoeBurn, one per source: (total damage, radius, mana per burst).
+    aoe_burns: Vec<(f32, f32, f32)>,
     proj_splash_percent: f32,
     proj_splash_radius: f32,
     attack_speed_pct: f32,
@@ -254,6 +261,14 @@ struct Agent {
     /// Sustain's `slowMult`, 1.0 without it.
     sustain: f32,
     death_handled: bool,
+    /// The fight's escalation (`Sim::escalate`): BattleFury's damage
+    /// multiplier, and the tick each over-time status fires next (0: not held).
+    fury_mult: f32,
+    fury_due: i32,
+    dying_due: i32,
+    /// TankWithBlock's Block status: hits left to void, and their type mask.
+    block_left: i32,
+    block_mask: i32,
 }
 
 /// A timed `M_StatBonusStatus`: a duration and up to `MAX_BUFF_STATS`
@@ -412,7 +427,31 @@ pub struct Sim {
     rng: rng::PyRandom,
     damage: [f32; 2],
     ticks: i32,
+    /// `escalation_ticks`: BattleFury from, DyingDot from, and their periods.
+    fury_from: i32,
+    dying_from: i32,
+    fury_period: i32,
+    dying_period: i32,
+    fury_on: bool,
+    dying_on: bool,
 }
+
+/// `C_Fight`'s escalation in ticks, as `sim.battle.escalation_ticks` has it:
+/// BattleFury (damageMult x1.1 every 2 s) from `_MIDDLE_FIGHT_TIME`, 120 s or
+/// 1200 s against the final boss, and DyingDot (10% of maximum health as
+/// Magical damage every 3 s) from `_LONG_FIGHT_TIME`, 180 s or 1320 s.
+fn escalation_ticks(tick_hz: f32, final_boss: bool) -> (i32, i32, i32, i32) {
+    let (middle, long) = if final_boss { (1200.0f32, 1320.0f32) } else { (120.0, 180.0) };
+    (
+        (middle * tick_hz).round() as i32,
+        (long * tick_hz).round() as i32,
+        (2.0 * tick_hz).round() as i32,
+        (3.0 * tick_hz).round() as i32,
+    )
+}
+
+const FURY_MULT: f32 = 1.1;
+const DYING_PCT: f32 = 10.0;
 
 impl Sim {
     #[inline]
@@ -839,6 +878,14 @@ impl Sim {
             self.agents[tgt].unit_dodge_ready_in = self.agents[tgt].unit_dodge_cooldown;
             return;
         }
+        // `C_BlockStatus.OnDamage`, as `Battle.hit` has it.
+        if self.agents[tgt].block_left > 0
+            && raw > 0.0
+            && (dtype & self.agents[tgt].block_mask) == dtype
+        {
+            self.agents[tgt].block_left -= 1;
+            return;
+        }
 
         let mut dealt = apply_damage(
             raw,
@@ -963,6 +1010,38 @@ impl Sim {
         if attacker >= 0 && !self.agents[attacker as usize].explodes.is_empty() {
             self.explode(attacker as usize, tgt, dtype);
         }
+        if attacker >= 0 && !self.agents[attacker as usize].aoe_burns.is_empty() {
+            self.aoe_burn(attacker as usize, tgt, dtype);
+        }
+    }
+
+    /// `C_AoeBurnSkill.BurnAround`, as `Battle._aoe_burn` has it: the burn's
+    /// total, Magical, to every enemy within radius of the hit, for mana.
+    fn aoe_burn(&mut self, ag: usize, tgt: usize, dtype: i32) {
+        if dtype & DT_PHYSICAL == 0 || dtype & DT_SECONDARY != 0 {
+            return;
+        }
+        for k in 0..self.agents[ag].aoe_burns.len() {
+            let (damage, radius, cost) = self.agents[ag].aoe_burns[k];
+            if self.agents[ag].mana < cost || damage <= 0.0 || radius <= 0.0 {
+                continue;
+            }
+            let (tx, ty) = (self.agents[tgt].x, self.agents[tgt].y);
+            let team = self.agents[ag].team;
+            let r2 = radius * radius;
+            let hits: Vec<usize> = (0..self.agents.len())
+                .filter(|&o| {
+                    self.agents[o].team != team
+                        && self.agents[o].hp > 0.0
+                        && (self.agents[o].x - tx).powi(2) + (self.agents[o].y - ty).powi(2)
+                            <= r2
+                })
+                .collect();
+            for o in hits {
+                self.hit_typed(team, o, damage, true, -1, DT_MAGICAL);
+            }
+            self.agents[ag].mana -= cost;
+        }
     }
 
     /// The gate a damage addon runs before it attaches: Physical, not
@@ -1037,12 +1116,26 @@ impl Sim {
                 .collect(),
         };
         let mut best: Option<usize> = None;
-        let mut worst = 0.0f32;
-        for j in pool {
-            let missing = self.agents[j].max_hp() - self.agents[j].hp;
-            if missing > worst {
-                worst = missing;
-                best = Some(j);
+        if scope == SCOPE_TEAM {
+            // The Medic's class skill, `C_HealCSkill.GetMostDamagedTarget`: the
+            // lowest health among the damaged, first of equals (see
+            // `sim/actions.py: effect_heal`).
+            let mut lowest = f32::INFINITY;
+            for j in pool {
+                let hp = self.agents[j].hp;
+                if hp < self.agents[j].max_hp() && hp < lowest {
+                    lowest = hp;
+                    best = Some(j);
+                }
+            }
+        } else {
+            let mut worst = 0.0f32;
+            for j in pool {
+                let missing = self.agents[j].max_hp() - self.agents[j].hp;
+                if missing > worst {
+                    worst = missing;
+                    best = Some(j);
+                }
             }
         }
         if let Some(j) = best {
@@ -1099,8 +1192,47 @@ impl Sim {
         let mut one = [new];
         attach_actions(&mut one, &acts);
         attach_passives(&mut one, &pas);
-        let [new] = one;
+        let [mut new] = one;
+        // `SubscribeUnits`: a unit that joins after a threshold gets the status.
+        if self.fury_on {
+            new.fury_due = self.ticks + self.fury_period;
+        }
+        if self.dying_on {
+            new.dying_due = self.ticks + self.dying_period;
+        }
         self.agents.push(new);
+    }
+
+    /// `C_Fight._Fight`: at the first step past each threshold, every living
+    /// unit gets the status, its first tick one period later.
+    fn escalate(&mut self) {
+        if !self.fury_on && self.ticks >= self.fury_from {
+            self.fury_on = true;
+            for i in 0..self.agents.len() {
+                if self.alive(i) {
+                    self.agents[i].fury_due = self.ticks + self.fury_period;
+                }
+            }
+        }
+        if !self.dying_on && self.ticks >= self.dying_from {
+            self.dying_on = true;
+            for i in 0..self.agents.len() {
+                if self.alive(i) {
+                    self.agents[i].dying_due = self.ticks + self.dying_period;
+                }
+            }
+        }
+    }
+
+    /// One DyingDot tick: 10% of maximum health, Magical, with no source.
+    fn dying_dot(&mut self, i: usize) {
+        if !self.alive(i) {
+            return;
+        }
+        let raw = self.agents[i].max_hp() * DYING_PCT / 100.0;
+        let dealt = apply_damage(raw, self.agents[i].armor(), self.agents[i].resistance_now(), true);
+        self.agents[i].hp -= dealt;
+        self.gain_mana(i, dealt * self.mana_per_taken);
     }
 
     fn fire_effect(&mut self, i: usize, ai: usize) {
@@ -1143,8 +1275,34 @@ impl Sim {
                     self.agents[i].hp += drained.min(cap);
                 }
             }
+            K_SCI_CAST => {
+                // The draws `make_sci_cast` takes, in its order: the cast type,
+                // then the stat from (Armor, Damage, AttackSpeed).
+                let debuff = !(self.rng.random() < 0.5);
+                let k = self.rng.choice(3);
+                let (stat, buff, deb) = match k {
+                    0 => (ST_ARMOR, act.armor_pct, act.armor_flat),
+                    1 => (ST_DAMAGE, act.damage, act.amount),
+                    _ => (ST_ATTACK_SPEED, act.as_pct, act.speed_flat),
+                };
+                let value = if debuff { -deb } else { buff };
+                let team = self.agents[i].team;
+                for o in 0..self.agents.len() {
+                    let ours = self.agents[o].team == team;
+                    if self.agents[o].hp > 0.0 && ours != debuff && act.duration > 0.0 {
+                        self.agents[o]
+                            .buffs
+                            .push(Buff::from_stats(act.duration, &[(stat, value, true)]));
+                    }
+                }
+            }
             K_BUFF_SELF => {
                 self.add_buff(i, &act);
+                // TankWithBlock: `count` charges against the `status` mask.
+                if act.count > 0 && act.status > 0 {
+                    self.agents[i].block_left = act.count;
+                    self.agents[i].block_mask = act.status;
+                }
             }
             K_DEBUFF_AROUND => {
                 let (ax, ay) = (self.agents[i].x, self.agents[i].y);
@@ -1297,7 +1455,10 @@ impl Sim {
         // any damage, so the RNG stream stays aligned with the oracle's.
         let crit = self.agents[i].crit_chance > 0.0
             && (self.rng.random() as f32) * 100.0 < self.agents[i].crit_chance;
-        let dmg = self.agents[i].damage_now() * if crit { self.agents[i].crit_mult } else { 1.0 };
+        // `C_DefaultAttack.CreateDamage`: damage * damageMult (BattleFury), then critMult.
+        let dmg = self.agents[i].damage_now()
+            * self.agents[i].fury_mult
+            * if crit { self.agents[i].crit_mult } else { 1.0 };
         let (team, ranged) = (self.agents[i].team, self.agents[i].is_ranged);
         if ranged {
             self.projectiles.push(Projectile {
@@ -1502,6 +1663,15 @@ impl Sim {
                     }
                 }
             }
+            // The escalation's two statuses tick here, where `Battle.step` has them.
+            if self.agents[i].fury_due > 0 && self.ticks >= self.agents[i].fury_due {
+                self.agents[i].fury_mult *= FURY_MULT;
+                self.agents[i].fury_due += self.fury_period;
+            }
+            if self.agents[i].dying_due > 0 && self.ticks >= self.agents[i].dying_due {
+                self.dying_dot(i);
+                self.agents[i].dying_due += self.dying_period;
+            }
 
             if let Some((kx, ky, left)) = self.agents[i].kb {
                 let left = left - self.dt;
@@ -1596,6 +1766,7 @@ impl Sim {
         }
 
         self.step_projectiles();
+        self.escalate();
     }
 
     fn step_projectiles(&mut self) {
@@ -1700,6 +1871,7 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         regen_timer: 0.0,
         knockbacks: Vec::new(),
         explodes: Vec::new(),
+        aoe_burns: Vec::new(),
         proj_splash_percent: s[22],
         proj_splash_radius: s[23],
         attack_speed_pct: s[24],
@@ -1731,6 +1903,11 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         revenged: false,
         sustain: 1.0,
         death_handled: false,
+        fury_mult: 1.0,
+        fury_due: 0,
+        dying_due: 0,
+        block_left: 0,
+        block_mask: 0,
     }
 }
 
@@ -1815,6 +1992,7 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
                     .push((p.chance, p.radius, p.amount, p.amount2, p.damage_mask))
             }
             P_SUSTAIN => a.sustain = p.amount,
+            P_AOE_BURN => a.aoe_burns.push((p.amount, p.radius, p.amount2)),
             _ => {}
         }
     }
@@ -1911,6 +2089,7 @@ pub unsafe extern "C" fn despot_battle(
     walkable: *const u8,
     tick_hz: f32,
     max_seconds: f32,
+    final_boss: i32,
     attack_anim: f32,
     recovery_anim: f32,
     projectile_speed: f32,
@@ -1976,6 +2155,7 @@ pub unsafe extern "C" fn despot_battle(
         );
     }
 
+    let esc = escalation_ticks(tick_hz, final_boss != 0);
     let mut sim = Sim {
         agents,
         projectiles: Vec::new(),
@@ -1997,6 +2177,12 @@ pub unsafe extern "C" fn despot_battle(
         rng: rng::PyRandom::seed_u64(seed),
         damage: [0.0, 0.0],
         ticks: 0,
+        fury_from: esc.0,
+        dying_from: esc.1,
+        fury_period: esc.2,
+        dying_period: esc.3,
+        fury_on: false,
+        dying_on: false,
     };
 
     let winner = sim.run((max_seconds * tick_hz) as i32);
@@ -2032,6 +2218,7 @@ pub unsafe extern "C" fn despot_battle_batch(
     walkable: *const u8,
     tick_hz: f32,
     max_seconds: f32,
+    final_boss: i32,
     attack_anim: f32,
     recovery_anim: f32,
     projectile_speed: f32,
@@ -2057,6 +2244,7 @@ pub unsafe extern "C" fn despot_battle_batch(
     out_ticks: *mut i32,
     out_damage: *mut f32,
 ) -> i32 {
+    let esc = escalation_ticks(tick_hz, final_boss != 0);
     let nb = n_battles as usize;
     let upb = units_per_battle as usize;
     let specs = std::slice::from_raw_parts(specs, nb * upb * STRIDE);
@@ -2155,6 +2343,12 @@ pub unsafe extern "C" fn despot_battle_batch(
                         rng: rng::PyRandom::seed_u64(seeds[b]),
                         damage: [0.0, 0.0],
                         ticks: 0,
+                        fury_from: esc.0,
+                        dying_from: esc.1,
+                        fury_period: esc.2,
+                        dying_period: esc.3,
+                        fury_on: false,
+                        dying_on: false,
                     };
                     let w = sim.run((max_seconds * tick_hz) as i32);
                     unsafe {

@@ -42,6 +42,13 @@ class UnknownMutation(NotImplementedError):
     pass
 
 
+# `SkillType`, a flags enum (dump.cs): what kind of action a skill filter
+# covers. An action here is the default attack (Attack), the class skill
+# (ClassSkill, priority 1 in `build_actions`) or a unit or mutation skill.
+SKILL_TYPES = {"None": 0, "Attack": 1, "ClassSkill": 2, "ActiveSkill": 4,
+               "PassiveSkill": 8, "UnitSkill": 12, "Skill": 14, "Any": 15}
+
+
 # Mutation-only names, i.e. those with no matching skill CSClass.
 MUTATION_REGISTRY: dict[str, Handler] = {
     "StatBonus": Handler(PASSIVE, note="flat or percentage change to one stat"),
@@ -112,7 +119,8 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "CSHealPurify": Handler(UNIMPLEMENTED, note="class-skill variant"),
     "CSLinkDamage": Handler(UNIMPLEMENTED, note="class-skill variant"),
     "CSTankTauntedStat": Handler(UNIMPLEMENTED, note="class-skill variant"),
-    "CSTauntTime": Handler(UNIMPLEMENTED, note="class-skill variant"),
+    # `C_CSTauntTimeMutation.Handle(M_TankCSGroup)`: see `apply_to_agents`.
+    "CSTauntTime": Handler(PASSIVE, note="seconds added to the Tank class skill's duration"),
     "ImprovedSciCast": Handler(UNIMPLEMENTED, note="class-skill variant"),
     "SeparateSpiritLinker": Handler(UNIMPLEMENTED, note="class-skill variant"),
     "DodgeAura": Handler(UNIMPLEMENTED, note="aura"),
@@ -202,15 +210,46 @@ def offered_at_level(tables: dict, level: int) -> list[dict]:
 
 
 def applies_to(mutation: dict, cls: str, rng: random.Random | None = None,
-               random_class: str | None = None) -> bool:
-    """Whether a mutation's `Class` selector covers a unit class."""
-    spec = mutation.get("Class")
-    if not spec or spec == "All":
+               random_class: str | None = None, spec=None) -> bool:
+    """Whether a mutation's `Class` selector covers a unit class, and, given
+    the unit's spec, whether its `kind` does (`kind_applies`)."""
+    if spec is not None and not kind_applies(mutation, spec):
+        return False
+    sel = mutation.get("Class")
+    if not sel or sel == "All":
         return True
-    if spec == "Random":
+    if sel == "Random":
         # "Random" picks one class for the run; the caller supplies which.
         return random_class is None or cls == random_class
-    return cls in {c.strip() for c in spec.split(",")}
+    return cls in {c.strip() for c in sel.split(",")}
+
+
+# `M_Mutation.Kinds`, a flags enum (dump.cs).
+MUTATION_KINDS = {"None": 0, "Melee": 1, "Range": 2, "Summon": 4, "Human": 8, "Undead": 16,
+                  "Robot": 32, "TeamMember": 64, "Class": 128, "HumanTeamMember": 72}
+
+
+def kind_applies(mutation: dict, spec) -> bool:
+    """`C_Mutation.IsApplicable`: `(mutation.kind & unit.kind) == mutation.kind`.
+
+    A row without `kind` is None, 0, and covers everyone. The shipped rows that
+    set it are three StatBonus rows: Melee (294, damage), which leaves ranged
+    units out, and TeamMember (283, 298, speed). A unit's own kind is taken as
+    TeamMember for everything a squad fields, Melee or Range by its reach, and
+    Human for the item classes; Summon, Undead and Robot are not modelled.
+    """
+    name = None
+    for i in range(1, 10):
+        if mutation.get(f"Param{i}Name") == "kind":
+            name = mutation.get(f"Param{i}Value")
+    want = MUTATION_KINDS.get(str(name), 0) if name is not None else 0
+    if not want:
+        return True
+    have = MUTATION_KINDS["TeamMember"] | (MUTATION_KINDS["Melee"] if spec.melee
+                                           else MUTATION_KINDS["Range"])
+    if spec.cls in UPGRADED_CLASSES or spec.cls == "Novice":
+        have |= MUTATION_KINDS["Human"]
+    return want & have == want
 
 
 # ---------------------------------------------------------------- application
@@ -286,7 +325,7 @@ def apply_to_specs(specs: list, mutations: list[dict],
                 continue      # handled as a cast in apply_to_agents
             random_class = (rng.choice(classes)
                             if m.get("Class") == "Random" and classes else None)
-            out = [apply_stat_bonus(s, p) if applies_to(m, s.cls, rng, random_class) else s
+            out = [apply_stat_bonus(s, p) if applies_to(m, s.cls, rng, random_class, spec=s) else s
                    for s in out]
         elif name == "ClassDiversity":
             i = diversity_target(out, m, rng)
@@ -819,6 +858,27 @@ def apply_to_agents(agents: list, mutations: list[dict],
                     effect=EFFECT_BUILDERS["buff_self"](p), params=p, priority=3,
                 ))
             continue
+        if h.kind == ACTIVE:
+            # `C_ActiveSkillMutation<TMutation, TSkill>`: each covered unit gets
+            # the skill, with the row's own numbers, as an action of its own,
+            # the way a unit's Skills.json entry becomes one. Until 2026-11-06
+            # these rows (Stun, ManaBurn, Venom, Juggernaut, ShiftingEffect,
+            # StatBonusCast, Animate, Panic) counted as implemented and nothing
+            # applied them (`tools/audit_mutations.py`).
+            from .unit_skills import active_action
+            if h.effect in ("direct", "aoe") and not param(p, "damage", "Damage"):
+                # Juggernaut (304) is `M_ContinuousAttackSkill`, a spell of
+                # repeated attacks with no damage of its own, which the generic
+                # direct effect cannot express: left out rather than cast as a
+                # no-op that spends mana.
+                continue
+            random_class = rng.choice(classes) if m.get("Class") == "Random" and classes else None
+            for a in agents:
+                if applies_to(m, a.spec.cls, rng, random_class):
+                    act = active_action(name, p, a.spec, priority=3)
+                    if act is not None:
+                        a.actions.append(act)
+            continue
         if h.kind != PASSIVE or name in ("StatBonus", "OraStatBonus"):
             continue
         if name == "ClassDiversity":
@@ -881,9 +941,36 @@ def apply_to_agents(agents: list, mutations: list[dict],
                 from .unit_skills import knockback_entry
                 a.knockbacks.append(knockback_entry(p))
             elif name == "CooldownReduction":
-                factor = 1.0 - param(p, "percent", "value", default=0.0) / 100.0
+                # `C_CooldownReductionSkill.Modify`: max(0, cooldown * (1 -
+                # value/100)) with `percentage`, else max(0, cooldown - value),
+                # on the actions whose `SkillType` is in the row's `skillType`.
+                # The shipped row (214) says `Skill` (ClassSkill | ActiveSkill |
+                # PassiveSkill), so the default attack, `Attack`, keeps its
+                # cooldown; until 2026-11-06 it was cut too, which was 11% more
+                # attack speed on every unit.
+                mask = SKILL_TYPES.get(str_param(p, "skillType", default="Any"), 15)
+                value = param(p, "value", "percent", default=0.0)
+                pct = _is_pct(p, "percentage", "Percentage")
                 for act in a.actions:
-                    act.cooldown *= max(0.0, factor)
+                    kind = 1 if act.name == "attack" else (2 if act.priority == 1 else 4)
+                    if mask & kind:
+                        act.cooldown = max(0.0, act.cooldown * (1.0 - value / 100.0) if pct
+                                           else act.cooldown - value)
+            elif name == "CSTauntTime":
+                # `C_CSTauntTimeMutation.Handle(M_TankCSGroup)` sets the group's
+                # duration to duration + value, or duration + value * duration *
+                # 0.01 with `percentage`, once the group has a level (three Tanks
+                # in Default). The Tank class skill is the sim's timed armour
+                # buff, so the buff lasts that much longer. The params dict is
+                # shared by every Tank of the squad, so each action gets a copy.
+                for act in a.actions:
+                    if act.name != "Tank":
+                        continue
+                    d = param(act.params, "duration")
+                    add = param(p, "value", "Value")
+                    if _is_pct(p, "percentage", "Percentage"):
+                        add *= d * 0.01
+                    act.params = {**act.params, "duration": d + add}
     return counts
 
 

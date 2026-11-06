@@ -2374,14 +2374,18 @@ class RunState:
             for agent, human in zip(team0[:n_humans], self.squad):
                 agent.hp = agent.max_hp * human.hp
         seed = rng.randrange(1 << 30)
+        # `C_Fight._Fight` escalates later in the final boss room
+        # (`M_Room.type` has FinalBoss): BattleFury at 1200 s, DyingDot at 1320.
+        final_boss = room.kind == "boss" and self.level >= len(self.tables["Levels"])
         b = Battle(grid, team0 + team1, seed=seed, tables=self.tables,
-                   build_trees=not self.use_fast_core)
+                   build_trees=not self.use_fast_core, final_boss=final_boss)
 
         if self.use_fast_core:
             from .fast import UnsupportedFight, available, fast_battle
             if available():
                 try:
-                    fr = fast_battle(grid, b.agents, seed=seed, tables=self.tables)
+                    fr = fast_battle(grid, b.agents, seed=seed, tables=self.tables,
+                                     final_boss=final_boss)
                     for agent, hp in zip(b.agents, fr["hp"]):
                         agent.hp = float(hp)
                     res = BattleResult(
@@ -2392,7 +2396,8 @@ class RunState:
                     return self._after_fight(team0[:n_humans], team1, res, room)
                 except UnsupportedFight:
                     # outside the envelope: rebuild with trees and use the oracle
-                    b = Battle(grid, team0 + team1, seed=seed, tables=self.tables)
+                    b = Battle(grid, team0 + team1, seed=seed, tables=self.tables,
+                               final_boss=final_boss)
         res = b.run()
 
         return self._after_fight(team0[:n_humans], team1, res, room)

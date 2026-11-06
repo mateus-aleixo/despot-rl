@@ -94,6 +94,23 @@ def apply_damage(amount: float, armor: float, resistance: float,
     return amount
 
 
+# `C_Fight`'s escalation, read 2026-11-06 (`_Fight`, `EnhanceUnit`,
+# `ExhaustUnit`). Once the fight's time reaches `_MIDDLE_FIGHT_TIME` (1200 in
+# the final boss room) every unit of both sides, and every unit that joins
+# later (`TeamExtensions.SubscribeUnits`), gets "BattleFury", a
+# `M_DamageBonusOverTimeStatus` with tickTimer 2, percentage and value 10 that
+# never ends: each tick sets damageMult to damageMult * (1 + 10/100), which the
+# default attack multiplies its damage by. At `_LONG_FIGHT_TIME` (1320) each
+# also gets an `M_DyingDotStatus` with tickTimer 3, percentage and damage 10:
+# each tick deals 10% of the unit's own `totalMaxHealth` as the status's
+# default damageType, 2, Magical. A status's first tick comes one tickTimer
+# after it is applied (`ApplyStatus` sets timeRemaining = tickTimer).
+MIDDLE_FIGHT_TIME, MIDDLE_FIGHT_TIME_FINAL_BOSS = 120.0, 1200.0
+LONG_FIGHT_TIME, LONG_FIGHT_TIME_FINAL_BOSS = 180.0, 1320.0
+FURY_TICK, FURY_MULT = 2.0, 1.1
+DYING_TICK, DYING_PCT = 3.0, 10.0
+
+
 # `DamageType`, verbatim from the dumped enum. It is a flags set, and the
 # agent-level passives gate on it: a skill with `damageType: Physical` fires
 # only when the damage it sees carries that flag, and `Secondary` (splash and
@@ -236,6 +253,18 @@ class Agent:
     sustain: float = 1.0
     # CSLinkStatBonus: params applied to the class skill's targets on cast
     cs_link_bonus: list = field(default_factory=list)
+    # The fight's escalation (`C_Fight`, see `Battle.escalate`): the BattleFury
+    # damage multiplier and the tick each over-time status fires next, 0 while
+    # the unit does not hold it.
+    fury_mult: float = 1.0
+    fury_due: int = 0
+    dying_due: int = 0
+    # TankWithBlock's "Block" status (`C_BlockStatus`): hits left to void,
+    # and the damage types it voids.
+    block_left: int = 0
+    block_mask: int = 0
+    # AoeBurn, one per source: (total damage, radius, mana per burst)
+    aoe_burns: list = field(default_factory=list)
 
     @property
     def alive(self) -> bool:
@@ -324,14 +353,28 @@ class BattleResult:
     casts: dict[str, int]
 
 
+def escalation_ticks(tick_hz: float, final_boss: bool = False) -> tuple[int, int, int, int]:
+    """The escalation schedule in ticks: (BattleFury from, DyingDot from,
+    BattleFury period, DyingDot period). Counting ticks keeps both engines on
+    the same tick where a running float would drift by one."""
+    middle = MIDDLE_FIGHT_TIME_FINAL_BOSS if final_boss else MIDDLE_FIGHT_TIME
+    long_ = LONG_FIGHT_TIME_FINAL_BOSS if final_boss else LONG_FIGHT_TIME
+    return (round(middle * tick_hz), round(long_ * tick_hz),
+            round(FURY_TICK * tick_hz), round(DYING_TICK * tick_hz))
+
+
 class Battle:
     def __init__(self, grid: Grid, agents: list[Agent],
                  assumptions: Assumptions = DEFAULT, seed: int = 0,
-                 tables: dict | None = None, build_trees: bool = True):
+                 tables: dict | None = None, build_trees: bool = True,
+                 final_boss: bool = False):
         self.grid = grid
         self.agents = agents
         self.a = assumptions
         self.dt = 1.0 / assumptions.tick_hz
+        (self.fury_from, self.dying_from,
+         self.fury_period, self.dying_period) = escalation_ticks(assumptions.tick_hz, final_boss)
+        self.fury_on = self.dying_on = False
         self.rng = random.Random(seed)
         self.tables = tables
         self.projectiles: list[Projectile] = []
@@ -395,6 +438,12 @@ class Battle:
                     ag.statuses[k] -= dt
                     if ag.statuses[k] <= 0.0:
                         del ag.statuses[k]
+            if ag.fury_due and self.tick_count >= ag.fury_due:
+                ag.fury_mult *= FURY_MULT
+                ag.fury_due += self.fury_period
+            if ag.dying_due and self.tick_count >= ag.dying_due:
+                self._dying_dot(ag)
+                ag.dying_due += self.dying_period
             if ag.knockback is not None:
                 kx, ky, left = ag.knockback
                 left -= dt
@@ -441,6 +490,34 @@ class Battle:
             ag.x, ag.y = self.grid.clamp_world(ag.x + vx * dt, ag.y + vy * dt)
 
         self._step_projectiles(dt)
+        self.escalate()
+
+    def escalate(self) -> None:
+        """`C_Fight._Fight` checks the fight's time after each simulation
+        step and, at the first step past each threshold, applies the status to
+        every unit on both sides; units that join later get it on arrival
+        (`summon`)."""
+        if not self.fury_on and self.tick_count >= self.fury_from:
+            self.fury_on = True
+            for ag in self.agents:
+                if ag.alive:
+                    ag.fury_due = self.tick_count + self.fury_period
+        if not self.dying_on and self.tick_count >= self.dying_from:
+            self.dying_on = True
+            for ag in self.agents:
+                if ag.alive:
+                    ag.dying_due = self.tick_count + self.dying_period
+
+    def _dying_dot(self, ag: Agent) -> None:
+        """One DyingDot tick: 10% of the unit's maximum health, Magical, with
+        no source, so nothing that keys on an attacker fires and no side is
+        credited with it."""
+        if not ag.alive:
+            return
+        dealt = apply_damage(ag.max_hp * DYING_PCT / 100.0, ag.armor, ag.resistance,
+                             magical=True)
+        ag.hp -= dealt
+        self._gain_mana(ag, dealt * self.a.mana_per_damage_taken)
 
     def _preferred_velocity(self, ag: Agent, dt: float) -> tuple[float, float]:
         if ag.has("stun") or ag.has("panic") or ag.knockback is not None:
@@ -485,7 +562,9 @@ class Battle:
         if tgt is None or not tgt.alive:
             return
         crit = ag.crit_chance > 0.0 and self.rng.random() * 100.0 < ag.crit_chance
-        dmg = ag.damage * (ag.crit_mult if crit else 1.0)
+        # `C_DefaultAttack.CreateDamage`: (damage + bonusDamage) * damageMult,
+        # times critMult on a crit; BattleFury is what moves damageMult here.
+        dmg = ag.damage * ag.fury_mult * (ag.crit_mult if crit else 1.0)
         if ag.spec.is_ranged:
             self.projectiles.append(Projectile(
                 ag.x, ag.y, tgt, dmg, self.a.projectile_speed, ag.team, crit,
@@ -522,6 +601,13 @@ class Battle:
             return                                        # Evasion skill
         if tgt.unit_dodge_cooldown > 0.0 and tgt.unit_dodge_ready_in <= 0.0:
             tgt.unit_dodge_ready_in = tgt.unit_dodge_cooldown   # unit Dodge skill
+            return
+        # `C_BlockStatus.OnDamage`: a damage still standing, above 0, whose
+        # every type bit is in the block's type uses up one charge and has
+        # its type set to Empty, so it does nothing. Splash (Physical |
+        # Secondary) and magic go through.
+        if tgt.block_left > 0 and raw > 0.0 and dtype & tgt.block_mask == dtype:
+            tgt.block_left -= 1
             return
         dealt = apply_damage(raw, tgt.armor, tgt.resistance, magical=magical)
 
@@ -599,6 +685,30 @@ class Battle:
 
         if attacker is not None and attacker.explodes:
             self._explode(attacker, tgt, dtype)
+        if attacker is not None and attacker.aoe_burns:
+            self._aoe_burn(attacker, tgt, dtype)
+
+    def _aoe_burn(self, ag: Agent, tgt: Agent, dtype: int) -> None:
+        """AoeBurn: `C_AoeBurnSkill.BurnAround`, from the addon its
+        `OnDamageCreated` attaches. While the unit has `ManaCost` mana, every
+        enemy within `Radius` of the hit gets an `M_BurningStatus` worth
+        `Damage` in all (`Ticks` ticks over `Duration`, Magical, the status
+        default), and the mana is spent once per burst. The burn is dealt at
+        once here, as Venom is, so its total is right and its timing early.
+        Only the unit's own Physical, non-Secondary damage carries the addon."""
+        if not (dtype & DT_PHYSICAL) or dtype & DT_SECONDARY:
+            return
+        for damage, radius, cost in ag.aoe_burns:
+            if ag.mana < cost or damage <= 0.0 or radius <= 0.0:
+                continue
+            r2 = radius * radius
+            for o in list(self.agents):
+                if o.team == ag.team or not o.alive:
+                    continue
+                if (o.x - tgt.x) ** 2 + (o.y - tgt.y) ** 2 <= r2:
+                    self.hit(ag.team, o, damage, magical=True, attacker=None,
+                             dtype=DT_MAGICAL)
+            ag.mana -= cost
 
     def _addon_gate(self, dtype: int, mask: int, chance: float) -> bool:
         """`OnDamageCreated` for a damage addon: the damage has to be Physical
@@ -751,6 +861,12 @@ class Battle:
                     y=ag.y + self.rng.uniform(-spec.radius, spec.radius),
                     hp=spec.health, summoned=True)
         new.actions = build_actions(spec, None)
+        # `SubscribeUnits`: a unit that joins after a threshold gets the status
+        # when it arrives.
+        if self.fury_on:
+            new.fury_due = self.tick_count + self.fury_period
+        if self.dying_on:
+            new.dying_due = self.tick_count + self.dying_period
         self._init_agent(new)
         self.agents.append(new)
 

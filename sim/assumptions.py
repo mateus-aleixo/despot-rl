@@ -249,9 +249,25 @@ class Assumptions:
     quests_partly_ported: bool = True
 
     # A fight is called a draw if neither side dies within this long. The game
-    # has some real timeout or sudden-death rule.
-    # Settle by: finding the fight timeout in the fight controller.
-    max_fight_seconds: float = 120.0
+    # has no timeout: `C_Fight._Fight` escalates instead (BattleFury from
+    # 120 s, DyingDot from 180 s; see `sim.battle.MIDDLE_FIGHT_TIME`), which
+    # ends a fight in which anyone can still be hurt, so this is only a guard.
+    # 120 s, the old value, was the escalation's start read as an end.
+    # `_LONG_TIME_WITHOUT_DAMAGE` needs nothing here: after 8 s (12 against
+    # the final boss) with no damage dealt, the game logs an error, allows 4 s
+    # more, then calls `C_Team.CheckDeath(force: true)` on both sides, and
+    # `force` only kills a side whose every unit is Unrendered (trait bit
+    # 13), a state the sim does not have. So a stalemate runs on into
+    # DyingDot in the game as it does here. 600 s is never reached by a fight
+    # in which DyingDot can hurt someone.
+    max_fight_seconds: float = 600.0
+
+    # DyingDot's tick is a source-less Magical damage: the sim applies the
+    # resistance and the mana for damage taken, and skips the dodges, the
+    # evasions and the spirit link, which `CS_Damage.Apply` may or may not
+    # run for a status's damage.
+    # Settle by: reading `CS_Damage.Apply` for a damage with no source.
+    dying_dot_skips_avoidance: bool = True
 
     # `ClassDiversity` is applied once, before the fight. The game subscribes to
     # fight start and re-picks its target when that unit dies, so a squad that

@@ -857,6 +857,126 @@ if _core_available():
 else:
     print("      (rust core not built; skipping the differential checks)")
 
+# The active mutations (`C_ActiveSkillMutation`) give their units the skill as an
+# action with the row's own numbers. They counted as implemented while nothing
+# applied them, until `tools/audit_mutations.py` showed none of their parameters
+# was ever read (2026-11-06). Juggernaut (304), a continuous attack the generic
+# effects cannot express, stays out.
+_ACTIVE_ROWS = [("Stun", 208, "Warrior"), ("ManaBurn", 220, "Warrior"), ("Venom", 257, "Warrior"),
+                ("StatBonusCast", 323, "Warrior"), ("ShiftingEffect", 307, "Mage")]
+for _name, _id, _cls in _ACTIVE_ROWS:
+    _t0a, _t1a, _ba = _mut_fight([_id], item=_item_for(_cls), n=1, foes=1, seed=0)
+    _cast = _ba.run().casts.get(_name, 0)
+    check(f"the {_name} mutation ({_id}) gives a {_cls} the skill, and it is cast",
+          any(act.name == _name for act in _t0a[0].actions) and _cast > 0, f"{_cast} casts")
+    if _core_available():
+        _ok, _err = _core_vs_oracle([_id], item=_item_for(_cls))
+        check(f"the core reproduces the {_name} mutation exactly at 1v1",
+              _ok is True and _err < 0.01, f"damage error {_err:.2f}%")
+# CooldownReduction (214: 10%, skillType Skill): `C_CooldownReductionSkill`
+# decorates the actions whose SkillType is in `skillType`, and `Skill` is
+# ClassSkill | ActiveSkill | PassiveSkill, so the default attack keeps its period.
+_t0r = _mut_fight([214], item=_item_for("Medic"), n=1, foes=1)[0]
+_t0p = _mut_fight([], item=_item_for("Medic"), n=1, foes=1)[0]
+_cd = {act.name: act.cooldown for act in _t0r[0].actions}
+_cd0 = {act.name: act.cooldown for act in _t0p[0].actions}
+check("CooldownReduction (214) cuts the Heal's cooldown by 10% and leaves the default attack's",
+      abs(_cd["Heal"] - 0.9 * _cd0["Heal"]) < 1e-9 and _cd["attack"] == _cd0["attack"],
+      f"{_cd0} -> {_cd}")
+# A mutation's `kind` filters its units (`C_Mutation.IsApplicable`:
+# `(mutation.kind & unit.kind) == mutation.kind`). 294 is +10% damage for Melee
+# units only; 298 is +20% speed for every TeamMember.
+_sq = build_player_squad(_STRICT, [("broadsword", 1), (_item_for("Shooter"), 1)])
+_k294 = apply_to_specs(_sq, [_MBY[294]], random.Random(0))
+_k298 = apply_to_specs(_sq, [_MBY[298]], random.Random(0))
+check("the Melee-only damage bonus (294) skips a ranged unit; the TeamMember speed bonus "
+      "(298) reaches both",
+      abs(_k294[0].damage - 1.1 * _sq[0].damage) < 1e-9 and _k294[1].damage == _sq[1].damage
+      and all(abs(k.speed - 1.2 * s.speed) < 1e-9 for k, s in zip(_k298, _sq)),
+      f"{[s.damage for s in _sq]} -> {[s.damage for s in _k294]}")
+# TankWithBlock's Block (`C_BlockStatus.OnDamage`, DeathKnight: 15 charges,
+# Physical): a hit whose every type bit is in the mask is voided and uses a
+# charge; magic and splash (Physical | Secondary) land.
+from sim.battle import DT_MAGICAL as _DTM
+_tb, _vb, _bb = _mut_fight([], n=1, foes=1)
+_v = _vb[0]
+_v.block_left, _v.block_mask, _h0 = 2, 1, _v.hp
+_bb.hit(0, _v, 50.0, attacker=_tb[0])                          # physical: blocked
+_h1, _l1 = _v.hp, _v.block_left
+_bb.hit(0, _v, 50.0, magical=True, attacker=_tb[0])           # magic: lands
+_h2 = _v.hp
+_bb.hit(0, _v, 50.0, attacker=_tb[0], dtype=DT_PHYSICAL | DT_SECONDARY)   # splash: lands
+_h3 = _v.hp
+_bb.hit(0, _v, 50.0, attacker=_tb[0])                          # last charge
+_h4, _l4 = _v.hp, _v.block_left
+_bb.hit(0, _v, 50.0, attacker=_tb[0])                          # none left: lands
+check("Block voids pure physical hits, one charge each, and lets magic and splash through",
+      _h1 == _h0 and _l1 == 1 and _h2 < _h1 and _h3 < _h2 and _h4 == _h3 and _l4 == 0
+      and _v.hp < _h4, f"{_h0} {_h1} {_h2} {_h3} {_h4} {_v.hp}")
+from sim.data import units_by_class as _ubc
+from sim.fast import action_rows as _action_rows
+_dk = Battle(GRID, deploy(GRID, LAYOUT, [build_unit(_ubc(_STRICT), "DeathKnight", 1)], 1, "e1",
+                          random.Random(0)), seed=0, tables=_STRICT).agents[0]
+_row = next(r for r in _action_rows(_dk, 0, None) if r[17] > 0)
+check("the core gets DeathKnight's 15 Block charges and the Physical mask", _row[17] == 15
+      and _row[18] == 1, f"count {_row[17]}, mask {_row[18]}")
+# AoeBurn (AoeRanger: Damage 16, Radius 40, ManaCost 5) is a passive in the game
+# (`C_AoeBurnSkill.OnDamageCreated` -> `BurnAround`): each of the unit's own
+# Physical hits burns every enemy within Radius of the target for Damage
+# (Magical), for ManaCost a burst, while the mana lasts; splash carries nothing.
+_ar = Battle(GRID, deploy(GRID, LAYOUT, [build_unit(_ubc(_STRICT), "AoeRanger", 1)], 1, "e1",
+                          random.Random(0)) + _mut_fight([], n=2, foes=1)[0], seed=0,
+             tables=_STRICT, assumptions=dataclasses.replace(
+                 A, mana_per_damage_dealt=0.0, mana_per_damage_taken=0.0))
+_ag, _p1, _p2 = _ar.agents[0], _ar.agents[1], _ar.agents[2]
+_p2.x, _p2.y = _p1.x + 10.0, _p1.y
+_ag.mana, _h1, _h2 = 7.0, _p1.hp, _p2.hp
+_ar.hit(1, _p1, 1.0, attacker=_ag)                 # physical, mana 7: a burst
+_m1, _b1, _b2 = _ag.mana, _p1.hp, _p2.hp
+_ar.hit(1, _p1, 1.0, attacker=_ag)                 # mana 2 now: no burst
+_b3 = _p2.hp
+_ag.mana = 7.0
+_ar.hit(1, _p1, 1.0, attacker=_ag, dtype=DT_PHYSICAL | DT_SECONDARY)   # splash: none
+check("AoeBurn: a hit with the mana burns both foes near the target, costs 5, and none "
+      "follows without mana or from splash",
+      not any(a.name == "AoeBurn" for a in _ag.actions) and _m1 == 2.0
+      and _h2 - _b2 == 16.0 * (1.0 - _p2.resistance) and _b3 == _b2 and _ag.mana == 7.0,
+      f"mana {_m1}, near foe {_h2} -> {_b2} -> {_b3}")
+# SciCast (the SciTower's skill, row 10): Buff when the draw is under 0.5, else
+# Debuff; the stat is one of (Armor, Damage, AttackSpeed); the status is the
+# row's <Stat>Buff, or minus its <Stat>Debuff, as a percentage, on every unit of
+# the caster's side or the other, for Duration (10 s).
+from sim.unit_skills import make_sci_cast as _make_sci
+from sim.fast import K_SCI_CAST as _K_SCI
+_sci_row = next(r for r in _STRICT["Skills"] if r.get("CSClass") == "SciCast")
+_sci_p = {_sci_row[f"Param{i}Name"]: _sci_row.get(f"Param{i}Value") for i in range(1, 11)
+          if _sci_row.get(f"Param{i}Name")}
+_t0s2, _t1s2, _bs2 = _mut_fight([], n=2, foes=2)
+_sci_eff, _seen_sci = _make_sci(_sci_p), set()
+for _k in range(60):
+    for _a in _bs2.agents:
+        _a.buffs = []
+    _sci_eff(None, _t0s2[0], _bs2)
+    _mine = [s for a in _t0s2 for b in a.buffs for s in b.stats]
+    _theirs = [s for a in _t1s2 for b in a.buffs for s in b.stats]
+    _side = "buff" if _mine else "debuff"
+    _stats = _mine or _theirs
+    _seen_sci.add((_side, _stats[0][0], _stats[0][1], _stats[0][2], len(_stats),
+                   bool(_mine) and bool(_theirs)))
+_want = {("buff", "armor", 20.0, True, 2, False), ("buff", "damage", 10.0, True, 2, False),
+         ("buff", "attack_speed", 10.0, True, 2, False), ("debuff", "armor", -20.0, True, 2, False),
+         ("debuff", "damage", -10.0, True, 2, False), ("debuff", "attack_speed", -10.0, True, 2, False)}
+check("SciCast buffs one side or debuffs the other, on one of three stats, as a percentage",
+      _seen_sci == _want, f"{sorted(_seen_sci)}")
+_tower = Battle(GRID, deploy(GRID, LAYOUT, [build_unit(_ubc(_STRICT), "SciTower", 1)], 0, "p",
+                             random.Random(0)), seed=0, tables=_STRICT).agents[0]
+_srow = next(r for r in _action_rows(_tower, 0, None) if r[1] == _K_SCI)
+check("the core gets SciCast's kind, duration and six values",
+      (_srow[11], _srow[6], _srow[9], _srow[12], _srow[13], _srow[15], _srow[14])
+      == (10.0, 10.0, 10.0, 20.0, 20.0, 10.0, 10.0), f"{_srow}")
+check("Juggernaut (304) is left out, with no damage of its own to deal",
+      not any(act.name == "Juggernaut" for act in _mut_fight([304], n=1, foes=1)[0][0].actions))
+
 
 print("\n== vampirism and evasion ==")
 from sim.battle import DT_CANT_BE_EVADED as _DT_NOEVADE
@@ -1107,6 +1227,106 @@ if _core_available():
           _agree == 10 and _err_pct < 0.01,
           f"winners {_agree}/10, damage error {_err_pct:.2f}%")
     check("Sustain changes the fight", _moved == 10, f"{_moved}/10 fights differ")
+
+# CSTauntTime (328: value 1, percentage false; the Cube quest's level-2 reward).
+# `C_CSTauntTimeMutation.Handle(M_TankCSGroup)` sets the Tank group's duration to
+# duration + value, or duration + value * duration * 0.01 with `percentage`, so
+# three Tanks' class skill (level 1, 3 s) lasts 4 s. The core packs the action's
+# own `duration`, so it reads the same number.
+def _tank_durations(muts):
+    _t = _mut_fight([], item=_item_for("Tank"), n=3)[0]
+    apply_to_agents(_t, muts, random.Random(0))
+    return [act.params.get("duration") for a in _t for act in a.actions if act.name == "Tank"]
+
+
+_pct = dict(_MBY[328], Param1Value=50, Param2Value="true")
+check("CSTauntTime: three Tanks' 3 s class skill lasts 4 s (+1), or 4.5 s at +50%",
+      _tank_durations([]) == [3, 3, 3] and _tank_durations([_MBY[328]]) == [4.0] * 3
+      and _tank_durations([_pct]) == [4.5] * 3,
+      f"{_tank_durations([])} {_tank_durations([_MBY[328]])} {_tank_durations([_pct])}")
+_t0c = _mut_fight([], item=_item_for("Tank"), n=3)[0]
+_shared = next(act.params for act in _t0c[0].actions if act.name == "Tank")
+apply_to_agents(_t0c, [_MBY[328]], random.Random(0))
+check("CSTauntTime adds once per Tank, on a copy, leaving the squad's shared params at 3 s",
+      _shared.get("duration") == 3
+      and [act.params.get("duration") for a in _t0c for act in a.actions
+           if act.name == "Tank"] == [4.0] * 3,
+      f"shared {_shared.get('duration')}")
+_moved = sum(
+    int((lambda r0, r1: (r0.ticks, r0.total_damage) != (r1.ticks, r1.total_damage))(
+        _mut_fight([], item=_item_for("Tank"), n=3, seed=_s)[2].run(),
+        _mut_fight([328], item=_item_for("Tank"), n=3, seed=_s)[2].run()))
+    for _s in range(5))
+check("CSTauntTime changes the fight", _moved == 5, f"{_moved}/5 fights differ")
+
+# The Medic's class skill heals the lowest health, not the most missing
+# (`C_HealCSkill.GetMostDamagedTarget`, strict `<` from float.MaxValue over the
+# units `CanBeTargeted` accepts: alive and below their maximum). A unit at 60
+# of its health beats one at 500 of a much larger pool, a full one is skipped
+# even at the lowest health, and the first of two equals is taken.
+from sim.actions import effect_heal as _effect_heal
+_t0h, _t1h, _bh = _mut_fight([], item=_item_for("Medic"), n=4)
+_medic, _a, _b, _c = _t0h
+_heal_act = next(act for act in _medic.actions if act.name == "Heal")
+for _u, _hp, _max in ((_a, 60.0, 100.0), (_b, 500.0, 1000.0), (_c, 40.0, 40.0)):
+    _u.spec = dataclasses.replace(_u.spec, health=_max)
+    _u.hp = _hp
+_medic.hp = _medic.max_hp
+_effect_heal(_heal_act, _medic, _bh)
+check("the Medic's heal goes to the lowest health among the damaged (60 of 100, not 500 of 1000; "
+      "a full unit at 40 is skipped)",
+      _a.hp > 60.0 and _b.hp == 500.0 and _c.hp == 40.0, f"{_a.hp} {_b.hp} {_c.hp}")
+_a.hp = _b.hp = 50.0
+_effect_heal(_heal_act, _medic, _bh)
+check("of two equal healths the heal takes the first in side order", _a.hp > 50.0 and _b.hp == 50.0,
+      f"{_a.hp} {_b.hp}")
+
+# `C_Fight`'s escalation: BattleFury applied at 120 s ticks damageMult x1.1
+# every 2 s from 122 s, DyingDot applied at 180 s deals 10% of maximum health
+# as Magical damage every 3 s from 183 s; 1200 and 1320 s in the final boss
+# room. A 1v1 in which neither side can deal damage is then ended by DyingDot
+# alone, so both engines must agree on it to the tick.
+from sim.battle import escalation_ticks as _esc_ticks
+
+
+def _stalled(seed, final_boss=False):
+    _s = [dataclasses.replace(s, damage=0.0, resistance=0.0)
+          for s in build_player_squad(_STRICT, [("broadsword", 1)])]
+    _p = next(p for p in _STRICT["EnemyPacks"] if p["Class"] == "Mancrack")
+    _e = [dataclasses.replace(s, damage=0.0, resistance=0.2)
+          for s in build_enemy_pack(_STRICT, _p)[:1]]
+    _r = random.Random(seed)
+    _t0 = deploy(GRID, LAYOUT, _s, 0, "p", _r)
+    _t1 = deploy(GRID, LAYOUT, _e, 1, "e1", _r)
+    apply_class_skills(_STRICT, _t0)
+    return Battle(GRID, _t0 + _t1, seed=seed, tables=_STRICT, final_boss=final_boss)
+
+
+check("the escalation runs from 120 and 180 s, or 1200 and 1320 s against the final boss",
+      _esc_ticks(50.0) == (6000, 9000, 100, 150)
+      and _esc_ticks(50.0, final_boss=True) == (60000, 66000, 100, 150), f"{_esc_ticks(50.0)}")
+_bs, _marks = _stalled(0), {}
+while _bs.tick_count < 9150:
+    _bs.step()
+    if _bs.tick_count in (6099, 6100, 6200, 9000, 9149, 9150):
+        _marks[_bs.tick_count] = (_bs.agents[0].fury_mult, _bs.agents[0].hp)
+_mh = _bs.agents[0].max_hp
+check("BattleFury: x1.1 at 122 s, x1.21 at 124 s, 1.1^30 at 180 s; DyingDot: 10% at 183 s",
+      _marks[6099][0] == 1.0 and abs(_marks[6100][0] - 1.1) < 1e-12
+      and abs(_marks[6200][0] - 1.21) < 1e-12 and abs(_marks[9000][0] - 1.1 ** 30) < 1e-9
+      and _marks[9149][1] == _mh and abs(_marks[9150][1] - 0.9 * _mh) < 1e-9, f"{_marks}")
+_res_s = _stalled(0).run()
+check("a fight with no damage on either side ends on DyingDot, at 210 s, with the side that resists "
+      "more left standing", _res_s.winner == 1 and _res_s.ticks == 10500,
+      f"winner {_res_s.winner} at {_res_s.seconds:.2f} s")
+if _core_available():
+    _agree_s = 0
+    for _seed in range(3):
+        _o = _stalled(_seed).run()
+        _f = _fast_battle(GRID, _stalled(_seed).agents, seed=_seed, tables=_STRICT)
+        _agree_s += int(_o.winner == _f["winner"] and _o.ticks == _f["ticks"])
+    check("the core escalates on the same ticks (a no-damage 1v1, three seeds)", _agree_s == 3,
+          f"{_agree_s}/3")
 
 
 print("\n== the per-unit on-death skills, in both engines ==")

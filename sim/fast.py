@@ -31,7 +31,7 @@ PASSIVE_STRIDE = 21
 # Action kinds, matching core/src/lib.rs
 (K_ATTACK, K_DIRECT, K_AOE, K_HEAL, K_DRAIN, K_MANABURN,
  K_BUFF_SELF, K_DEBUFF_AROUND, K_SUMMON, K_SPIRIT_LINK,
- K_STATUS, K_BLINK) = range(12)
+ K_STATUS, K_BLINK, K_SCI_CAST) = range(13)
 SCOPE_TEAM, SCOPE_SELF, SCOPE_RADIUS = range(3)
 
 # Control statuses, as indices into the core's `Agent::statuses`.
@@ -42,7 +42,7 @@ STATUS_SLOT = {"stun": 0, "silence": 1, "panic": 2, "blinked": 3}
  P_UNTOUCHABLE, P_BUFF_ON_CAST, P_MULTICAST, P_BUFF_ON_DEATH, P_STICKY_BLOOD,
  P_RESURRECT, P_COMPENSATION, P_MODIFY_DAMAGE, P_CS_LINK,
  P_DEATH_DAMAGE, P_DEATH_SUMMON, P_EVASION, P_VAMPIRISM,
- P_EXPLODE, P_KNOCKBACK, P_REVENGE, P_SUSTAIN) = range(22)
+ P_EXPLODE, P_KNOCKBACK, P_REVENGE, P_SUSTAIN, P_AOE_BURN) = range(23)
 
 PASSIVE_KIND = {
     "BuffAttack": P_BUFF_ATTACK, "FearsomeAttack": P_FEARSOME,
@@ -109,6 +109,7 @@ def load():
         ctypes.c_float,                   # tile
         ctypes.POINTER(ctypes.c_uint8),   # walkable
         ctypes.c_float, ctypes.c_float,   # tick_hz, max_seconds
+        ctypes.c_int32,                   # final_boss
         ctypes.c_float, ctypes.c_float,   # attack_anim, recovery_anim
         ctypes.c_float,                   # projectile_speed
         ctypes.c_float, ctypes.c_int32,   # time_horizon, max_neighbours
@@ -137,7 +138,8 @@ def load():
         ctypes.c_int32, ctypes.c_int32,
         ctypes.c_int32, ctypes.c_int32, ctypes.c_float,
         ctypes.POINTER(ctypes.c_uint8),
-        ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.c_float, ctypes.c_float, ctypes.c_int32,   # tick_hz, max_seconds, final_boss
+        ctypes.c_float, ctypes.c_float,
         ctypes.c_float, ctypes.c_float, ctypes.c_int32, ctypes.c_float,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
@@ -365,6 +367,11 @@ def passive_rows(a, i: int, templates: "_Templates | None" = None) -> list[list[
             row[2], row[3], row[5], row[8] = mask, chance, radius, damage
             rows.append(row)
 
+        for damage, radius, cost in getattr(a, "aoe_burns", ()):
+            row = blank(i, P_AOE_BURN)
+            row[5], row[8], row[9] = radius, damage, cost
+            rows.append(row)
+
         for chance, radius, speed, accel, mask in getattr(a, "knockbacks", ()):
             row = blank(i, P_KNOCKBACK)
             row[2], row[3], row[5] = mask, chance, radius
@@ -566,6 +573,26 @@ def action_rows(a, i: int, templates: "_Templates") -> list[tuple]:
                 pct = _num(act.params, "percentage", default=1.0) >= 1.0
                 if stat == "AttackSpeed" and pct:
                     as_pct = _num(act.params, "value", "Value")
+                # TankWithBlock's Block: the charges ride in `count`, the
+                # damage-type mask in `status` (both unused by a self buff).
+                block = int(_num(act.params, "blockAmount") or 0)
+                if block > 0:
+                    from .battle import damage_type_mask
+                    count = block
+                    status = damage_type_mask(str(act.params.get("blockDamageType")
+                                                  or "Physical"))
+            elif eff == "sci_cast":
+                # The six values ride in fields a SciCast has no other use for:
+                # damage/amount = DamageBuff/Debuff, armor_pct/armor_flat =
+                # ArmorBuff/Debuff, as_pct/speed_flat = ASBuff/Debuff.
+                kind = K_SCI_CAST
+                duration = _num(act.params, "Duration", "duration")
+                damage = _num(act.params, "DamageBuff")
+                amount = _num(act.params, "DamageDebuff")
+                armor_pct = _num(act.params, "ArmorBuff")
+                armor_flat = _num(act.params, "ArmorDebuff")
+                as_pct = _num(act.params, "ASBuff")
+                speed_flat = _num(act.params, "ASDebuff")
             elif eff == "debuff_around":
                 kind = K_DEBUFF_AROUND
                 duration = _num(act.params, "duration", "Duration")
@@ -596,7 +623,7 @@ def action_rows(a, i: int, templates: "_Templates") -> list[tuple]:
                 kind = K_SUMMON
                 cls = (act.params.get("class") or act.params.get("Class")
                        or act.params.get("summonClass"))
-                lvl = int(_num(act.params, "level", "Level", default=1) or 1)
+                lvl = int(_num(act.params, "level", "Level", "summonLevel", default=1) or 1)
                 template = templates.get(str(cls) if cls else None, lvl)
                 if template < 0:
                     raise Unrepresentable(f"{a.spec.name}'s {act.name} summons "
@@ -684,8 +711,10 @@ def pack_all_batch(battles, tables=None) -> tuple[list[Packed], Packed]:
 
 
 def fast_battle(grid, agents, assumptions: Assumptions = DEFAULT,
-                strict: bool = True, seed: int = 0, tables=None) -> dict:
-    """Resolve one fight in the Rust core. Mirrors `Battle.run`'s result."""
+                strict: bool = True, seed: int = 0, tables=None,
+                final_boss: bool = False) -> dict:
+    """Resolve one fight in the Rust core. Mirrors `Battle.run`'s result;
+    `final_boss` moves the escalation to 1200 and 1320 s, as `Battle` does."""
     lib = load()
     # pack_actions doubles as the envelope check, so do it once rather than
     # paying for it in supported() and again here.
@@ -710,7 +739,7 @@ def fast_battle(grid, agents, assumptions: Assumptions = DEFAULT,
         specs.ctypes.data_as(fp), pos.ctypes.data_as(fp), n,
         grid.rows, grid.cols, grid.tile,
         walk.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        assumptions.tick_hz, assumptions.max_fight_seconds,
+        assumptions.tick_hz, assumptions.max_fight_seconds, int(final_boss),
         assumptions.attack_anim_s, assumptions.recovery_anim_s,
         assumptions.projectile_speed,
         RVO_TIME_HORIZON, RVO_MAX_NEIGHBOURS, PICK_NEXT_WAYPOINT_DIST,
@@ -736,7 +765,8 @@ def fast_battle(grid, agents, assumptions: Assumptions = DEFAULT,
 
 
 def fast_batch(grid, battles, assumptions: Assumptions = DEFAULT,
-               threads: int = 0, seeds=None, tables=None) -> list[dict]:
+               threads: int = 0, seeds=None, tables=None,
+               final_boss: bool = False) -> list[dict]:
     """Resolve many fights across OS threads. Every fight needs the same unit count."""
     import os
     lib = load()
@@ -788,7 +818,7 @@ def fast_batch(grid, battles, assumptions: Assumptions = DEFAULT,
         specs.ctypes.data_as(fp), pos.ctypes.data_as(fp), upb, nb,
         grid.rows, grid.cols, grid.tile,
         walk.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        assumptions.tick_hz, assumptions.max_fight_seconds,
+        assumptions.tick_hz, assumptions.max_fight_seconds, int(final_boss),
         assumptions.attack_anim_s, assumptions.recovery_anim_s,
         assumptions.projectile_speed,
         RVO_TIME_HORIZON, RVO_MAX_NEIGHBOURS, PICK_NEXT_WAYPOINT_DIST,

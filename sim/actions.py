@@ -108,18 +108,28 @@ def effect_attack(action, agent, battle):
 
 
 def effect_heal(action, agent, battle):
-    """Medic: heal the most damaged ally in range.
+    """Medic: heal the ally with the lowest health.
 
-    `C_HealCSkill.GetMostDamagedTarget` is the real selection rule.
+    `C_HealCSkill.GetMostDamagedTarget` walks the action's `targets` (the
+    caster's side) from a running minimum of float.MaxValue and keeps the unit
+    whose `health` is strictly lower, among those `CanBeTargeted` accepts: no
+    `CantBeAffected` trait (Dead, Hidden, DeSpawning, Unrendered), health above
+    0, and health below `totalMaxHealth` unless the skill can overheal. So it is
+    the lowest health, first of equals in side order, and not the most health
+    missing: a unit at 60 of 100 is healed before one at 500 of 1000.
+
+    Where the heal may be cast from is still the sim's own rule: the game walks
+    the Medic to this ally until it is inside the class skill's range (24 world
+    units, `C_HealCSkill.Init`, or 80 with CSRange), where the sim gates the
+    cast on the enemy target at the Medic's attack range.
     """
     amount = float(action.params.get("heal") or 0)
-    best, worst = None, 0.0
+    best, lowest = None, float("inf")
     for o in battle.agents:
-        if o.team != agent.team or not o.alive:
+        if o.team != agent.team or not o.alive or o.hp >= o.max_hp:
             continue
-        missing = o.max_hp - o.hp
-        if missing > worst:
-            best, worst = o, missing
+        if o.hp < lowest:
+            best, lowest = o, o.hp
     if best is not None:
         battle.heal(best, amount, agent.team)
 

@@ -77,7 +77,10 @@ REGISTRY: dict[str, Handler] = {
     "Blurp": Handler(ACTIVE, "aoe"),
     "FirePunch": Handler(ACTIVE, "aoe"),
     "DespotBlast": Handler(ACTIVE, "aoe"),
-    "AoeBurn": Handler(ACTIVE, "aoe"),
+    # `C_AoeBurnSkill` is a passive: every damage the unit creates carries an
+    # addon that burns the enemies around the target on impact, for mana
+    # (`Battle._aoe_burn`). It was an active cast here until 2026-11-06.
+    "AoeBurn": Handler(PASSIVE, note="on each hit, burns enemies around the target, for mana"),
     "Venom": Handler(ACTIVE, "direct"),
     "Swoop": Handler(ACTIVE, "direct"),
     "SkeletonHandToss": Handler(ACTIVE, "direct"),
@@ -94,7 +97,10 @@ REGISTRY: dict[str, Handler] = {
     "DespotClawSummon": Handler(ACTIVE, "summon"),
     "StatBonusCast": Handler(ACTIVE, "buff_self"),
     "TankWithBlock": Handler(ACTIVE, "buff_self"),
-    "SciCast": Handler(ACTIVE, "buff_self"),
+    # `C_SciCastSkill`: a buff to the caster's side or a debuff to the other,
+    # on one random stat (`make_sci_cast`). It was a self buff with no stat
+    # here until 2026-11-06, which did nothing.
+    "SciCast": Handler(ACTIVE, "sci_cast"),
     "ReduceStatAround": Handler(ACTIVE, "debuff_around"),
 
     # -- declared, not implemented ---------------------------------------
@@ -352,7 +358,8 @@ def make_manaburn(params):
 
 def make_summon(params):
     cls = str_param(params, "class", "Class", "summonClass")
-    level = int(param(params, "level", "Level", default=1) or 1)
+    # Animate (mutation 230) spells it `summonLevel`.
+    level = int(param(params, "level", "Level", "summonLevel", default=1) or 1)
     amount = int(param(params, "amount", "Amount", default=1) or 1)
 
     def effect(action, agent, battle):
@@ -370,6 +377,12 @@ def make_buff_self(params):
     percentage = param(params, "percentage", default=1.0) >= 1.0
     armor_bonus = param(params, "armorBonus", "ArmorBuff")
     speed_bonus = param(params, "speedBonus")
+    # TankWithBlock: `C_TankWithBlockSkill.Interact` runs the Tank buff, then
+    # gives the caster a "Block" status of `blockAmount` charges against
+    # `blockDamageType` (see `Battle.hit`). It has no time limit
+    # (`C_BlockStatus.GetInfiniteProgress`); a new cast sets the charges again.
+    block = int(param(params, "blockAmount") or 0)
+    block_type = str_param(params, "blockDamageType", default="Physical")
 
     def effect(action, agent, battle):
         battle.add_buff(
@@ -378,6 +391,9 @@ def make_buff_self(params):
             speed_flat=speed_bonus,
             attack_speed_pct=value if (stat == "AttackSpeed" and percentage) else 0.0,
         )
+        if block > 0:
+            from .battle import damage_type_mask
+            agent.block_left, agent.block_mask = block, damage_type_mask(block_type)
     return effect
 
 
@@ -399,6 +415,35 @@ def make_debuff_around(params):
     return effect
 
 
+# `C_SciCastSkill..cctor`: the stats a cast picks from, in this order.
+SCI_CAST_STATS = ("armor", "damage", "attack_speed")
+
+
+def make_sci_cast(params):
+    """SciCast (the SciTower): `ReadyToAct` draws the cast type, Buff when
+    the draw is under 0.5 and Debuff otherwise, then a stat from
+    {Armor, Damage, AttackSpeed} (`RND.Element`); `ConstructStatus` builds a
+    "SciCast" `M_StatBonusStatus` of the row's `<Stat>Buff`, or minus its
+    `<Stat>Debuff`, always as a percentage, and `AddStatusesToUnits` puts it
+    on every unit of the caster's side (Buff) or the other side (Debuff) for
+    `Duration`. The game draws from its global generator each time the
+    skill is checked; here the two draws come from the fight's, at the cast."""
+    duration = param(params, "Duration", "duration")
+    values = {"damage": (param(params, "DamageBuff"), param(params, "DamageDebuff")),
+              "armor": (param(params, "ArmorBuff"), param(params, "ArmorDebuff")),
+              "attack_speed": (param(params, "ASBuff"), param(params, "ASDebuff"))}
+
+    def effect(action, agent, battle):
+        debuff = not battle.rng.random() < 0.5
+        stat = SCI_CAST_STATS[battle.rng.randrange(len(SCI_CAST_STATS))]
+        buff, deb = values[stat]
+        amount = -deb if debuff else buff
+        for o in list(battle.agents):
+            if o.alive and ((o.team != agent.team) if debuff else (o.team == agent.team)):
+                battle.add_stat_buff(o, duration, [(stat, amount, True)])
+    return effect
+
+
 EFFECT_BUILDERS = {
     "direct": make_direct,
     "aoe": make_aoe,
@@ -408,6 +453,7 @@ EFFECT_BUILDERS = {
     "summon": make_summon,
     "buff_self": make_buff_self,
     "debuff_around": make_debuff_around,
+    "sci_cast": make_sci_cast,
 }
 
 
@@ -468,6 +514,10 @@ def apply_unit_skills(agent, tables: dict) -> list:
                     param(p, "radius", "Radius", default=0.0))
             elif cs == "ExplodeProjectile":
                 agent.explodes.append(explode_entry(p))
+            elif cs == "AoeBurn":
+                agent.aoe_burns.append((param(p, "Damage", "damage"),
+                                        param(p, "Radius", "radius"),
+                                        param(p, "ManaCost", "manaCost", "manacost")))
             elif cs in ("PassiveKnockback", "EventualKnockback"):
                 agent.knockbacks.append(knockback_entry(p))
             elif cs in ("TransformAfterDeath", "FireheadDeath", "DamageOnDeath",
@@ -493,19 +543,30 @@ def apply_unit_skills(agent, tables: dict) -> list:
             continue
 
         # ACTIVE
-        builder = EFFECT_BUILDERS.get(h.effect)
-        if builder is None:
-            continue
-        eff = builder(p, cs) if h.effect == "status" else builder(p)
-        rng = param(p, "range", "Range", default=0.0) or agent.spec.range_world
-        extra.append(Action(
-            name=cs, tree_name="NC-Skill",
-            range_world=rng,
-            cooldown=param(p, "cooldown", "Cooldown", default=0.0),
-            mana_cost=param(p, "manacost", "ManaCost", default=0.0),
-            effect=eff, params=p, priority=2 + prio,
-        ))
+        act = active_action(cs, p, agent.spec, priority=2 + prio)
+        if act is not None:
+            extra.append(act)
     return extra
+
+
+def active_action(cs: str, p: dict, spec, priority: int):
+    """An active skill as an Action driven by the generic NC-Skill tree: a
+    unit's Skills.json entry, or an active mutation's row (which spells the
+    mana cost `manaCost`). None when no generic effect covers it."""
+    from .actions import Action
+    h = handler_for(cs)
+    builder = EFFECT_BUILDERS.get(h.effect)
+    if builder is None:
+        return None
+    eff = builder(p, cs) if h.effect == "status" else builder(p)
+    rng = param(p, "range", "Range", default=0.0) or spec.range_world
+    return Action(
+        name=cs, tree_name="NC-Skill",
+        range_world=rng,
+        cooldown=param(p, "cooldown", "Cooldown", default=0.0),
+        mana_cost=param(p, "manacost", "ManaCost", "manaCost", default=0.0),
+        effect=eff, params=p, priority=priority,
+    )
 
 
 def run_death_effects(agent, battle) -> None:
