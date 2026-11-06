@@ -825,3 +825,38 @@ ticks, and the existing per-tick drift has that much longer to move a swing
 across a cooldown boundary. It is not sensitive to a one-off nudge -- neither
 engine flips when starting positions move by 1e-4, or when the push speed moves
 by 0.1% -- which is what made it look like logic rather than accumulation.
+
+### The escalation, in both engines (2026-11-06)
+
+`C_Fight`'s escalation replaced the 120 s draw (see `notes/reference-sim.md`).
+The core takes a `final_boss` flag after `max_seconds` in both entry points,
+`escalation_ticks` turns the schedule into tick counts as the oracle does, and
+the two statuses tick in the per-agent loop where `Battle.step` has them. A
+1v1 in which neither side can deal damage ends at tick 10500 in both engines.
+The heal's target rule (lowest health, `C_HealCSkill.GetMostDamagedTarget`)
+changed in the same session and moved nothing here.
+
+| | winners | tick err | damage err |
+|---|---|---|---|
+| before | 145/156 outright, 5 draw-edge, 6 opposite | 13.82% | 10.92% |
+| after | 150/156 outright, 0 draw-edge, 6 opposite | 13.98% | 10.71% |
+
+Only the Samurai row moved (7/12 with 5 draw-edge, now 12/12); every other row
+of every section is identical to the run from `main`.
+
+### Block and AoeBurn (2026-11-06, later)
+
+TankWithBlock's charges travel in the action row's `count` and `status`
+(unused by a self buff), and AoeBurn is a new passive kind, `P_AOE_BURN` (22),
+with damage, radius and mana cost in `amount`, `radius` and `amount2`. Both
+mirror `Battle.hit`: the block after the dodges and evasions, the burst after
+the explosions.
+
+| | winners | tick err | damage err |
+|---|---|---|---|
+| before | 150/156 outright, 0 draw-edge, 6 opposite | 13.98% | 10.71% |
+| after | 150/156 outright, 0 draw-edge, 6 opposite | 13.04% | 10.45% |
+
+Only the AoeRanger row moved (12/12 throughout; tick error 18.21% to 5.93%,
+damage error 14.01% to 10.65%): casting the burn in place of the attack was
+itself a source of drift between the engines.

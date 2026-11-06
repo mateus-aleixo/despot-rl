@@ -2496,8 +2496,11 @@ and read it against the 3.946 heuristic. Then the questions worth asking:
 - **Quest rooms and the level-entry dialog.** `M_Dialog` carries choices,
   branching outcomes, events and unlocks, and `Quests.json` ships eleven
   quests. None of it is modelled, and a dialog fires on every level change.
-- **`C_Fight`'s escalation.** 120s starts a damage bonus over time and 180s a
-  dying DoT; `max_fight_seconds = 120` is that number with the wrong meaning.
+- ~~**`C_Fight`'s escalation.**~~ **Done, 2026-11-06** (`notes/reference-sim.md`).
+  120s starts a damage bonus over time and 180s a dying DoT;
+  `max_fight_seconds = 120` was that number with the wrong meaning, and is a
+  600 s guard now. On the heuristic: +0.003 [+0.000, +0.005] over 2400 seeds
+  from 40000, 8 runs different.
 
 
 ### The first agent on the corrected environment loses to the heuristic

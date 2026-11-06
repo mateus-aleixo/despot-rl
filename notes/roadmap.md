@@ -237,7 +237,14 @@ fork sweep above. Both are in `notes/rl.md`.
 Nothing here moves `obs_dim`; all of it changes how fights resolve. Measured
 against Batch 1's baseline.
 
-- **The `C_Fight` escalation schedule.** `_MIDDLE_FIGHT_TIME = 120` starting a
+- ~~**The `C_Fight` escalation schedule.**~~ **Done, 2026-11-06**, in both
+  engines (`notes/reference-sim.md`, "`C_Fight`'s escalation"): BattleFury
+  from 120 s, DyingDot from 180 s, 1200 and 1320 against the final boss;
+  `max_fight_seconds` is a 600 s guard. `diff_core` 145/156 to 150/156, the
+  heuristic +0.003 [+0.000, +0.005]. The 8 s no-damage rule ends in
+  `C_Team.CheckDeath(force: true)`, which kills only a side whose every unit
+  is Unrendered, so it needs nothing in the sim. Not ported: `DELAY_SINGLE`
+  (0.5 s before a fight starts). The plan as it was: `_MIDDLE_FIGHT_TIME = 120` starting a
   `M_DamageBonusOverTimeStatus`, `_LONG_FIGHT_TIME = 180` starting a
   `M_DyingDotStatus`, `_LONG_TIME_WITHOUT_DAMAGE = 8`, the final-boss variants
   (1200 / 1320 / 12), and `DELAY_SINGLE` / `DELAY_KOH`. Our
@@ -248,14 +255,36 @@ against Batch 1's baseline.
   are implemented, which is what caps the shelf at +0.13 and therefore caps
   every mutation result in `notes/rl.md`. Start with the four level-2 quest
   rewards (218, 233, 306, 328): while they do nothing, the heuristic takes the
-  gold those quests offer instead.
+  gold those quests offer instead. **Started 2026-11-06** (`notes/reference-sim.md`,
+  "Batch 2 begins"): 328 CSTauntTime is done (+1 s on the Tank class skill's
+  duration). 218 CastSpeed and 233 CSRange are read and wait on two pieces of
+  the battle layer below, spawn times and the heal's walk. 306 ClassSkill
+  (Novicator, a MegaNovice that absorbs Novices) is next.
+- **Summon spawn times.** A summon acts from its first tick in both engines,
+  where the game plays its `spawn` clip first (`M_Unit.animEndTime`), at the
+  group's `castSpeed`. Needs the clip lengths from the unit animation bundle.
+  CastSpeed (218) is a multiplier on it.
+- **The heal walks to its ally.** The Medic's heal targets the lowest-health
+  damaged ally (ported 2026-11-06) within the class skill's range, 24 world
+  units or 80 with CSRange (233), and the tree walks the Medic there. Both
+  engines still gate it on the enemy target at the attack range.
 - **An audit of the 79 that do have handlers.** Three read the wrong key and did
   nothing while counting as implemented (`vampirism` reading `percent` where the
   rows say `value`, then `ExplodeProjectile`, then `EventualKnockback`). There
-  is no reason to think the other 76 were ever checked.
+  is no reason to think the other 76 were ever checked. **First pass done
+  2026-11-06** with `tools/audit_mutations.py` (`notes/reference-sim.md`, "The
+  audit"): the eight active mutations were never applied, CooldownReduction
+  cut the default attack, and a row's `kind` was ignored; all three fixed.
+  Open: `stackBehaviour` ProlongDuration (350), the Fly knockback (338),
+  StatusEvasion's `clearNegative` (324), Animate's corpse rules (230).
 - **Class and unit skill coverage**, the same way: how much of `Meta.Classes`
   the sim can actually field, and which `ClassSkills` and `Skills` rows resolve
-  to a real effect rather than a no-op.
+  to a real effect rather than a no-op. **Started 2026-11-06** with
+  `tools/audit_skills.py`: TankWithBlock's Block, AoeBurn (a passive, not a
+  cast; heuristic -0.040) and SciCast (a no-op until then) ported to both
+  engines. Open, in order of reach: ClusterBombing (1 bomb of 15),
+  LeechSummon, HealChannel, Panic, Swoop, SkeletonHandToss; and whether
+  `C_ScientistCSGroup`'s grouping pools the Scientists' towers.
 
 **Boundary:** re-baseline, and re-run `tools/diff_core.py` to confirm the two
 engines still agree 60/60 with the escalation in.
@@ -311,6 +340,18 @@ PPO at 2M loses to the heuristic by 0.6 to 0.8 levels and was still improving
 from 1M to 2M, so the next agent sweep should run to 4M at least. **Start Batch
 2** with the mutations that have no handler, the four level-2 quest rewards
 first, then the `C_Fight` escalation schedule.
+
+2026-11-06, branch `batch2` (not committed): CSTauntTime done, the heal's
+target rule ported to both engines, CastSpeed and CSRange read and parked on
+spawn times and the heal's walk, and the `C_Fight` escalation done in both
+engines (see the Batch 2 list). The heuristic reads 3.350 over 2400 seeds
+from 40000, as at the boundary (+0.001 [-0.005, +0.007] paired). Next: 306's
+`C_AbsorbingSummonCSGroup`, then the audit's open items (see the Batch 2
+list). Also done that day: the active mutations applied, CooldownReduction's
+`skillType` and the mutation `kind` filter (`tools/audit_mutations.py`), and
+from `tools/audit_skills.py` the Block and AoeBurn. The heuristic reads 3.308
+over 2400 seeds from 40000 after them (-0.042 [-0.057, -0.027] against the
+boundary's 3.350, nearly all of it AoeBurn).
 
 The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
 **stopped part-way and its checkpoints deleted** on 2026-09-02. Re-run it if

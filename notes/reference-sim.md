@@ -2731,3 +2731,232 @@ row, since that tool gives mutations to the squad only; the 1v1 check puts
 Sustain on the side being pushed instead. On the heuristic, against not:
 -0.000 [-0.003, +0.002] over 2400 seeds from 40000, 113 runs ending with it.
 
+
+## Batch 2 begins: the four level-2 quest rewards, read (2026-11-06)
+
+All four are `C_CSBaseMutation` subclasses: each changes a class-skill group
+(`M_CSGroup`) of its class, not a unit.
+
+**CSTauntTime** (328: value 1, percentage false; the Cube quest). Implemented.
+`C_CSTauntTimeMutation.Handle(M_TankCSGroup)` remembers the group and, once its
+level is not negative (three Tanks in Default), sets `duration` to
+`duration + value`, or `duration + value * duration * 0.01` with `percentage`
+(the 0.01 is the float at 0x1828f5fe8). The sim's Tank class skill is its timed
+armour and speed buff, so it lasts 4 s on level 1 where it lasted 3. Both
+engines read the action's own `duration`, so the core needed nothing; each Tank
+gets a copy of the params, which the squad's Tanks otherwise share.
+`tools/validate_sim.py` checks 3 to 4 s, 4.5 s at +50%, the shared params left
+alone, and that it changes the fight (5 of 5). The heuristic never holds it,
+since it passes quests, so it measures nothing on the baseline.
+
+**CastSpeed** (218: groupCast, percentage, value 300; the Sci quest). Read, not
+implemented. `SetupCsGroup` adds `Modify` as a composite on
+`M_BaseCSGroup.castSpeed`: `max(0, speed * (1 + value / 100))`, or
+`max(0, speed + value)` without `percentage`, so 300% makes it four times the
+default 1. Exactly two places read `castSpeed`: `C_ScientistCSGroup.
+ResumeSummoning` and the `C_SummonCSGroup.Summon` coroutine. Both play the
+summoned unit's `spawn` clip through `V_UnitAnimator.Play` at that speed and
+set `M_Unit.animEndTime` (0xA8) to the fight time plus the clip's length.
+So it makes the Scientist's tower finish its spawn four times sooner, and
+nothing else. The sim has no spawn time at all: `IsSpawning` is in the base
+tree, but nothing sets `Agent.spawning`, and a summon acts from its first tick
+in both engines. CastSpeed waits on spawn times for summons, whose clip
+lengths sit in the unit animation bundle that has not been ripped
+(`assumptions.spawn_anim_s` is 0.5 and unused for summons).
+
+**CSRange** (233: range 80; the Rat quest, Medic, "RemoteHeal"). Read, not
+implemented. `C_CSRangeMutation.SetupCsGroup` stores the group's old range and
+**sets** it to `range`, so it does not add. `C_HealCSkill.Init` gives the
+Medic's group a range of 24 when it is 0 (the float at 0x1828f67cc), so the heal
+reaches 24 world units (4 tiles) and 80 with the mutation, against the Medic's
+attack range of 18. The heal's range is measured to the ally being healed: the
+action's `targets` are the caster's side and the tree walks the Medic towards
+the chosen one. The sim gates the heal on the enemy target at the attack range,
+so a range for the heal has nothing to act on until the heal walks to its
+ally, in both engines.
+
+**The heal's target, implemented on the way.** `C_HealCSkill.
+GetMostDamagedTarget` starts from float.MaxValue and keeps the unit with
+strictly lower `health` among the `targets` that `CanBeTargeted` (vtable slot
+72) accepts: no `CantBeAffected` trait (Dead, Hidden, DeSpawning, Unrendered,
+0x2409), health above 0, and health below `totalMaxHealth` unless the skill can
+overheal. That is the lowest health, first of equals, where both engines took
+the most health missing; a unit at 60 of 100 is now healed before one at 500
+of 1000. Ported to `effect_heal` and to the core's `SCOPE_TEAM` heal (the unit
+skills' radius heals keep their rule, which has not been read). Checked in
+`tools/validate_sim.py`; `tools/diff_core.py` is unchanged at 145/156 outright,
+5 draw-edge, 6 opposite, 13.82% tick and 10.92% damage error. On the
+heuristic: -0.002 [-0.008, +0.004] over 2400 seeds from 40000, 34 runs
+different.
+
+**ClassSkill** (306: `Novicator` in the `AbsorbingSummon` group; the Pit).
+Not started. `ClassSkills.json` has Novicator at level 1 for one Novice:
+manacost 0, cooldown 100, summons a level-1 `MegaNovice`. The group name says
+the summon absorbs the Novices, which needs `C_AbsorbingSummonCSGroup` read.
+
+## `C_Fight`'s escalation, implemented (2026-11-06)
+
+The game has no fight timeout. `C_Fight._Fight` runs `SimulationStep` and then
+compares the fight's time with three numbers it sets from the room's type:
+`_MIDDLE_FIGHT_TIME` 120 s, `_LONG_FIGHT_TIME` 180 s and
+`_LONG_TIME_WITHOUT_DAMAGE` 8 s, or 1200, 1320 and 12 in the final boss room.
+
+* **From 120 s**, `TeamExtensions.SubscribeUnits` runs `EnhanceUnit` on every
+  unit of both sides and on every unit that joins later. It applies
+  "BattleFury", an `M_DamageBonusOverTimeStatus` with tickTimer 2, percentage
+  and value 10 that never ends. `C_DamageBonusOverTimeStatus.Tick` sets
+  `damageMult` to `damageMult * (1 + value / 100)`, so 1.1 at 122 s, 1.21 at
+  124 s and 1.1^30 (17.4) at 180 s. `damageMult` is read by
+  `C_DefaultAttack.CreateDamage` (`(damage + bonusDamage) * damageMult`, then
+  `critMult`) and by Devour, Punisher and Toss, so class skills such as the
+  Mage's are not multiplied.
+* **From 180 s**, `ExhaustUnit` applies an `M_DyingDotStatus` with tickTimer 3,
+  percentage and damage 10: each tick deals `totalMaxHealth * 10 / 100` as the
+  status's default damageType, 2 (Magical, the `[DefaultValue]` generator of
+  `M_DamageOverTimeStatus.damageType`), with no source.
+* A status's first tick comes one tickTimer after it is applied:
+  `ApplyStatus` sets timeRemaining to tickTimer, and `OnTimer` ticks and adds
+  tickTimer whenever it runs out.
+* **8 s without damage** (`time - M_Damage.lastDamageTime`): the first time,
+  the game logs an error ("C_Fight::_Fight" with the location and the
+  mutations) and moves the clock back by half, 4 s; the next time, it calls
+  `C_Team.CheckDeath(force: true)` on both sides. `CheckDeath` counts each
+  side's units by trait (Corpse, Dead or DeSpawning, Temporary, Unrendered),
+  and `force` acts only when every unit of the side is Unrendered (bit 13):
+  it sets their health to 0 and adds Hidden. The sim has no Unrendered
+  state, so a stalemate runs on into DyingDot in the game as it does here,
+  and the rule needs nothing.
+
+In the sim, `Battle.escalate` runs at the end of each step and the statuses
+tick in `Battle.step` beside the other timed effects, on tick counts
+(`escalation_ticks`: 6000, 9000, every 100 and every 150 at 50 Hz), so both
+engines fire on the same tick. `max_fight_seconds` went from 120 to 600 and
+is a guard now; the run passes `final_boss` for a boss room on the last level.
+DyingDot's damage skips dodges, evasions and the spirit link
+(`dying_dot_skips_avoidance`). Checked in `tools/validate_sim.py`: the
+schedule, the multiplier and the first DyingDot to the tick, and a 1v1 where
+neither side can deal damage, which ends at 210 s on DyingDot alone, in both
+engines, on the same tick.
+
+What it is worth: fights that drew at 120 s now end. In `tools/diff_core.py`
+the five Samurai fights that sat on the draw edge are decided and agree
+(145/156 to 150/156 outright, 0 draw-edge, 6 opposite, unchanged; every other
+row as before). On the heuristic, +0.003 [+0.000, +0.005] over 2400 seeds from
+40000, 8 runs different: its fights rarely last two minutes.
+
+## The audit of the implemented mutations, first pass (2026-11-06)
+
+`tools/audit_mutations.py` runs each of the 95 implemented rows (PASSIVE or
+ACTIVE) of the Default ruleset down a fight's whole path with its parameters in
+a dict that records every key looked up, and prints the parameters nothing
+read. The first run flagged 82 rows; most were lookups of other spellings. What
+it found:
+
+* **The eight active mutations did nothing.** Stun (208), ManaBurn (220),
+  Animate (230), Venom (257), Juggernaut (304), ShiftingEffect (307),
+  StatBonusCast (323) and Panic (5) counted as implemented
+  (`out["implemented"]` takes ACTIVE), but `apply_to_specs` and
+  `apply_to_agents` both skipped anything not PASSIVE, so no unit ever got the
+  skill. `apply_to_agents` now gives each covered unit the skill as an action
+  with the row's own numbers, through `unit_skills.active_action`, the same
+  path a unit's Skills.json entry takes (the rows spell the mana cost
+  `manaCost`). Stun, ManaBurn, Venom, StatBonusCast and ShiftingEffect are
+  cast and agree with the core exactly at 1v1 (`tools/validate_sim.py`).
+  Juggernaut is `M_ContinuousAttackSkill`, repeated attacks with no damage of
+  its own, which the generic direct effect cannot express, so it is left out
+  instead of cast as a no-op that spends mana. Animate's summon level is
+  spelled `summonLevel`, now read in both engines.
+* **CooldownReduction (214) cut the default attack too.** The row's
+  `skillType` is `Skill`, which in the `SkillType` flags is ClassSkill |
+  ActiveSkill | PassiveSkill (14) and leaves out Attack (1);
+  `C_CooldownReductionSkill.Modify` is max(0, cooldown * (1 - value/100)), or
+  cooldown - value without `percentage`. The handler applied it to every
+  action, which gave every unit 11% more attack speed.
+* **A mutation's `kind` was ignored.** `C_Mutation.IsApplicable` requires
+  `(mutation.kind & unit.kind) == mutation.kind` on top of the class (`Kinds`:
+  Melee 1, Range 2, Summon 4, Human 8, TeamMember 64). StatBonus 294 (+10%
+  damage) is Melee-only and reached ranged units; 283 and 298 (+20% speed) are
+  TeamMember, every unit the squad fields. `kind_applies`.
+
+Read and needing nothing: `VisibleSkill` (UI); StatBonus `mechanic`
+(`M_StatBonusMutation.get_mechanic` has no caller, and the status copy's is
+read only by `Qualify`, for purges); Venom's `duration` and `tickDelay`
+(`DotStatusExtensions.Setup` splits `damage` over round(duration / tickDelay)
+ticks, so 350 is the total, which the sim deals at once); ManaBurn's
+`percentage` false (the amount is flat, as read); ClassDiversity 365 counts
+Novices, which no item makes.
+
+Still open, each a mechanic the sim does not have: `stackBehaviour`
+`ProlongDuration` (350's armour on cast prolongs one status where the sim
+stacks another), EventualKnockback's `knockbackType` `Fly` (338; the sim
+pushes), StatusEvasion's `clearNegative` (324), Animate's corpse rules
+(`animateRadius`, `pushAway`).
+
+On the heuristic, paired over 2400 seeds from 40000: the actives -0.003
+[-0.007, +0.002], CooldownReduction -0.001 [-0.002, +0.001], `kind` +0.000
+(no run differs). It holds few of these. `tools/diff_core.py` unchanged.
+
+## The unit skills, audited the same way (2026-11-06)
+
+`tools/audit_skills.py` does for the Skills.json rows that units carry what
+`tools/audit_mutations.py` does for the mutations: each carrier fights a small
+squad in the oracle with every skill's parameters recording their reads (rows
+with identical parameters, such as 45 and 124, share the reads). 37 rows are
+left to look at, most of them UI or animation fields (`visible`,
+`showOnEvent`, `animationName`, `InteractionPoint`). Two were ported:
+
+* **TankWithBlock's Block** (DeathKnight, in 6 packs). `C_TankWithBlockSkill.
+  Interact` runs the Tank buff and then gives the caster a "Block" status with
+  `blockLeft` = `blockAmount` (15) charges against `blockDamageType`
+  (Physical), with no time limit (`GetInfiniteProgress`). `C_BlockStatus.
+  OnDamage` takes a damage that is not cancelled, is above 0, and whose every
+  type bit is in the block's type (`(type & block) == type`, so splash, which
+  is Physical | Secondary, and magic go through), uses a charge, and sets the
+  damage's type to Empty; at 0 charges the status removes itself. Both
+  engines now void such hits (`Battle.hit`, after the dodges and evasions;
+  the core gets the charges and mask in the action row's unused `count` and
+  `status`). A recast sets the charges again; how the game stacks a second
+  Block status is not read. No heuristic run meets a DeathKnight (0 of 2400
+  differ).
+* **AoeBurn** (AoeRanger, WheelMan) is a passive, where the sim cast it as an
+  active instead of attacking. `C_AoeBurnSkill.Init` subscribes
+  `OnDamageCreated`, which adds an addon to every damage the unit creates; on
+  impact the addon spawns a flame burst whose `BurnAround` checks the mana
+  (`mana - [0x8c] >= manaCost`; the subtracted field is not identified and is
+  taken as 0), gives every enemy within `Radius` of the hit an
+  `M_BurningStatus` (tickTimer `Duration / Ticks`, damage per tick
+  `Damage / Ticks`, so `Damage` in all, Magical by the status default), then
+  spends `ManaCost` once. Both engines now burst on each of the unit's own
+  Physical, non-Secondary hits (`P_AOE_BURN` in the core) and deal the total
+  at once, as Venom's is dealt. `tools/diff_core.py`: AoeRanger still 12/12,
+  its tick error 18.21% to 5.93% and damage error 14.01% to 10.65%; the
+  headline 13.98% to 13.04% and 10.71% to 10.45%. On the heuristic: **-0.040
+  [-0.053, -0.026]** over 2400 seeds from 40000, 187 runs different: an
+  AoeRanger now attacks and burns.
+
+* **SciCast** (the SciTower's skill) was a self buff with no stat, a cast that
+  did nothing. `C_SciCastSkill.ReadyToAct` draws the cast type from the
+  global generator, Buff (0) when the draw is under 0.5 and Debuff (1)
+  otherwise, and a stat with `RND.Element` from the array `..cctor` builds,
+  {Armor, Damage, AttackSpeed} in that order; `ConstructStatus` makes a
+  "SciCast" `M_StatBonusStatus` of the row's `<Stat>Buff`, or minus its
+  `<Stat>Debuff`, with `percentage` set true for every stat; and
+  `AddStatusesToUnits` puts it on every unit of the caster's side (Buff) or
+  the enemy side (Debuff) for `Duration`. Row 10: Damage 10%, Armor 20%,
+  AttackSpeed 10% either way, 10 s, every 25 s for 10 mana. Both engines now
+  do this (`make_sci_cast`, `K_SCI_CAST` = 12 in the core, the six values in
+  the action row's damage, amount, armor_pct, armor_flat, as_pct and
+  speed_flat), drawing from the fight's generator at the cast: the game draws
+  each time the skill is checked, which changes nothing about the odds.
+  Three Scientists against one Mancrack agree in both engines to the damage
+  (8 of 8, towers included); against six they drift apart the way every
+  4v6 fight in `tools/diff_core.py` does (7 of 8 winners with the old no-op,
+  6 of 8 now), so the port is checked on the effect itself and on the
+  packed row. No heuristic run fields a tower (0 of 2400 differ). Each
+  Scientist summons a tower of its own here; `C_ScientistCSGroup` has a
+  grouping strategy that may pool them, not yet read.
+
+Read and left open: ClusterBombing (CannedDude) drops one 10-damage bomb where the row says 15
+over 3 s within `totalAttackRadius`; LeechSummon's DoT; HealChannel's channel;
+Panic's `speedBonus` and radii; Swoop's `speedMult`; SkeletonHandToss's
+targets. Each is a mechanic of its own, for Batch 2's skill coverage item.
