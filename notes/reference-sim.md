@@ -3152,3 +3152,55 @@ orange tab, and pause, fast-forward and FIGHT on the right, lit while a fight
 plays. Shapes stand in for the sprites, since the repository ships no game art.
 The demo is re-rendered with it (same run, same 14 s window); the GIF is
 1.07 MB.
+
+## Checked against a recorded run (2026-11-22)
+
+A 90-minute recording of the game, on the Sprint chip (`Chips.shortpvp`, Default
+mode) with the Cosplay squad: eight runs, the last reaching level 8. Read by eye
+on frames, and the top bar (gold, humans, food) by a digit reader once a second:
+5,431 frames, 469 states held for 2 s or more.
+
+What matches:
+
+* The start: 10 gold, 40 food and six moves before hunger (`Game.Gold`,
+  `Game.Food` under shortpvp), and Squad5 "Cosplay" is plague-mask and
+  chainsaw, the two humans every run in the recording starts with.
+* A move costs one food per human (the game's tooltip says the same): 92 food
+  drops equal the squad size, and most of the 35 others are two or more moves
+  inside the reader's 2 s window.
+* The Fitness dialog, text and three options, as `tools/show_dialog.py Fitness`
+  prints them.
+* Mana Regeneration in the mutation grid, "Restores 1 mana every 0.5s" for 20,
+  as `MutationGrid.json` [2, 1] has it.
+* The item shop: upgrade 3 at level 1, and 7 items plus a human for 2 at level
+  5 (`ItemShopData`, `HumanCost`); food packs at 2, 3 and 9 gold.
+* `M_Room.goldReward` and the team's gold are floats in the game as here.
+* UnderFeed's `Modify` is the sim's formula (`needed * (1 - value / 100)`,
+  `Math.Round`, at least 1, one step), and its `slowValue` is the fight slow
+  ("Living on Scraps ... move {slowValue}% slower in a fight"), which the sim
+  applies.
+
+The account's meta-progression is in the footage. The mutation grid
+(`MutationGrid.json`, bought between runs; a node shows its next level's price)
+has these owned: ItemDiscount (SALE items at 50%), CheapReroll (reroll cost -1:
+the game's REROLL 1 against the sim's 2 at shop level 1), RoomCount level 1 (a
+room and a reroll shrine more per level), StatBonus Mana +40, MagicBonus level 2,
+AttackSpeed +20%, Health +50%, Armor +10 (the "+ 10" on the unit panels) and
+DamageSummon +20%. The sim plays an account with none of them, though with all
+eight squads, which take unlocks. So shop prices, room counts and unit stats in
+the footage differ from the sim by these perks, and which account the sim should
+play is an open choice.
+
+Not settled:
+
+* In two runs food drops by less than the squad (9, then 13, with 18 humans; 23
+  with 33), more than UnderFeed's 20% alone accounts for. The held mutations
+  and the team's make-up at those moves were not read.
+* The mutation shop shows "REROLLS: 3" in one run and "REROLLS: 5" in another,
+  where the sim gives 2 per shop (`C_Room..ctor`). Whether the counter is a pool
+  fed by reroll shrines and the grid's always-on `SimpleMutations`
+  (AdditionalRerolls 1, GetItemBack 75%) was not read.
+* GetItemBack (`C_GetItemBackMutation`, 75%, in that always-on list) hooks a
+  unit's death and, on a pseudo-random roll, gives its item back. The game keeps
+  items in a stash; the sim hands a bought item straight to a human and loses a
+  dead human's item.
