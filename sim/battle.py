@@ -271,6 +271,8 @@ class Agent:
     # splits back; the MegaNovice holds the units it absorbed.
     absorbed: bool = False
     absorbing: list = field(default_factory=list)
+    # A MegaNovice that split back at the end of the fight: gone, not dead.
+    unsummoned: bool = False
 
     @property
     def alive(self) -> bool:
@@ -941,6 +943,27 @@ class Battle:
         new.absorbing = members
         self.agents.append(new)
 
+    def summon_partners(self, ag: Agent, act) -> list[Agent]:
+        """A grouped cast's partners (`SimpleStrategy(summonersCount)`): the
+        other living units of the side holding the same skill and ready to
+        cast it (off cooldown, mana for it, not stunned, silenced or panicked),
+        in unit order, at most `group - 1`. `CreateSubgroups` chunks the ready
+        units in list order, and the units tick in that order, so the caster
+        and the next ready ones make the same subgroups."""
+        out: list[Agent] = []
+        for o in self.agents:
+            if o is ag or o.team != ag.team or not o.alive:
+                continue
+            if o.has("stun") or o.has("silence") or o.has("panic"):
+                continue
+            mine = next((x for x in o.actions if x.name == act.name), None)
+            if mine is None or mine.cooldown_left > 0.0 or o.mana < mine.mana_cost:
+                continue
+            out.append(o)
+            if len(out) >= act.group - 1:
+                break
+        return out
+
     def break_apart(self) -> None:
         """`EnemyTeamDying` -> `BreakApart` -> `Unsummon` -> `OnSummonDeclined`:
         when the fight ends with a MegaNovice standing, it splits back into the
@@ -951,12 +974,24 @@ class Battle:
             if not ag.absorbing or not ag.alive:
                 continue
             share = max(1.0, ag.hp / len(ag.absorbing))
-            for o in ag.absorbing:
+            for k, o in enumerate(ag.absorbing):
                 o.absorbed = False
                 o.hp = min(share, o.max_hp)
+                o.x, o.y = self._around(ag, k, len(ag.absorbing))
             ag.absorbing = []
             ag.corpse = True
+            ag.unsummoned = True
             ag.death_handled = True
+
+    def _around(self, centre: Agent, k: int, n: int) -> tuple[float, float]:
+        """Where the k-th of n absorbed units comes out: on a ring of the
+        MegaNovice's radius around it. `Unsummon` and `OnSummonDying` put each
+        unit's view at a random offset around the summon with Unity's own
+        generator, which no fight number depends on; an even ring keeps the
+        fight's generator untouched in both engines."""
+        a = 2.0 * math.pi * k / max(1, n)
+        r = centre.spec.radius
+        return self.grid.clamp_world(centre.x + r * math.cos(a), centre.y + r * math.sin(a))
 
     def _process_deaths(self) -> None:
         """Fire on-death skills once per unit, then the on-death passives.
@@ -980,9 +1015,10 @@ class Battle:
                     continue
                 ag.death_handled = True
                 if ag.absorbing:
-                    for o in ag.absorbing:
+                    for k, o in enumerate(ag.absorbing):
                         o.absorbed = False
                         o.hp = 0.0
+                        o.x, o.y = self._around(ag, k, len(ag.absorbing))
                     ag.absorbing = []
                     again = True
                 if ag.on_death:
@@ -1045,16 +1081,13 @@ def apply_class_skills(tables: dict, agents: list[Agent],
                        mutations: list[dict] | None = None) -> dict[str, dict]:
     """Resolve and attach class skills for one side, by its composition.
 
-    A held `ClassSkill` mutation gives its class the named class skill
-    (`sim.mutations.granted_class_skills`)."""
+    A held `ClassSkill` mutation gives every unit of its class one more class
+    skill, after its own (`sim.mutations.granted_class_skills`,
+    `build_granted_action`)."""
     counts: dict[str, int] = {}
     for ag in agents:
         counts[ag.spec.cls] = counts.get(ag.spec.cls, 0) + 1
-    granted = None
-    if mutations:
-        from .mutations import granted_class_skills
-        granted = granted_class_skills(mutations, sorted(counts))
-    resolved = resolve_class_skills(tables, counts, granted)
+    resolved = resolve_class_skills(tables, counts)
 
     for ag in agents:
         skill = resolved.get(ag.spec.cls)
@@ -1076,6 +1109,17 @@ def apply_class_skills(tables: dict, agents: list[Agent],
         # side. percentage=true, so `value` is a percent of attack speed.
         for ag in agents:
             ag.attack_speed_pct = float(aura["params"].get("value") or 0)
+
+    if mutations:
+        from .actions import build_granted_action
+        from .mutations import granted_class_skills
+        granted = granted_class_skills(mutations, sorted(counts))
+        if granted:
+            extra = resolve_class_skills(tables, counts, granted)
+            for ag in agents:
+                skill = extra.get(ag.spec.cls)
+                if skill is not None:
+                    ag.actions.append(build_granted_action(skill))
     return resolved
 
 

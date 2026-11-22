@@ -31,7 +31,7 @@ PASSIVE_STRIDE = 21
 # Action kinds, matching core/src/lib.rs
 (K_ATTACK, K_DIRECT, K_AOE, K_HEAL, K_DRAIN, K_MANABURN,
  K_BUFF_SELF, K_DEBUFF_AROUND, K_SUMMON, K_SPIRIT_LINK,
- K_STATUS, K_BLINK, K_SCI_CAST, K_ABSORB) = range(14)
+ K_STATUS, K_BLINK, K_SCI_CAST, K_ABSORB, K_SUMMON_GROUP) = range(15)
 SCOPE_TEAM, SCOPE_SELF, SCOPE_RADIUS = range(3)
 
 # Control statuses, as indices into the core's `Agent::statuses`.
@@ -555,6 +555,17 @@ def action_rows(a, i: int, templates: "_Templates") -> list[tuple]:
             template = templates.get(cls, lvl, meta_size=True)
             if template < 0:
                 raise Unrepresentable(f"{a.spec.name}'s {act.name} has no {cls} template")
+        elif act.group > 1 or act.name in ("CatBot", "Fish"):
+            # SummonSimple: one summon per subgroup of `group` units, the group
+            # size in `amount` (`Battle.summon_partners`).
+            kind = K_SUMMON_GROUP
+            cls = str(act.params.get("summonClass") or "")
+            lvl = int(_num(act.params, "unit level", default=1) or 1)
+            template = templates.get(cls, lvl)
+            if template < 0:
+                raise Unrepresentable(f"{a.spec.name}'s {act.name} has no {cls} template")
+            amount = float(act.group)
+            count = 1
         else:
             h = REGISTRY.get(act.name)
             eff = h.effect if h else ""

@@ -24,12 +24,16 @@ from .assumptions import DEFAULT, TILE
 PASSIVE_SKILLS = {"CriticalStrike", "ASAura", "Dodge"}
 
 # Class skills that target the caster, so they need no approach.
-SELF_CAST = {"Tank", "Cultist", "Scientist", "SpiritLink", "Novicator"}
+SELF_CAST = {"Tank", "Cultist", "Scientist", "SpiritLink", "Novicator", "CatBot", "Fish"}
 
 # Class skills a `ClassSkill` mutation grants, as (classSkillName, csGroupName)
-# pairs the sim can run. Mutation 306 (the Pit's reward) gives the Novice the
-# `Novicator` in the `AbsorbingSummon` group; nothing else ships the name.
-GRANTED_CLASS_SKILLS = {("Novicator", "AbsorbingSummon")}
+# pairs the sim can run. `C_ClassSkillMutation.OnInserted` gives every unit of
+# the class one more action, in a CS group of its own, so the class keeps its
+# own skill. 306 (the Pit's reward) gives the Novice `Novicator`
+# (AbsorbingSummon); 363 the Monk `CatBot` and 364 the Thrower `Fish`, both
+# SummonSimple. 320, 360, 361 and 362 are SummonSimple too and stay off.
+GRANTED_CLASS_SKILLS = {("Novicator", "AbsorbingSummon"),
+                        ("CatBot", "SummonSimple"), ("Fish", "SummonSimple")}
 
 # A mutation-granted self buff also needs no approach.
 SELF_CAST_PREFIX = "Mutation:"
@@ -50,6 +54,10 @@ class Action:
     effect: Callable[["Action", Any, Any], None] | None = None
     params: dict = field(default_factory=dict)
     priority: int = 0
+    # Units the cast needs (`SimpleStrategy(summonersCount)`): above 1, the
+    # caster casts only with that many minus one ready partners, and they pay
+    # with it (`Battle.summon_partners`).
+    group: int = 1
     # per-unit runtime state
     cooldown_left: float = 0.0
     anim_timer: float = 0.0
@@ -90,13 +98,15 @@ def resolve_class_skills(tables: dict, class_counts: dict[str, int],
     """`class -> {name, level, params}` for the squad's composition.
 
     The level is the highest ClassSkills row whose `HumansRequired` is met by
-    the number of humans of that class. `granted` maps a class to a class
-    skill a `ClassSkill` mutation gave it, which stands in for the class's own.
+    the number of humans of that class. With `granted` (class -> skill name,
+    from `ClassSkill` mutations) it resolves those skills instead of the
+    classes' own, by the same rule (`C_ClassSkillMutation.Init` reads the
+    group's `humansRequired`).
     """
     rows = class_skill_rows(tables)
     out: dict[str, dict] = {}
     for cls, count in class_counts.items():
-        name = (granted or {}).get(cls) or skill_for_class(tables, cls)
+        name = granted.get(cls) if granted is not None else skill_for_class(tables, cls)
         if not name or name not in rows:
             continue
         eligible = [r for r in rows[name] if r["HumansRequired"] <= count]
@@ -194,6 +204,28 @@ def effect_absorb(action, agent, battle):
     battle.absorb(agent, action)
 
 
+def effect_summon_group(action, agent, battle):
+    """SummonSimple (363's CatBot, 364's Fish): one summon of the row's
+    `summonClass` at its `unit level` for the subgroup that started the cast
+    (`Battle.summon_partners`)."""
+    battle.summon(agent, str(action.params.get("summonClass")),
+                  int(action.params.get("unit level") or 1))
+
+
+def build_granted_action(skill: dict) -> "Action":
+    """The action a `ClassSkill` mutation adds (`C_ClassSkillMutation.OnInserted`
+    -> `C_Unit.AddAction`), from its ClassSkills row: a class skill, so priority
+    1, listed after the class's own."""
+    name, params = skill["name"], skill["params"]
+    return Action(
+        name=name, tree_name="NC-Skill", range_world=0.0,
+        cooldown=float(params.get("cooldown") or 0),
+        mana_cost=float(params.get("manacost") or params.get("mana") or 0),
+        effect=EFFECTS[name], params=params, priority=1,
+        group=int(params.get("summonersCount") or 1),
+    )
+
+
 EFFECTS = {
     "attack": effect_attack,
     "Heal": effect_heal,
@@ -204,6 +236,8 @@ EFFECTS = {
     "Cultist": effect_summon,
     "Scientist": effect_summon,
     "Novicator": effect_absorb,
+    "CatBot": effect_summon_group,
+    "Fish": effect_summon_group,
 }
 
 

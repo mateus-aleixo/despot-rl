@@ -311,6 +311,48 @@ for enemy, n_nov, n_en in (("Novice", 5, 3), ("Novice", 5, 5), ("CatBot", 5, 1),
     print(f"    {label:26s} {f'{agree}/{n}':9s} {statistics.mean(tr)*100:7.2f}%  "
           f"{statistics.mean(herr):9.2f}     {wins}/{n}")
 
+# --------------------------------------------------------------------------
+# SummonSimple (363 Monk -> CatBot, 364 Thrower -> Fish): one summon per two
+# ready units. In contact, with the mana already in hand, so the measurement is
+# the grouping and the summon; a summon that has to walk drifts by a few ticks,
+# as the transforms above do.
+print("\n== differential: SummonSimple (363, 364), in contact ==")
+_SS = {363: ("Monk", "CatBotSummon", 10.0), 364: ("Thrower", "Fish", 50.0)}
+_ITEM_OF = {}
+for _it in t["Items"]:
+    _ITEM_OF.setdefault(_it["Class"], _it["Name"])
+
+
+def grouped(seed, mid, n):
+    cls, _, mana = _SS[mid]
+    t0 = place_at(DGRID, _bps(t, [(_ITEM_OF[cls], 1)] * n), CELLS[:n], team=0)
+    apply_class_skills(t, t0, [_for_class(MUT_BY_ID[mid], cls)])
+    for a in t0:
+        a.mana = mana
+    t1 = place_at(DGRID, [build_unit(ubc, "Mancrack", 1, name="Mancrack")], CELLS[:1], team=1)
+    t1[0].hp = 2000.0
+    return Battle(DGRID, t0 + t1, seed=seed, tables=t)
+
+
+print(f"  {'squad':16s} {'oracle summons':15s} {'winners':9s} {'tick-matched':13s} exact")
+for mid, n in ((363, 2), (363, 3), (363, 4), (364, 2), (364, 4)):
+    agree = exact = matched = 0
+    made = set()
+    for s in range(24):
+        b1 = grouped(s, mid, n)
+        py = b1.run()
+        made.add(sum(1 for a in b1.agents if a.spec.cls == _SS[mid][1]))
+        rs = fast_battle(DGRID, grouped(s, mid, n).agents, seed=s, tables=t)
+        agree += int(py.winner == rs["winner"])
+        if py.ticks != rs["ticks"]:
+            continue
+        matched += 1
+        exact += int(abs(py.total_damage[0] - rs["damage"][0]) < 0.5
+                     and abs(py.total_damage[1] - rs["damage"][1]) < 0.5)
+    label = f"{n} {_SS[mid][0]}s"
+    print(f"  {label:16s} {str(sorted(made)):15s} {f'{agree}/24':9s} {f'{matched}/24':13s} "
+          f"{exact}/{matched}")
+
 print("\n== speed ==")
 N = 40
 py_t0 = time.perf_counter()

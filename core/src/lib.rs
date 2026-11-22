@@ -67,6 +67,9 @@ const K_SCI_CAST: i32 = 12;
 /// Novicator, `C_AbsorbingSummonCSGroup` (mutation 306): the caster's side's
 /// units of its class merge into one summon (see `Sim::absorb`).
 const K_ABSORB: i32 = 13;
+/// SummonSimple (mutations 363, 364): one summon from `template` for a
+/// subgroup of `amount` units holding the skill (see `Sim::summon_partners`).
+const K_SUMMON_GROUP: i32 = 14;
 
 /// Heal scope: the class skill heals the whole team, unit heals use a radius.
 const SCOPE_TEAM: i32 = 0;
@@ -690,12 +693,16 @@ impl Sim {
                 self.agents[i].death_handled = true;
                 if !self.agents[i].absorbing.is_empty() {
                     let members = std::mem::take(&mut self.agents[i].absorbing);
-                    for j in members {
+                    let n = members.len();
+                    for (m, &j) in members.iter().enumerate() {
+                        let (x, y) = self.around(i, m, n);
                         let a = &mut self.agents[j];
                         a.absorbed = false;
                         a.stash_hp = 0.0;
                         a.hp = 0.0;
                         a.death_handled = false;
+                        a.x = x;
+                        a.y = y;
                     }
                     again = true;
                 }
@@ -1303,17 +1310,31 @@ impl Sim {
             }
             let members = std::mem::take(&mut self.agents[k].absorbing);
             let share = (self.agents[k].hp / members.len() as f32).max(1.0);
-            for &j in &members {
+            let n = members.len();
+            for (m, &j) in members.iter().enumerate() {
                 let cap = self.agents[j].max_hp();
+                let (x, y) = self.around(k, m, n);
                 let a = &mut self.agents[j];
                 a.absorbed = false;
                 a.death_handled = false;
                 a.stash_hp = 0.0;
                 a.hp = share.min(cap);
+                a.x = x;
+                a.y = y;
             }
             self.agents[k].hp = 0.0;
             self.agents[k].death_handled = true;
         }
+    }
+
+    /// Mirrors `Battle._around`: the m-th of n absorbed units comes out on a
+    /// ring of the MegaNovice's radius, with no draw from the fight's generator.
+    fn around(&self, k: usize, m: usize, n: usize) -> (f32, f32) {
+        let a = 2.0 * std::f64::consts::PI * m as f64 / n.max(1) as f64;
+        let r = self.agents[k].radius as f64;
+        let (cx, cy) = (self.agents[k].x as f64, self.agents[k].y as f64);
+        self.grid
+            .clamp_world((cx + r * a.cos()) as f32, (cy + r * a.sin()) as f32)
     }
 
     /// `C_Fight._Fight`: at the first step past each threshold, every living
@@ -1507,6 +1528,7 @@ impl Sim {
                 }
             }
             K_ABSORB => self.absorb(i, act.template),
+            K_SUMMON_GROUP => self.summon(i, act.template),
             K_MANABURN => {
                 let (ax, ay) = (self.agents[i].x, self.agents[i].y);
                 let r2 = act.radius * act.radius;
@@ -1676,10 +1698,14 @@ impl Sim {
                     }
 
                     // NC-Skill gates: mana, then cooldown, then range. Any
-                    // failure falls through to the next action.
+                    // failure falls through to the next action. A grouped cast
+                    // also needs its partners (`HasUnitsForSubgroup`).
                     if self.agents[i].mana >= act.mana_cost
                         && act.cooldown_left <= 0.0
                         && in_range
+                        && (act.kind != K_SUMMON_GROUP
+                            || self.summon_partners(i, ai).len() + 1
+                                >= (act.amount as usize).max(1))
                     {
                         self.start(i, ai);
                         return;
@@ -1697,6 +1723,53 @@ impl Sim {
         self.agents[i].actions[ai].cooldown_left = cd;
         let cost = self.agents[i].actions[ai].mana_cost;
         self.agents[i].mana -= cost;
+        // A grouped cast's subgroup starts together: each partner pays its
+        // mana and starts its cooldown with the caster.
+        if self.agents[i].actions[ai].kind == K_SUMMON_GROUP {
+            for (j, aj) in self.summon_partners(i, ai) {
+                let pc = self.agents[j].actions[aj].cooldown;
+                self.agents[j].actions[aj].cooldown_left = pc;
+                let pm = self.agents[j].actions[aj].mana_cost;
+                self.agents[j].mana -= pm;
+            }
+        }
+    }
+
+    /// Mirrors `Battle.summon_partners`: the other living units of `i`'s side
+    /// holding the same grouped skill (kind and template) and ready to cast
+    /// it -- off cooldown, mana for it, not stunned, silenced or panicked --
+    /// in unit order, at most the group size minus one. Returns (unit, action).
+    fn summon_partners(&self, i: usize, ai: usize) -> Vec<(usize, usize)> {
+        let act = &self.agents[i].actions[ai];
+        let (team, template) = (self.agents[i].team, act.template);
+        let need = (act.amount as usize).max(1) - 1;
+        let mut out = Vec::new();
+        if need == 0 {
+            return out;
+        }
+        for j in 0..self.agents.len() {
+            let o = &self.agents[j];
+            if j == i || o.team != team || o.hp <= 0.0 {
+                continue;
+            }
+            if o.has(S_STUN) || o.has(S_SILENCE) || o.has(S_PANIC) {
+                continue;
+            }
+            let mine = o
+                .actions
+                .iter()
+                .position(|x| x.kind == K_SUMMON_GROUP && x.template == template);
+            if let Some(aj) = mine {
+                let x = &o.actions[aj];
+                if x.cooldown_left <= 0.0 && o.mana >= x.mana_cost {
+                    out.push((j, aj));
+                    if out.len() >= need {
+                        break;
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn preferred_velocity(&mut self, i: usize) -> (f32, f32) {

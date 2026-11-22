@@ -60,9 +60,10 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "ResurrectionChance": Handler(PASSIVE, note="chance to revive at healthValue"),
     "OraStatBonus": Handler(PASSIVE, note="stat bonus variant"),
     "CSLinkStatBonus": Handler(PASSIVE, note="targetClass allies buffed by the Monk cast"),
-    # 306 (the Pit): the Novice gets `Novicator`, attached by
-    # `battle.apply_class_skills` through `granted_class_skills`.
-    "ClassSkill": Handler(PASSIVE, note="grants a class skill: 306's Novicator"),
+    # 306 (the Pit): the Novice gets `Novicator`; 363 and 364 the Monk and the
+    # Thrower a SummonSimple skill. Added by `battle.apply_class_skills`
+    # through `granted_class_skills`; the other rows stay off (`handler_for_row`).
+    "ClassSkill": Handler(PASSIVE, note="adds a class skill: 306, 363, 364"),
     "ClassDiversity": Handler(PASSIVE, note="one unit gains stat x count(otherClass)"),
     "ClassDiversityMagicalDamage": Handler(PASSIVE, note="magical damage x count(otherClass)"),
     "SwapAttack": Handler(UNIMPLEMENTED, note="replaces the default attack"),
@@ -165,11 +166,11 @@ def handler_for(name: str) -> Handler:
 
 def handler_for_row(m: dict) -> Handler:
     """`handler_for`, per row: a `ClassSkill` row is implemented only when the
-    sim runs the class skill it grants (`sim.actions.GRANTED_CLASS_SKILLS`,
-    306's Novicator). The shop's ClassSkill rows (320, 357, 360-364: Dalek,
-    ShooterBombing, Samurai, DeathKnight, BladeMailer, CatBot and Fish
-    summons) and 300's SciTowerManaAura stay unimplemented, so coverage, the
-    audit and the policy's `implemented` bit do not count them."""
+    sim runs the class skill it grants (`sim.actions.GRANTED_CLASS_SKILLS`:
+    306's Novicator, 363's CatBot, 364's Fish). The other shop rows (320, 357,
+    360-362: Dalek, ShooterBombing, Samurai, DeathKnight and BladeMailer) and
+    300's SciTowerManaAura stay unimplemented, so coverage, the audit and the
+    policy's `implemented` bit do not count them."""
     h = handler_for(m["Name"])
     if m["Name"] == "ClassSkill":
         from .actions import GRANTED_CLASS_SKILLS
@@ -224,8 +225,9 @@ def by_id(tables: dict) -> dict[int, dict]:
 def granted_class_skills(mutations: list[dict], classes: list[str]) -> dict[str, str]:
     """`ClassSkill`: the class skill each held row gives the classes it
     covers, for the (classSkillName, csGroupName) pairs the sim can run
-    (`sim.actions.GRANTED_CLASS_SKILLS`). Of the nine ClassSkill rows only
-    306 (Novice, Novicator) is one; see `handler_for_row`."""
+    (`sim.actions.GRANTED_CLASS_SKILLS`). Of the nine ClassSkill rows, 306
+    (Novice, Novicator), 363 (Monk, CatBot) and 364 (Thrower, Fish) are;
+    see `handler_for_row`."""
     from .actions import GRANTED_CLASS_SKILLS
     out: dict[str, str] = {}
     for m in mutations:

@@ -1338,6 +1338,69 @@ _lost = _novice_fight(5, "Zombie", 2)[2].run()
 check("a lost fight leaves no Novice alive", _lost.winner == 1 and _lost.survivors[0] == 0,
       f"winner {_lost.winner}, survivors {_lost.survivors}")
 
+# ClassSkill 363 (Monk, CatBot) and 364 (Thrower, Fish), both SummonSimple:
+# `C_ClassSkillMutation.OnInserted` adds the action, so the class keeps its
+# own skill; `SimpleStrategy(summonersCount)` makes one summon per two units
+# that are ready together, each paying its mana and starting its cooldown.
+from sim.battle import place_at as _place_at
+_M363, _M364 = _for_class(_MBY[363], "Monk"), _for_class(_MBY[364], "Thrower")
+_CELLS = LAYOUT.zone("p")
+
+
+def _group_fight(mut, cls, n, mana, seed=0, seconds=1):
+    specs = build_player_squad(_STRICT, [(_item_for(cls), 1)] * n)
+    t0 = _place_at(GRID, specs, _CELLS[:n], team=0)
+    apply_class_skills(_STRICT, t0, [mut])
+    for a in t0:
+        a.mana = mana
+    t1 = _place_at(GRID, [build_unit(_UBC_S, "Mancrack", 1, name="Mancrack")], _CELLS[:1], team=1)
+    t1[0].hp = 5000.0
+    b = Battle(GRID, t0 + t1, seed=seed, tables=_STRICT)
+    for _ in range(int(A.tick_hz * seconds)):     # every first cast lands in a second
+        b.step()
+    return t0, b
+
+
+def _acts(t0, name):
+    return [(act.cooldown, act.mana_cost, act.group) for a in t0 for act in a.actions
+            if act.name == name]
+
+
+_t0m, _ = _group_fight(_M363, "Monk", 3, 0.0)
+_t0t, _ = _group_fight(_M364, "Thrower", 2, 0.0)
+check("363 adds CatBot to every Monk (22 s, 10 mana, two summoners) beside SpiritLink",
+      _acts(_t0m, "CatBot") == [(22, 10, 2)] * 3
+      and all(any(act.name == "SpiritLink" for act in a.actions) for a in _t0m),
+      f"{_acts(_t0m, 'CatBot')}")
+check("364 adds Fish to every Thrower (20 s, 40 mana, two summoners) beside Bomb",
+      _acts(_t0t, "Fish") == [(20, 40, 2)] * 2
+      and all(any(act.name == "Bomb" for act in a.actions) for a in _t0t),
+      f"{_acts(_t0t, 'Fish')}")
+_pairs = {n: sum(1 for a in _group_fight(_M363, "Monk", n, 10.0)[1].agents
+                 if a.spec.cls == "CatBotSummon") for n in (1, 2, 3, 4)}
+check("SummonSimple: one CatBotSummon per two ready Monks (1 -> 0, 2 -> 1, 3 -> 1, 4 -> 2)",
+      _pairs == {1: 0, 2: 1, 3: 1, 4: 2}, f"{_pairs}")
+_specs_p = build_player_squad(_STRICT, [(_item_for("Monk"), 1)] * 2)
+_t0p = _place_at(GRID, _specs_p, _CELLS[:2], team=0)
+apply_class_skills(_STRICT, _t0p, [_M363])
+for _a in _t0p:
+    _a.mana = 10.0
+_bp = Battle(GRID, _t0p + _place_at(GRID, [build_unit(_UBC_S, "Mancrack", 1, name="Mancrack")],
+                                     _CELLS[:1], team=1), seed=0, tables=_STRICT)
+_bp.step()                                   # the cast starts on the first tick
+check("the pair starts together: one cast, both Monks pay 10 mana and start the 22 s cooldown",
+      _bp.casts.get("CatBot") == 1 and all(a.mana == 0.0 for a in _t0p)
+      and all(next(act.cooldown_left for act in a.actions if act.name == "CatBot") > 21.9
+              for a in _t0p),
+      f"casts {_bp.casts.get('CatBot')}, mana {[a.mana for a in _t0p]}")
+# The added action sits after the class's own skill: with 50 mana each
+# Thrower throws its 10-mana Bomb first, and the pair summons with the 40 left
+# once the Bomb's animations are over.
+_fish = sum(1 for a in _group_fight(_M364, "Thrower", 2, 50.0, seconds=3)[1].agents
+            if a.spec.cls == "Fish")
+check("two Throwers summon one Fish after their Bombs, from the 40 mana left", _fish == 1,
+      f"{_fish}")
+
 # The Medic's class skill heals the lowest health, not the most missing
 # (`C_HealCSkill.GetMostDamagedTarget`, strict `<` from float.MaxValue over the
 # units `CanBeTargeted` accepts: alive and below their maximum). A unit at 60

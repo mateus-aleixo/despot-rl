@@ -117,7 +117,8 @@ class BTContext:
             if act is not None and act.name != "attack" and a.has("silence"):
                 return False        # silenced: skills gated, plain attacks are not
             if act is not None and act.is_self_cast:
-                return True
+                # A grouped cast also needs its partners (`HasUnitsForSubgroup`).
+                return act.group <= 1 or len(b.summon_partners(a, act)) >= act.group - 1
             t = a.target
             if t is None or not t.alive:
                 return False
@@ -210,6 +211,13 @@ class BTContext:
             act.cooldown_left = act.cooldown
             a.mana -= act.mana_cost
             b.casts[act.name] = b.casts.get(act.name, 0) + 1
+            if act.group > 1:
+                # The subgroup starts together: each partner pays its mana
+                # and starts its cooldown with the caster.
+                for o in b.summon_partners(a, act):
+                    mine = next(x for x in o.actions if x.name == act.name)
+                    mine.cooldown_left = mine.cooldown
+                    o.mana -= mine.mana_cost
             return Status.SUCCESS
 
         if name == "BT.DefaultAttack.AfterAttackAnimation":

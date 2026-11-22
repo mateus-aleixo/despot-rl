@@ -131,12 +131,18 @@ class RecordingBattle(Battle):
     def _snap(self) -> BattleTick:
         ags = []
         for ag in self.agents:
+            # The game draws neither a unit inside a MegaNovice (Unrendered)
+            # nor a MegaNovice that split back (unsummoned, not a corpse).
+            if ag.absorbed or ag.unsummoned:
+                continue
             if ag.corpse and ag.hp <= 0 and not ag.dying:
                 frac = 0.0
             else:
                 frac = max(0.0, min(1.0, ag.hp / max(1.0, ag.spec.health)))
+            # Two letters: Monk, MegaNovice and Mancrack, or Cultist and the
+            # CatBot a Monk summons, would otherwise share one.
             ags.append((ag.x, ag.y, ag.team, frac, ag.spec.radius,
-                        ag.spec.melee, ag.alive, (ag.spec.cls or "?")[:1]))
+                        ag.spec.melee, ag.alive, (ag.spec.cls or "?")[:2]))
         shots = [(p.x, p.y, p.team) for p in self.projectiles]
         return BattleTick(t=self.tick_count * self.dt, agents=ags, shots=shots)
 
