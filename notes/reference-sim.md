@@ -3005,8 +3005,13 @@ stashes its health, so every `hp > 0` test passes it over). The MegaNovice is
 built at its Meta Size, 2; other summons stay at Size 1 (`_Templates.get`'s
 `meta_size`). A fight that ends any other way with a MegaNovice standing
 splits it the same way, and a MegaNovice's death kills its Novices in the same
-death pass. `apply_class_skills` takes the held mutations so the Novice's
-class skill comes from the row (`granted_class_skills`).
+death pass. `apply_class_skills` takes the held mutations and adds the
+granted skill as one more action (`granted_class_skills`,
+`build_granted_action`; see the SummonSimple section for why it is added, not
+swapped). On a split or a death the Novices come out on a ring of the
+MegaNovice's radius around it (`Battle._around`, `Sim::around`): the game puts
+each view at a random offset around the summon with Unity's own generator,
+which no fight number depends on.
 
 306 is one of nine `ClassSkill` rows. The other eight stay unimplemented, and
 `handler_for_row` keeps them out of coverage, the audit and the policy's
@@ -3057,7 +3062,76 @@ to 12.51%, damage error 10.45% to 10.70%; the Samurai and Slower rows agree
 12/12.
 
 On the heuristic, both changes together against `8e1baa7`, paired over 2400
-seeds from 40000: default **-0.011 [-0.033, +0.011]** (3.308 to 3.297, 423 runs
-different), `quests="follow"` -0.014 [-0.036, +0.007] (3.269 to 3.255). The
-heuristic's runs end by level 6, so the Despot2 forms, which now hit, are
-never reached.
+seeds from 40000: default **-0.010 [-0.031, +0.012]** (3.308 to 3.298, 422 runs
+different), `quests="follow"` -0.013 [-0.035, +0.009] (3.269 to 3.257). (First
+recorded as 3.297 and 3.255 from a run made while every ClassSkill row still
+counted as implemented, which let the heuristic buy the unimplemented ones;
+re-measured on `47a2c7b`.) The heuristic's runs end by level 6, so the Despot2
+forms, which now hit, are never reached.
+
+## SummonSimple: 363 and 364, read and implemented (2026-11-22)
+
+363 (Monk) and 364 (Thrower) are `ClassSkill` rows in the `SummonSimple`
+group, offered from level 1 (`MutationsByLevel`). Their ClassSkills rows:
+CatBot, manacost 10, cooldown 22, unit level 1, summonClass CatBotSummon,
+summonersCount 2; Fish, 40, 20, 1, Fish, 2.
+
+* `C_ClassSkillMutation.Init` creates a new `M_<csGroupName>CSGroup` through
+  `Activator.CreateInstance`, names it after the class skill and sets its
+  class, kind, team and level from the group's `humansRequired`.
+  `OnInserted` gives each unit of the class an `M_<csGroupName>CSkill` action
+  with that group (`SetSkillParameters`, `AddSkillToUnit`, `C_Unit.AddAction`)
+  and `OnDeleted` takes it away. So the class keeps its own skill (the Monk its
+  SpiritLink, the Thrower its Bomb) and gains one more. 306 is added the same
+  way now; the Novice has no skill of its own, so nothing changes for it.
+* `C_SummonSimpleCSGroup<T>` derives from `C_ScientistCSGroup<T>`. `Activate`
+  takes `summonClass` and `summonersCount` from the level's lists;
+  `ProvideStrategy` builds `SimpleStrategy<SummonSubgroup>(summonersCount)`.
+  `SimpleStrategy.IsUnitInPlace` always says yes (no gathering), and
+  `CreateSubgroups` chunks the units that are ready, in list order, into groups
+  of `summonersCount`, full groups only. One summon per subgroup.
+
+Both engines (`Action.group`, `Battle.summon_partners`, the gate in
+`bt_leaves` and `StartExecution`; kind `K_SUMMON_GROUP` = 14 with the group
+size in `amount`, `Sim::summon_partners`, `Sim::start`): a unit casts only when
+`group - 1` other units of its side holding the skill are ready (off cooldown,
+mana for it, not stunned, silenced or panicked). When the cast starts, the
+first such units in list order pay their mana and start their cooldown with
+it, and the cast lands one summon. Units tick in list order, so the subgroups
+come out as `CreateSubgroups` makes them: 2 Monks make one CatBotSummon, 3 make
+one, 4 make two, a lone Monk none. A fight starts with no mana, so a pair of
+Monks summons once both hold 10, and a pair of Throwers once both hold 40 after
+their Bombs (the added action is tried after the class's own, at the same
+priority). Not modelled, as for every summon here: the channel and the spawn
+clip. The summons are CatBotSummon (500 health, 38 damage, armour 9, speed
+100, HipThrow) and Fish (300 health, no damage, armour 10, DamageOnDeath 100
+within 50). 320 (Dalek), 360 (Samurai), 361 (DeathKnight) and 362
+(BladeMailer) are the same group with other numbers and stay off
+(`GRANTED_CLASS_SKILLS`).
+
+Checked in `tools/validate_sim.py` (both actions added beside the class's own
+skill; 1, 2, 3 and 4 Monks make 0, 1, 1 and 2 summons; the pair starts
+together on one cast, both paying; two Throwers summon one Fish after their
+Bombs) and `tools/diff_core.py` ("SummonSimple (363, 364), in contact"): the
+oracle's counts are exact, winners agree 19 to 24 of 24, and three Monks
+tick-match 14 of 24. The rest drift by a few ticks because the summon spawns at
+a random offset and walks, as the transforms do; the same fights drift as much
+with the group forced to one unit, and without the mutation the walking fights
+already drift 7 to 45%.
+
+On the heuristic, paired against `47a2c7b` over 2400 seeds from 40000:
+-0.001 [-0.004, +0.000], 3.298 to 3.297, 4 runs different. Its mutation shops
+now see the two rows as implemented and take them when they cover the most of
+the squad; why so few runs change was not looked into.
+
+`tools/render_run.py` now draws what the game draws: no unit inside a
+MegaNovice (Unrendered) and no MegaNovice that split back (unsummoned, not a
+corpse); the Novices on the ring around it; summons as units; and two letters
+per unit, since Monk, MegaNovice and Mancrack, or Cultist and CatBotSummon,
+shared one. `docs/run.mp4` and `docs/run.gif` are re-rendered on this state:
+seed 30185 still takes `Squad2` to level 5 (124 decisions and 19 fights, where
+the batch-1 render had 123 and 20), so the README's caption holds. The GIF is
+the 14 s from 60 s of the MP4, as before (steps 68 to 92, the level-3 fight
+against 13 Mancracks): `ffmpeg -ss 60 -t 14 -i docs/run.mp4 -vf
+"fps=12.5,scale=900:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=64:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle"
+docs/run.gif`, 821 KB.

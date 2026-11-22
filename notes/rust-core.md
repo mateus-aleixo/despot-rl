@@ -883,3 +883,24 @@ The new "Novicator (306)" section: 16/16 winners against 3 or 5 enemy Novices
 and 1 CatBot, 13/16 against 3 Mancrack (the oracle wins 11 of 16, a close
 fight), with the Novices' end health within a few points (one hit split five
 ways when the fight lengths differ).
+
+### SummonSimple (2026-11-22, later)
+
+363 and 364 are kind `K_SUMMON_GROUP` (14): template in `template`, one summon
+per cast (`count` 1), the group size in `amount`. The gate adds
+`Sim::summon_partners(i, ai).len() + 1 >= amount` to the skill's mana,
+cooldown and range test, and `Sim::start` charges each partner's mana and
+cooldown, as `Battle.summon_partners` and `StartExecution` do. A partner is
+the same team, alive, holding a `K_SUMMON_GROUP` action with the same template,
+off cooldown with the mana for it, and not stunned, silenced or panicked, in
+unit order. `Sim::around` puts the Novices a MegaNovice releases on the ring
+`Battle._around` uses.
+
+| | winners | tick err | damage err |
+|---|---|---|---|
+| before | 150/156 outright, 0 draw-edge, 6 opposite | 12.51% | 10.70% |
+| after | 150/156 outright, 0 draw-edge, 6 opposite | 12.51% | 10.70% |
+
+The new "SummonSimple (363, 364), in contact" section: winners 23, 24, 24, 24
+and 19 of 24 for 2, 3 and 4 Monks and 2 and 4 Throwers; three Monks tick-match
+14 of 24, the others drift by a few ticks once the summon walks.
