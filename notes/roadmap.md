@@ -259,7 +259,18 @@ against Batch 1's baseline.
   "Batch 2 begins"): 328 CSTauntTime is done (+1 s on the Tank class skill's
   duration). 218 CastSpeed and 233 CSRange are read and wait on two pieces of
   the battle layer below, spawn times and the heal's walk. 306 ClassSkill
-  (Novicator, a MegaNovice that absorbs Novices) is next.
+  (Novicator) is **done, 2026-11-22**, in both engines (`notes/reference-sim.md`,
+  "Novicator, read and implemented"): the Novices merge into one MegaNovice
+  carrying their summed numbers, die with it, and split back evenly on a win.
+  The eight other `ClassSkill` rows are still open, seven of them shop offers
+  that give a class a summon (`SummonSimple`: Dalek, Samurai, DeathKnight,
+  BladeMailer, CatBot, Fish) or ShooterBombing; 363 (Monk, CatBot) and 364
+  (Thrower, Fish) are offered from level 1, the rest from level 5 or 9.
+- ~~**Short reaches.**~~ **Done, 2026-11-22**, found on the way to 306: 12
+  classes (MegaNovice, Samurai, DeathSword, both Despot2 forms, ...) have Range
+  x 6 equal to their own radius and never landed a hit; a ranged reach now
+  reaches at least contact plus `melee_margin`, in both engines. The real
+  composition of `M_Unit.range` is still unknown (`sim/assumptions.py`).
 - **Summon spawn times.** A summon acts from its first tick in both engines,
   where the game plays its `spawn` clip first (`M_Unit.animEndTime`), at the
   group's `castSpeed`. Needs the clip lengths from the unit animation bundle.
@@ -352,6 +363,17 @@ list). Also done that day: the active mutations applied, CooldownReduction's
 from `tools/audit_skills.py` the Block and AoeBurn. The heuristic reads 3.308
 over 2400 seeds from 40000 after them (-0.042 [-0.057, -0.027] against the
 boundary's 3.350, nearly all of it AoeBurn).
+
+2026-11-22, branch `batch2` (not committed): 306 Novicator done in both
+engines, and with it the short-reach fix (12 classes that never landed a hit
+now reach at contact). The heuristic reads 3.297 (-0.011 [-0.033, +0.011]
+paired against `8e1baa7`); `tools/diff_core.py` 150/156 as before. 172 tests
+and `tools/validate_sim.py` pass. Next: the shop's ClassSkill rows 363 (Monk,
+CatBot) and 364 (Thrower, Fish), offered from level 1 (`C_SummonSimpleCSGroup`
+to read); then the audit's open items in the Batch 2 list (ClusterBombing,
+LeechSummon, HealChannel, Panic, Swoop, SkeletonHandToss, and whether
+`C_ScientistCSGroup` pools its towers), then spawn times and the heal's walk,
+which unpark 218 and 233.
 
 The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
 **stopped part-way and its checkpoints deleted** on 2026-09-02. Re-run it if

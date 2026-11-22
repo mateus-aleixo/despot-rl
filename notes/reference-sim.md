@@ -2790,9 +2790,9 @@ heuristic: -0.002 [-0.008, +0.004] over 2400 seeds from 40000, 34 runs
 different.
 
 **ClassSkill** (306: `Novicator` in the `AbsorbingSummon` group; the Pit).
-Not started. `ClassSkills.json` has Novicator at level 1 for one Novice:
-manacost 0, cooldown 100, summons a level-1 `MegaNovice`. The group name says
-the summon absorbs the Novices, which needs `C_AbsorbingSummonCSGroup` read.
+`ClassSkills.json` has Novicator at level 1 for one Novice: manacost 0,
+cooldown 100, summons a level-1 `MegaNovice`. Read and implemented on
+2026-11-22: see "Novicator, read and implemented" below.
 
 ## `C_Fight`'s escalation, implemented (2026-11-06)
 
@@ -2960,3 +2960,104 @@ Read and left open: ClusterBombing (CannedDude) drops one 10-damage bomb where t
 over 3 s within `totalAttackRadius`; LeechSummon's DoT; HealChannel's channel;
 Panic's `speedBonus` and radii; Swoop's `speedMult`; SkeletonHandToss's
 targets. Each is a mechanic of its own, for Batch 2's skill coverage item.
+
+## Novicator, read and implemented (2026-11-22)
+
+Mutation 306 (the Pit's reward) is `ClassSkill` with `classSkillName`
+Novicator and `csGroupName` AbsorbingSummon, for the Novice class (a human
+holding nothing). `C_AbsorbingSummonCSGroup`, read method by method:
+
+* `Init` builds `AbsorbingCircleStrategy<AbsorbingSubgroup>(unitCount: 1)`:
+  one Novice opens the pool (the `Effects/Prefabs/MegaNovicePool` effect) and
+  the others come to it. `InProgress` takes any Novice of the side with health
+  above 0, none of the traits `0x83459` (Dead, Hidden, Disabled, Spawning,
+  DeSpawning, Stunned, Unrendered, TurnedOff) or `0x84c300` (Fearful,
+  Catatonic, Taunted, Silent, Resurrecting, Hexed), mana less reserved mana at
+  least the group's cost, and `IsReadyToCast`; there is no range term. It walks
+  in, and `OnUnitAbsorbed` adds it to `absorbedUnits`, sets Unrendered and
+  plays its corpse clip.
+* `OnSummoned` throws the MegaNovice's table numbers away (Health 50, Damage
+  30, Armor 0, Mana 50): health becomes `healthBonus * healthMult`, maximum
+  health 0, mana `manaBonus * manaMult`, maximum mana 0, damage
+  `bonusDamage * damageMult`, armour `bonusArmor * armorMult`. Then for each
+  absorbed unit: maximum health += its `totalMaxHealth`, health += its health
+  times the MegaNovice's `healthMult`, maximum mana += `totalMaxMana`, mana +=
+  mana times `manaMult`, damage += damage, armour += armor. Experience is 0
+  out of +infinity (the float at `0x1828f6990`). Attack speed 0.5, Range 1,
+  Speed 80, Size 2 and skill 142 (StatusEvasion) stay its own.
+* `OnSummonDying` sets every absorbed unit's health to 0 (the static `_health`
+  property, `M_Unit` +0x68) and plays `death` on it: the Novices die with it.
+* `EnemyTeamDying` (the other side dying while this one is not) runs
+  `BreakApart`, then `Unsummon`: `afterFightHealth = max(1, (health /
+  healthMult - healthBonus) / count)` (the 1.0 at `0x1828f61a4`).
+  `OnSummonDeclined` clears Unrendered, Invulnerable and Unpushable
+  (`& 0xffefd7ff`) and sets each unit's health to `min(afterFightHealth,
+  totalMaxHealth)`. A won fight hands every Novice an even share of what the
+  MegaNovice had left.
+
+Both engines (`Battle.absorb`, `Battle.break_apart`; `Sim::absorb`,
+`Sim::break_apart`, kind `K_ABSORB` = 13): every Novice starts the cast on the
+first tick, and the first whose cast lands takes the side's Novices that are
+alive and not stunned, silenced or panicked, mid-cast or not. The merge is
+instant: no walk to the pool and no spawn clip, as with every summon here. An
+absorbed unit is out of the fight (`alive` is false in the oracle; the core
+stashes its health, so every `hp > 0` test passes it over). The MegaNovice is
+built at its Meta Size, 2; other summons stay at Size 1 (`_Templates.get`'s
+`meta_size`). A fight that ends any other way with a MegaNovice standing
+splits it the same way, and a MegaNovice's death kills its Novices in the same
+death pass. `apply_class_skills` takes the held mutations so the Novice's
+class skill comes from the row (`granted_class_skills`).
+
+306 is one of nine `ClassSkill` rows. The other eight stay unimplemented, and
+`handler_for_row` keeps them out of coverage, the audit and the policy's
+`implemented` bit (marking the name implemented counted all nine and put 7
+false rows into `tools/audit_mutations.py`): 300 SciTowerManaAura (a quest
+reward), and the shop's 320 SummonDalek and 357 ShooterBombing (Shooter), 360
+Samurai (Warrior), 361 DeathKnight (Tank), 362 BladeMailer (Dodger), 363
+CatBot (Monk) and 364 Fish (Thrower), all `SummonSimple` but 357
+(`MassiveAttack`). `MutationsByLevel` offers 363 and 364 from level 1, 320,
+357 and 360 from level 5, and 361 and 362 from level 9, so 363 and 364 are the
+next ClassSkill work: every run can be offered them.
+
+Five level-1 Novices (70 health, 20 damage, 1 armour each) make a MegaNovice
+of 350, 100 and 5. Over 40 seeds, against 5 enemy Novices: 18 wins without
+306, 40 with it; against 7: 0 and 39; against 3 Mancrack: 0 and 18; against 2
+CatBot: 0 and 40. On the heuristic nothing measurable moves: its default
+passes the Pit, and with `quests="follow"` the change is within noise too
+(below). How often a run reaches the Pit with bare Novices to give was not
+counted. Checked in `tools/validate_sim.py` (seven checks) and
+`tools/diff_core.py` ("Novicator (306)": 16/16 winners in three setups, 13/16
+on the close 5 against 3 Mancrack).
+
+### Short reaches landed nothing
+
+Before the MegaNovice could do anything, its reach had to be fixed. The sim
+calls any unit with Range above 0 ranged and tests `range^2 > distance^2`
+centre to centre, and 12 unit classes have `Range x 6` exactly equal to their
+own radius: MegaNovice, Samurai, Samurai2, SamuraiSummon, DeathSword,
+MagicResistant, Streamer, Orb, ElectroScorpion (Range 1, Size 2) and Slower,
+Despot2, Despot2Hard (Range 1.5, Size 3). Against a Size 1 target the two
+bodies cannot come closer than radius + 3, so none of them ever landed a
+default attack, octopus-claws included (the case `tools/validate_sim.py` had
+pinned since the radius change). All of them carry `DefaultAttack ''` in
+`Meta.Classes`, the melee swing Novice, Mancrack and Zombie have, where the
+ranged classes name an attack (`Ranged`, `Burn`, `MultiShot`, ...). `DefaultAttack` cannot
+decide melee on its own: 40 classes with Range above 0 have it empty,
+including the Range 9 casters and the Dodger weapons (reach 9, which works).
+
+So `Battle.effective_range` and the core's gate now give a ranged unit
+`max(range, attacker radius + target radius + melee_margin)`: a short reach
+reaches at contact. A reach at or past contact plus the margin is unchanged;
+anything shorter now reaches that far (a Dodger weapon, reach 9, against a
+Size 2 target, separation 9, could not hit it before). The reach
+check in `tools/validate_sim.py` now covers every item and every unit class
+against a same-size target and finds none unreachable. `tools/diff_core.py`:
+150/156 outright, 0 draw-edge, 6 opposite as before; mean tick error 13.04%
+to 12.51%, damage error 10.45% to 10.70%; the Samurai and Slower rows agree
+12/12.
+
+On the heuristic, both changes together against `8e1baa7`, paired over 2400
+seeds from 40000: default **-0.011 [-0.033, +0.011]** (3.308 to 3.297, 423 runs
+different), `quests="follow"` -0.014 [-0.036, +0.007] (3.269 to 3.255). The
+heuristic's runs end by level 6, so the Despot2 forms, which now hit, are
+never reached.

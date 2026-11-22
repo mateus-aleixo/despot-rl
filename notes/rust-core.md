@@ -860,3 +860,26 @@ the explosions.
 Only the AoeRanger row moved (12/12 throughout; tick error 18.21% to 5.93%,
 damage error 14.01% to 10.65%): casting the burn in place of the attack was
 itself a source of drift between the engines.
+
+### Novicator and short reaches (2026-11-22)
+
+Novicator is kind `K_ABSORB` (13), its template the MegaNovice at Meta Size 2
+(`_Templates.get(..., meta_size=True)`). `Sim::absorb` sums the members'
+health, `max_hp()`, mana, maximum mana, base damage and base armour into the
+summon `Sim::summon` just made, then takes each member out of the fight with
+its health stashed (`hp` 0, `stash_hp`, `death_handled`), so every `hp > 0`
+test passes it over without a new check. The tick loop skips an absorbed unit
+from the top, as the oracle does, and leaves it out of the movement pass.
+`process_deaths` loops while a dying MegaNovice released members, and `run`
+calls `Sim::break_apart` before it returns. The reach gate takes
+`range.max(radii + melee_margin)` for a ranged attack.
+
+| | winners | tick err | damage err |
+|---|---|---|---|
+| before | 150/156 outright, 0 draw-edge, 6 opposite | 13.04% | 10.45% |
+| after | 150/156 outright, 0 draw-edge, 6 opposite | 12.51% | 10.70% |
+
+The new "Novicator (306)" section: 16/16 winners against 3 or 5 enemy Novices
+and 1 CatBot, 13/16 against 3 Mancrack (the oracle wins 11 of 16, a close
+fight), with the Novices' end health within a few points (one hit split five
+ways when the fight lengths differ).
