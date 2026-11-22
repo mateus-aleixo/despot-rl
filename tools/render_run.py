@@ -35,58 +35,13 @@ from sim.data import load_ruleset
 W, H = 1280, 720
 FPS = 30
 
-BG = (16, 19, 25)
-PANEL = (23, 27, 35)
-LINE = (38, 44, 56)
-TEXT = (200, 208, 221)
-DIM = (107, 118, 134)
-PLAYER = (77, 163, 255)
-PLAYER_DK = (31, 77, 122)
-ENEMY = (255, 107, 90)
-ENEMY_DK = (122, 47, 38)
-GOLD = (232, 184, 75)
-FOOD = (107, 208, 138)
-MUT = (169, 122, 222)
-
-KIND_COLOR = {
-    "start": (122, 132, 148),
-    "fight": (150, 66, 60),
-    "boss": (217, 74, 61),
-    "item_shop": GOLD,
-    "food_shop": FOOD,
-    "mutation": MUT,
-    "mutation_shop": MUT,
-    "talent_shop": (87, 182, 196),
-    "consumable_shop": (222, 140, 80),
-    "quest": (236, 214, 118),
-    "quest_extra": (150, 136, 74),
-    "secret": (120, 120, 140),
-    "empty": (42, 48, 60),
-}
-KIND_GLYPH = {"start": "S", "fight": "", "boss": "B", "item_shop": "$",
-              "food_shop": "F", "mutation": "*", "mutation_shop": "*",
-              "talent_shop": "T", "consumable_shop": "C", "quest": "!",
-              "quest_extra": "!", "secret": "?", "empty": ""}
-
-
-def font(size: int, bold: bool = False, mono: bool = False):
-    names = (["consolab.ttf", "consola.ttf"] if mono else
-             ["segoeuib.ttf", "seguisb.ttf", "arialbd.ttf"] if bold else
-             ["segoeui.ttf", "arial.ttf"])
-    for n in names:
-        try:
-            return ImageFont.truetype(f"C:/Windows/Fonts/{n}", size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
 
 # ------------------------------------------------------------------ recording
 
 @dataclass
 class BattleTick:
     t: float
-    agents: list          # (x, y, team, hp_frac, radius, melee, alive, letter)
+    agents: list          # (x, y, team, hp_frac, radius, melee, alive, letter, level)
     shots: list           # (x, y, team)
 
 
@@ -108,9 +63,10 @@ class Scene:
     hud: dict
     rooms: list           # (id, row, col, kind, cleared, current, state, portal)
     edges: list           # ((row, col), (row, col))
-    context: list         # pre-rendered lines for the decision card
+    context: list         # the decision as lines of text (the end card uses them)
     fight: Fight | None = None
     result: str = ""
+    panel: dict = field(default_factory=dict)   # what the room shows: a shop, a fight
 
 
 _PENDING: list[Fight] = []
@@ -142,7 +98,8 @@ class RecordingBattle(Battle):
             # Two letters: Monk, MegaNovice and Mancrack, or Cultist and the
             # CatBot a Monk summons, would otherwise share one.
             ags.append((ag.x, ag.y, ag.team, frac, ag.spec.radius,
-                        ag.spec.melee, ag.alive, (ag.spec.cls or "?")[:2]))
+                        ag.spec.melee, ag.alive, (ag.spec.cls or "?")[:2],
+                        ag.spec.level))
         shots = [(p.x, p.y, p.team) for p in self.projectiles]
         return BattleTick(t=self.tick_count * self.dt, agents=ags, shots=shots)
 
@@ -207,6 +164,45 @@ def context_lines(st, room, action: str) -> list[str]:
     return [f"{kind.replace('_', ' ')} room"]
 
 
+def room_panel(st, room) -> dict:
+    """What the room shows the player, for drawing it the way the game does:
+    an item shop's shelf with prices, the food shop's packs, a mutation shelf,
+    or the two powers of a fight."""
+    kind = room.kind
+    if kind == "item_shop":
+        return {"type": "item_shop", "level": st.shop_level,
+                "items": [None if n is None else (n, st.item_cost(n)) for n in st.offer],
+                "reroll": st.roll_cost, "upgrade": st.upgrade_cost}
+    if kind == "food_shop":
+        sizes, costs = st.food_packs
+        stock = room.food_stock or [0] * len(sizes)
+        return {"type": "food_shop", "items": list(zip(sizes, costs, stock))}
+    if kind in ("mutation_shop", "mutation"):
+        return {"type": "mutations", "shop": kind == "mutation_shop",
+                "left": room.takes_left if kind == "mutation_shop" else (room.stock or 0),
+                "items": [None if m is None else str(m.get("Name") or m.get("ID"))
+                          for m in (room.offer_mutations or [])[:8]]}
+    if kind in ("fight", "boss"):
+        return {"type": "fight", "boss": kind == "boss",
+                "squad": st.squad_power(), "room": st.room_power(kind)}
+    return {"type": kind}
+
+
+def squad_units(st) -> list[tuple]:
+    """(level, health share, class) per human, for drawing the squad in the room."""
+    return [(h.level, h.hp, h.cls or st.item_class(h.item)) for h in st.squad]
+
+
+def class_counts(st) -> list[tuple[str, int]]:
+    """How many of each class the squad fields, like the game's strip of class
+    icons along the top bar."""
+    counts: dict[str, int] = {}
+    for h in st.squad:
+        c = h.cls or st.item_class(h.item)
+        counts[c] = counts.get(c, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
 def record(tables, policy, seed: int, placement, max_steps: int | None,
            stop_level: int | None) -> list[Scene]:
     sim_run.Battle = RecordingBattle          # fights record themselves
@@ -255,8 +251,11 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
                # drew. The env cycles them by episode seed, so a run is not
                # playing "the" squad any more.
                "squad_name": env.squad_name or "?",
-               "squad_lines": squad_line(st)}
+               "squad_lines": squad_line(st),
+               "max_moves": st.food.max_moves, "classes": class_counts(st),
+               "units": squad_units(st)}
         ctx = context_lines(st, room, label)
+        panel = room_panel(st, room)
 
         _PENDING.clear()
         obs, r, term, trunc, info = env.step(action_i)
@@ -273,7 +272,8 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
             note = str(res["bought"])
 
         scenes.append(Scene(step=n, action=label, hud=hud, rooms=rooms,
-                            edges=edges, context=ctx, fight=fight, result=note))
+                            edges=edges, context=ctx, fight=fight, result=note,
+                            panel=panel))
 
         if term or trunc:
             break
@@ -293,7 +293,8 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
     hud.update(level=st.level, gold=st.gold, food=st.food.amount,
                moves=st.food.moves_left, squad=len(st.squad),
                muts=len(st.mutations), power=st.squad_power(), step=n,
-               squad_lines=squad_line(st))
+               squad_lines=squad_line(st), classes=class_counts(st),
+               units=squad_units(st))
     scenes.append(Scene(step=n, action="__end__", hud=hud,
                         rooms=scenes[-1].rooms, edges=scenes[-1].edges,
                         context=end))
@@ -301,187 +302,414 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
 
 
 # ------------------------------------------------------------------ drawing
+#
+# Laid out after the game's own screen (a recorded run, 2026-11-22): the
+# resources along the top left -- gold, humans, food with its moves bar -- and a
+# strip of the squad's classes beside them; the minimap under them, headed
+# "LEVEL: n", the current room in cyan brackets; the room as the stage, a stone
+# wall over a purple floor, with each shop drawn on the floor where the game
+# draws it; pink humans with green health bars and their level, teal enemies
+# with red ones; and a unit panel along the bottom, with pause, fast-forward and
+# FIGHT at the bottom right. Shapes stand in for the game's sprites: the
+# repository ships no game art.
 
-F_H1 = font(24, bold=True)
-F_H2 = font(17, bold=True)
-F_B = font(15)
-F_S = font(13)
-F_M = font(14, mono=True)
-F_MS = font(12, mono=True)
-F_BIG = font(30, bold=True)
+C_BG = (24, 18, 31)
+C_PANEL = (38, 31, 52)
+C_PANEL_EDGE = (62, 52, 86)
+C_WALL = (38, 33, 58)
+C_WALL_TRIM = (74, 92, 136)
+C_WALL_DARK = (27, 23, 42)
+C_FLOOR = (58, 50, 82)
+C_FLOOR_EDGE = (46, 39, 66)
+C_STRIPE = (217, 79, 120)
+C_TEAL = (92, 210, 202)
+C_ORANGE = (240, 163, 91)
+C_PINK = (255, 112, 168)
+C_PINK_DK = (122, 44, 84)
+C_FOE = (86, 204, 172)
+C_FOE_DK = (30, 84, 76)
+C_HP = (96, 212, 140)
+C_HP_BACK = (28, 46, 40)
+C_HP_FOE = (226, 68, 110)
+C_TEXT = (214, 208, 234)
+C_DIM = (124, 116, 154)
+C_DIGIT_DIM = (66, 58, 90)
+C_GOLD = (160, 192, 206)
+C_CORPSE = (44, 38, 58)
+C_SLOT = (48, 41, 68)
 
-MAP_BOX = (20, 68, 430, 396)
-HUD_BOX = (20, 408, 430, 700)
-STAGE = (446, 68, 1260, 700)
+ROOM_ICON = {  # minimap tile: glyph and colour
+    "start": ("◎", C_TEAL), "fight": ("☠", (200, 196, 214)), "boss": ("☠", C_HP_FOE),
+    "item_shop": ("$", (232, 184, 75)), "food_shop": ("≡", C_ORANGE),
+    "mutation": ("✶", (176, 130, 230)), "mutation_shop": ("✶", (176, 130, 230)),
+    "talent_shop": ("T", C_TEAL), "consumable_shop": ("✚", C_ORANGE),
+    "quest": ("?!", (236, 214, 118)), "quest_extra": ("!", (190, 170, 100)),
+    "secret": ("?", (150, 150, 170)), "empty": ("", C_DIM),
+}
+ROOM_TITLE = {"start": "START", "quest": "QUEST", "quest_extra": "QUEST", "secret": "SECRET",
+              "talent_shop": "TALENTS", "consumable_shop": "CONSUMABLES", "empty": ""}
 
 
-def panel(d, box, title=None):
-    d.rounded_rectangle(box, 8, fill=PANEL, outline=LINE)
-    if title:
-        d.text((box[0] + 14, box[1] + 10), title, font=F_H2, fill=DIM)
+def _font(names, size):
+    for n in names:
+        try:
+            return ImageFont.truetype(f"C:/Windows/Fonts/{n}", size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
-def draw_map(d, sc: Scene):
-    panel(d, MAP_BOX, "LEVEL %d" % sc.hud["level"])
-    x0, y0, x1, y1 = MAP_BOX
-    x0, y0, x1, y1 = x0 + 18, y0 + 40, x1 - 18, y1 - 16
+F_DIGIT = _font(["consolab.ttf", "consola.ttf"], 26)
+F_TITLE = _font(["consolab.ttf", "consola.ttf"], 24)
+F_LABEL = _font(["consolab.ttf", "consola.ttf"], 15)
+F_SMALL = _font(["consola.ttf"], 13)
+F_TINY = _font(["consolab.ttf", "consola.ttf"], 11)
+F_BIG = _font(["consolab.ttf", "consola.ttf"], 36)
+F_ICON = _font(["seguisym.ttf", "segoeui.ttf"], 17)
+F_ICON_L = _font(["seguisym.ttf", "segoeui.ttf"], 30)
+F_ICON_S = _font(["seguisym.ttf", "segoeui.ttf"], 12)
+
+TOP = (10, 6, 470, 46)
+MINI = (10, 52, 204, 300)
+LEFT = (10, 308, 204, 610)
+ROOM = (212, 52, 1270, 610)
+WALL_H = 70
+BOTTOM = (212, 618, 1270, 712)
+
+
+def stripes(d, x0, y0, x1, y1, step=9):
+    """The pink-and-dark diagonal stripes of the game's door thresholds."""
+    d.rectangle((x0, y0, x1, y1), fill=C_STRIPE)
+    h = y1 - y0
+    k = x0 - h
+    while k < x1:
+        d.polygon([(max(x0, k), y1), (min(x1, k + h), y0), (min(x1, k + h + step / 2), y0),
+                   (max(x0, k + step / 2), y1)], fill=(92, 34, 58))
+        k += step
+
+
+def counter(d, x, y, icon, value, digits, col):
+    """A top-bar counter: icon, then zero-padded digits with the leading
+    zeros dimmed, as the game prints its gold, humans and food."""
+    d.text((x, y + 3), icon, font=F_ICON, fill=col)
+    s = f"{int(max(0, value)):0{digits}d}"[-digits:]
+    lead = len(s) - len(s.lstrip("0")) if s.strip("0") else digits - 1
+    cx = x + 22
+    for i, ch in enumerate(s):
+        d.text((cx, y), ch, font=F_DIGIT, fill=C_DIGIT_DIM if i < lead else col)
+        cx += 15
+    return cx
+
+
+def draw_topbar(d, sc, sub):
+    h = sc.hud
+    d.rounded_rectangle(TOP, 6, fill=C_PANEL, outline=C_PANEL_EDGE)
+    x = counter(d, 20, 9, "◎", h["gold"], 6, C_GOLD)
+    x = counter(d, x + 14, 9, "♟", h["squad"], 2, C_PINK)
+    fx = x + 14
+    x = counter(d, fx, 9, "≡", h["food"], 4, C_ORANGE)
+    # The bar under the food is the moves left before hunger sets in.
+    frac = max(0.0, min(1.0, h["moves"] / max(1, h.get("max_moves") or 1)))
+    bx0, bx1 = fx + 22, x - 3
+    d.rectangle((bx0, 39, bx1, 42), fill=C_HP_BACK)
+    d.rectangle((bx0, 39, bx0 + (bx1 - bx0) * frac, 42), fill=C_HP if frac > 0.34 else C_HP_FOE)
+    cs = (h.get("classes") or [])[:8]
+    if cs:
+        cx = TOP[2] + 8
+        d.rounded_rectangle((cx, 6, cx + 16 + 46 * len(cs), 46), 6, fill=C_PANEL,
+                            outline=C_PANEL_EDGE)
+        for i, (c, n) in enumerate(cs):
+            px = cx + 8 + i * 46 + 23
+            d.text((px, 11), c[:2].upper(), font=F_LABEL, fill=C_ORANGE, anchor="ma")
+            d.text((px, 29), str(n), font=F_TINY, fill=C_DIM, anchor="ma")
+    d.text((1262, 10), "despot-rl", font=F_LABEL, fill=C_TEXT, anchor="ra")
+    d.text((1262, 29), f"{sub}  ·  step {h['step']}", font=F_SMALL, fill=C_DIM, anchor="ra")
+
+
+def brackets(d, box, col, arm=6, width=2):
+    x0, y0, x1, y1 = box
+    for (cx, cy, sx, sy) in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
+        d.line([(cx, cy), (cx + sx * arm, cy)], fill=col, width=width)
+        d.line([(cx, cy), (cx, cy + sy * arm)], fill=col, width=width)
+
+
+def draw_minimap(d, sc):
+    x0, y0, x1, y1 = MINI
+    d.rounded_rectangle(MINI, 6, fill=C_PANEL, outline=C_PANEL_EDGE)
+    d.text(((x0 + x1) / 2, y0 + 10), f"LEVEL: {sc.hud['level']}", font=F_LABEL,
+           fill=C_ORANGE, anchor="ma")
     rows = [r[1] for r in sc.rooms]
     cols = [r[2] for r in sc.rooms]
     if not rows:
         return
     span_r = max(rows) - min(rows) + 1
     span_c = max(cols) - min(cols) + 1
-    cell = min((x1 - x0) / span_c, (y1 - y0) / span_r)
-    size = cell * 0.62
-    ox = x0 + ((x1 - x0) - cell * span_c) / 2
-    oy = y0 + ((y1 - y0) - cell * span_r) / 2
-
-    def centre(r, c):
-        return (ox + (c - min(cols) + 0.5) * cell,
-                oy + (r - min(rows) + 0.5) * cell)
-
-    for a, b in sc.edges:
-        d.line([centre(*a), centre(*b)], fill=LINE, width=3)
+    ax0, ay0, ax1, ay1 = x0 + 10, y0 + 34, x1 - 10, y1 - 10
+    cell = min((ax1 - ax0) / span_c, (ay1 - ay0) / span_r, 36)
+    size = cell - 4
+    ox = ax0 + ((ax1 - ax0) - cell * span_c) / 2
+    oy = ay0 + ((ay1 - ay0) - cell * span_r) / 2
     for rid, r, c, kind, cleared, cur, state, portal in sc.rooms:
-        # An unknown room is not on the player's minimap: `V_MinimapRoom` builds
-        # an icon for `unexplored` and `explored` and none at all for `Unknown`.
-        # It still counts towards the bounds above, so the drawing does not jump
-        # about as the level is uncovered.
+        # `V_MinimapRoom` draws no icon at all for an Unknown room; the bounds
+        # above still count it, so the map does not jump as the level opens.
         if state == UNKNOWN:
             continue
-        cx, cy = centre(r, c)
-        col = KIND_COLOR.get(kind, KIND_COLOR["empty"])
-        if cleared and not cur:
-            col = tuple(int(v * 0.45) for v in col)
-        box = (cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
-        d.rounded_rectangle(box, 4, fill=col,
-                            outline=(255, 255, 255) if cur else None,
-                            width=2 if cur else 0)
-        g = KIND_GLYPH.get(kind, "")
-        if g:
-            d.text((cx, cy), g, font=F_S, fill=(20, 22, 28), anchor="mm")
-        if portal:
-            # A ring inside the corner, the way the minimap's `teleport` image
-            # sits on top of the room icon.
-            pr = size * 0.16
-            px, py = cx + size / 2 - pr - 3, cy - size / 2 + pr + 3
-            d.ellipse((px - pr, py - pr, px + pr, py + pr),
-                      outline=(87, 182, 196), width=2)
+        px = ox + (c - min(cols)) * cell + 2
+        py = oy + (r - min(rows)) * cell + 2
+        box = (px, py, px + size, py + size)
+        fill = (52, 110, 132) if cur else ((42, 36, 60) if cleared else (60, 52, 88))
+        d.rectangle(box, fill=fill)
         if cur:
-            d.ellipse((cx - 4, cy - size / 2 - 12, cx + 4, cy - size / 2 - 4),
-                      fill=(255, 255, 255))
+            brackets(d, (px - 2, py - 2, px + size + 2, py + size + 2), C_TEAL)
+        glyph, col = ROOM_ICON.get(kind, ("", C_DIM))
+        if cleared and not cur:
+            col = tuple(int(v * 0.5) for v in col)
+        if glyph:
+            d.text((px + size / 2, py + size / 2), glyph,
+                   font=F_ICON if size >= 22 else F_ICON_S, fill=col, anchor="mm")
+        if portal:
+            pr = max(3.0, size * 0.14)
+            qx, qy = px + size - pr - 2, py + pr + 2
+            d.ellipse((qx - pr, qy - pr, qx + pr, qy + pr), outline=C_TEAL, width=2)
 
 
-def draw_hud(d, sc: Scene):
-    panel(d, HUD_BOX, f"SQUAD  {sc.hud.get('squad_name', '')}")
-    x, y = HUD_BOX[0] + 16, HUD_BOX[1] + 38
-    h = sc.hud
-    stats = [("gold", f"{h['gold']:.0f}", GOLD),
-             ("food", f"{h['food']:.0f}", FOOD),
-             ("moves left", f"{h['moves']}", TEXT),
-             ("squad", f"{h['squad']}", PLAYER),
-             ("power", f"{h['power']:.0f}", TEXT),
-             ("mutations", f"{h['muts']}", MUT)]
-    for i, (k, v, col) in enumerate(stats):
-        cx = x + (i % 2) * 200
-        cy = y + (i // 2) * 46
-        d.text((cx, cy), k.upper(), font=F_S, fill=DIM)
-        d.text((cx, cy + 16), v, font=F_H2, fill=col)
-    y += 3 * 46 + 6
-    d.line([(x, y), (HUD_BOX[2] - 16, y)], fill=LINE, width=1)
-    y += 10
-    for line in h["squad_lines"]:
-        d.text((x, y), line, font=F_MS, fill=DIM)
-        y += 16
-        if y > HUD_BOX[3] - 18:
+def draw_squad_list(d, sc):
+    x0, y0, x1, y1 = LEFT
+    d.rounded_rectangle(LEFT, 6, fill=C_PANEL, outline=C_PANEL_EDGE)
+    d.text((x0 + 12, y0 + 9), f"SQUAD {sc.hud.get('squad_name', '')}".strip(),
+           font=F_LABEL, fill=C_ORANGE)
+    y = y0 + 34
+    for line in sc.hud["squad_lines"]:
+        d.text((x0 + 12, y), line, font=F_SMALL, fill=C_TEXT)
+        y += 18
+        if y > y1 - 18:
             break
 
 
-def draw_card(d, sc: Scene):
-    panel(d, STAGE)
-    x0, y0, x1, y1 = STAGE
-    end = sc.action == "__end__"
-    d.text((x0 + 30, y0 + 34), "RUN OVER" if end else sc.action.upper(),
-           font=F_BIG, fill=TEXT)
-    # A fight's outcome belongs after the fight, not on the card that precedes
-    # it, so it is drawn over the arena instead.
-    if sc.result and not sc.fight:
-        d.text((x0 + 30, y0 + 76), sc.result, font=F_B, fill=DIM)
-    y = y0 + 130
-    for i, line in enumerate(sc.context):
-        d.text((x0 + 30, y), line, font=F_M if i else F_H2,
-               fill=TEXT if i == 0 else DIM)
-        y += 26
+def draw_room(d) -> tuple:
+    """The stage: a stone wall over a purple floor, a door arch at the top and
+    striped thresholds. Returns the floor's box."""
+    x0, y0, x1, y1 = ROOM
+    d.rectangle(ROOM, fill=C_FLOOR_EDGE)
+    d.rectangle((x0, y0, x1, y0 + WALL_H), fill=C_WALL)
+    d.rectangle((x0, y0, x1, y0 + 6), fill=C_WALL_TRIM)
+    for k in range(x0 + 10, x1 - 70, 76):
+        d.rectangle((k, y0 + 16, k + 62, y0 + WALL_H - 10), fill=C_WALL_DARK,
+                    outline=(52, 46, 74))
+    cx = (x0 + x1) / 2
+    d.rounded_rectangle((cx - 64, y0 + 4, cx + 64, y0 + WALL_H + 2), 22, fill=C_WALL_DARK,
+                        outline=C_WALL_TRIM, width=2)
+    stripes(d, cx - 52, y0 + WALL_H - 8, cx + 52, y0 + WALL_H)
+    fl = (x0 + 16, y0 + WALL_H + 8, x1 - 16, y1 - 16)
+    d.rectangle(fl, fill=C_FLOOR)
+    # floor tiles, faint, as the game's slabs
+    for gx in range(int(fl[0]), int(fl[2]), 72):
+        d.line([(gx, fl[1]), (gx, fl[3])], fill=(64, 56, 90))
+    for gy in range(int(fl[1]), int(fl[3]), 72):
+        d.line([(fl[0], gy), (fl[2], gy)], fill=(64, 56, 90))
+    sy = (fl[1] + fl[3]) / 2
+    stripes(d, x1 - 12, sy - 60, x1 - 4, sy + 60, step=7)
+    return fl
 
 
-def draw_arena(d, sc: Scene, tick: BattleTick, show_result: bool = False):
-    panel(d, STAGE)
-    x0, y0, x1, y1 = STAGE
+def draw_unit(d, px, py, rad, team, frac, alive, letter, level):
+    if not alive:
+        d.ellipse((px - rad, py - rad * 0.55, px + rad, py + rad * 0.55), fill=C_CORPSE)
+        return
+    fill, edge = (C_PINK_DK, C_PINK) if team == 0 else (C_FOE_DK, C_FOE)
+    d.ellipse((px - rad, py - rad, px + rad, py + rad), fill=fill, outline=edge, width=2)
+    if rad >= 9:
+        d.text((px, py), letter, font=F_TINY, fill=edge, anchor="mm")
+    bw = max(18.0, rad * 2)
+    by = py - rad - 8
+    d.rectangle((px - bw / 2, by, px + bw / 2, by + 3), fill=C_HP_BACK)
+    d.rectangle((px - bw / 2, by, px - bw / 2 + bw * max(0.0, min(1.0, frac)), by + 3),
+                fill=C_HP if team == 0 else C_HP_FOE)
+    if team == 0 and level:
+        d.text((px - bw / 2 - 3, by + 2), str(level), font=F_TINY, fill=C_TEXT, anchor="rm")
+
+
+def draw_idle_squad(d, sc, fl):
+    """Between fights the squad stands in the room, on its left, the way the
+    game shows it while the player shops."""
+    units = sc.hud.get("units") or []
+    per_row = 5
+    gap = 40
+    x0 = fl[0] + 90
+    y0 = (fl[1] + fl[3]) / 2 - gap * ((len(units) - 1) // per_row) / 2
+    for i, (level, hp, cls) in enumerate(units[:25]):
+        px = x0 + (i % per_row) * gap
+        py = y0 + (i // per_row) * gap
+        draw_unit(d, px, py, 14, 0, hp, True, (cls or "?")[:2], level)
+
+
+def wrap_name(name: str, width: int = 10) -> list[str]:
+    """An item name on at most two lines, broken at a hyphen where one fits."""
+    if len(name) <= width:
+        return [name]
+    cut = name.rfind("-", 0, width + 1)
+    if cut <= 0:
+        return [name[:width], name[width:2 * width]]
+    return [name[:cut + 1], name[cut + 1:cut + 1 + width]]
+
+
+def button(d, box, label, lit=False, col=C_TEXT):
+    d.rounded_rectangle(box, 4, fill=(56, 48, 78) if lit else C_PANEL,
+                        outline=C_TEAL if lit else C_PANEL_EDGE, width=2)
+    d.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), label, font=F_LABEL,
+           fill=col if lit else C_DIM, anchor="mm")
+
+
+def draw_panel(d, sc, fl):
+    """What the room shows between fights, where the game shows it."""
+    p = sc.panel or {}
+    kind = p.get("type")
+    rx = fl[0] + (fl[2] - fl[0]) * 0.52
+    top = fl[1] + 34
+    if kind == "item_shop":
+        d.text((rx + 190, top), f"SHOP LVL {p['level']}", font=F_TITLE, fill=C_ORANGE, anchor="ma")
+        items = p["items"]
+        for i, it in enumerate(items[:8]):
+            cx = rx + 40 + (i % 4) * 100
+            cy = top + 60 + (i // 4) * 120
+            d.rounded_rectangle((cx, cy, cx + 76, cy + 60), 6,
+                                fill=C_SLOT, outline=C_PANEL_EDGE)
+            if it is None:
+                d.text((cx + 38, cy + 30), "sold", font=F_SMALL, fill=C_DIM, anchor="mm")
+                continue
+            name, cost = it
+            for k, part in enumerate(wrap_name(name)):
+                d.text((cx + 38, cy + 22 + 18 * k), part, font=F_TINY, fill=C_TEXT, anchor="mm")
+            d.text((cx + 38, cy + 74), f"{cost:.0f}", font=F_LABEL, fill=C_GOLD, anchor="mm")
+        by = top + 60 + 2 * 120 + 10
+        button(d, (rx + 60, by, rx + 200, by + 32), f"REROLL - {p['reroll']:.0f}", lit=True)
+        button(d, (rx + 220, by, rx + 380, by + 32), f"UPGRADE - {p['upgrade']:.0f}", lit=True)
+    elif kind == "food_shop":
+        d.text((rx + 190, top), "FOOD SHOP", font=F_TITLE, fill=C_ORANGE, anchor="ma")
+        for i, (size, cost, stock) in enumerate(p["items"][:4]):
+            cx = rx + 40 + i * 110
+            cy = top + 70
+            d.rounded_rectangle((cx, cy, cx + 86, cy + 64), 6, fill=C_SLOT,
+                                outline=C_PANEL_EDGE)
+            d.text((cx + 43, cy + 24), f"{size:.0f} food", font=F_SMALL, fill=C_TEXT, anchor="mm")
+            d.text((cx + 43, cy + 44), f"x{stock}", font=F_SMALL, fill=C_DIM, anchor="mm")
+            d.text((cx + 43, cy + 80), f"{cost:.0f}", font=F_LABEL, fill=C_GOLD, anchor="mm")
+    elif kind == "mutations":
+        title = "MUTATIONS" if p.get("shop") else "SHRINE"
+        d.text((rx + 190, top), title, font=F_TITLE, fill=C_ORANGE, anchor="ma")
+        for i, name in enumerate(p["items"][:8]):
+            cx = rx + 30 + (i % 2) * 200
+            cy = top + 56 + (i // 2) * 52
+            d.rounded_rectangle((cx, cy, cx + 186, cy + 40), 6, fill=C_SLOT,
+                                outline=C_PANEL_EDGE)
+            d.text((cx + 93, cy + 20), name or "taken", font=F_SMALL,
+                   fill=C_TEXT if name else C_DIM, anchor="mm")
+        d.text((rx + 190, top + 56 + 4 * 52 + 8), f"{p['left']} left", font=F_SMALL,
+               fill=C_DIM, anchor="ma")
+    elif kind == "fight":
+        # The game marks where the enemies stand with a red skull before the fight.
+        sx, sy = fl[2] - 170, (fl[1] + fl[3]) / 2
+        r = 34 if p.get("boss") else 26
+        d.ellipse((sx - r, sy - r, sx + r, sy + r), outline=C_HP_FOE, width=3)
+        d.text((sx, sy), "☠", font=F_ICON_L, fill=C_HP_FOE, anchor="mm")
+        d.text((sx, sy + r + 14), f"POWER {p['room']:.0f}", font=F_SMALL, fill=C_DIM, anchor="ma")
+        d.text((fl[0] + 90, fl[3] - 40), f"SQUAD POWER {p['squad']:.0f}", font=F_SMALL, fill=C_DIM)
+    else:
+        title = ROOM_TITLE.get(kind or "", (kind or "").replace("_", " ").upper())
+        if title:
+            d.text((rx + 190, top), title, font=F_TITLE, fill=C_ORANGE, anchor="ma")
+
+
+def draw_end(d, sc, fl):
+    cx = (fl[0] + fl[2]) / 2
+    box = (cx - 230, fl[1] + 60, cx + 230, fl[1] + 300)
+    d.rounded_rectangle(box, 8, fill=C_PANEL, outline=C_TEAL, width=2)
+    d.text((cx, box[1] + 18), "RUN OVER", font=F_TITLE, fill=C_ORANGE, anchor="ma")
+    y = box[1] + 64
+    for line in sc.context:
+        d.text((box[0] + 30, y), line.strip(), font=F_LABEL, fill=C_TEXT)
+        y += 30
+
+
+def draw_bottom(d, sc, tick=None, alive=None):
+    x0, y0, x1, y1 = BOTTOM
+    h = sc.hud
+    tab = "RUN OVER" if sc.action == "__end__" else sc.action.upper()
+    tw = d.textlength(tab, font=F_LABEL) + 26
+    d.rounded_rectangle((x0 + 80, y0, x0 + 80 + tw, y0 + 26), 4, fill=C_PANEL,
+                        outline=C_PANEL_EDGE)
+    d.text((x0 + 93, y0 + 5), tab, font=F_LABEL, fill=C_ORANGE)
+    box = (x0 + 80, y0 + 30, x0 + 780, y1 - 4)
+    d.rounded_rectangle(box, 6, fill=C_PANEL, outline=C_PANEL_EDGE)
+    stats = [("POWER", f"{h['power']:.0f}"), ("MUTATIONS", f"{h['muts']}"),
+             ("MOVES", f"{h['moves']}/{h.get('max_moves') or 0}"), ("HUNGER", f"{h['hunger']}")]
+    for i, (k, v) in enumerate(stats):
+        sx = box[0] + 22 + i * 170
+        d.text((sx, box[1] + 9), k, font=F_TINY, fill=C_DIM)
+        d.text((sx, box[1] + 25), v, font=F_TITLE, fill=C_TEXT)
+    # pause, fast-forward and FIGHT, lit while a fight plays
+    fighting = tick is not None
+    button(d, (x1 - 186, y0 + 22, x1 - 154, y0 + 50), "II", lit=fighting)
+    button(d, (x1 - 148, y0 + 22, x1 - 116, y0 + 50), "»", lit=fighting, col=C_ORANGE)
+    button(d, (x1 - 108, y0 + 54, x1 - 4, y1 - 4), "FIGHT", lit=fighting, col=C_TEAL)
+    if fighting:
+        d.text((x1 - 196, y0 + 60), f"{tick.t:4.1f}s", font=F_LABEL, fill=C_TEXT, anchor="ra")
+        if alive is not None:
+            d.text((x1 - 196, y0 + 80), f"{alive[0]} v {alive[1]}", font=F_LABEL,
+                   fill=C_TEXT, anchor="ra")
+
+
+def draw_arena(d, sc, tick, fl, show_result=False):
     f = sc.fight
     ww, wh = f.cols * f.tile, f.rows * f.tile
-    pad = 46
-    scale = min((x1 - x0 - 2 * pad) / ww, (y1 - y0 - 2 * pad - 40) / wh)
-    ox = x0 + ((x1 - x0) - ww * scale) / 2
-    oy = y0 + 40 + ((y1 - y0 - 40) - wh * scale) / 2
-
-    d.rectangle((ox, oy, ox + ww * scale, oy + wh * scale),
-                fill=(20, 24, 31), outline=LINE)
-    for c in range(f.cols + 1):
-        gx = ox + c * f.tile * scale
-        d.line([(gx, oy), (gx, oy + wh * scale)], fill=(28, 33, 42))
-    for r in range(f.rows + 1):
-        gy = oy + r * f.tile * scale
-        d.line([(ox, gy), (ox + ww * scale, gy)], fill=(28, 33, 42))
-
+    pad = 20
+    scale = min((fl[2] - fl[0] - 2 * pad) / ww, (fl[3] - fl[1] - 2 * pad) / wh)
+    ox = fl[0] + ((fl[2] - fl[0]) - ww * scale) / 2
+    oy = fl[1] + ((fl[3] - fl[1]) - wh * scale) / 2
     alive = [0, 0]
-    for (wx, wy, team, frac, radius, melee, is_alive, letter) in tick.agents:
+    # corpses first, so the living stand on top of them
+    order = sorted(tick.agents, key=lambda a: a[6])
+    for (wx, wy, team, frac, radius, melee, is_alive, letter, level) in order:
         px, py = ox + wx * scale, oy + wy * scale
-        rad = max(5.0, radius * scale)
-        base, dark = (PLAYER, PLAYER_DK) if team == 0 else (ENEMY, ENEMY_DK)
-        if not is_alive:
-            d.ellipse((px - rad, py - rad, px + rad, py + rad),
-                      fill=(38, 42, 50))
-            continue
-        alive[team] += 1
-        d.ellipse((px - rad, py - rad, px + rad, py + rad), fill=dark,
-                  outline=base, width=2 if melee else 1)
-        d.text((px, py), letter, font=F_S, fill=base, anchor="mm")
-        bw = rad * 2
-        d.rectangle((px - rad, py - rad - 7, px - rad + bw, py - rad - 4),
-                    fill=(45, 50, 60))
-        d.rectangle((px - rad, py - rad - 7, px - rad + bw * frac,
-                     py - rad - 4), fill=base)
+        # Drawn at three quarters of the body radius: the game's sprites are
+        # slimmer than the circles the sim moves around.
+        rad = max(6.0, radius * scale * 0.75)
+        if is_alive:
+            alive[team] += 1
+        draw_unit(d, px, py, rad, team, frac, is_alive, letter, level)
     for (wx, wy, team) in tick.shots:
         px, py = ox + wx * scale, oy + wy * scale
-        col = PLAYER if team == 0 else ENEMY
+        col = (127, 227, 255) if team == 0 else C_PINK
         d.ellipse((px - 3, py - 3, px + 3, py + 3), fill=col)
-
-    d.text((x0 + 30, y0 + 22), "FIGHT", font=F_H2, fill=DIM)
-    d.text((x0 + 110, y0 + 22), f"{tick.t:4.1f}s", font=F_M, fill=TEXT)
-    d.text((x1 - 30, y0 + 22), f"{alive[0]} v {alive[1]}", font=F_H2,
-           fill=TEXT, anchor="ra")
     if show_result and sc.result:
-        won = sc.fight is not None and sc.fight.won
-        col = PLAYER if won else ENEMY
-        cx, cy = (x0 + x1) / 2, y0 + 24 + (y1 - y0) * 0.12
+        # A banner over the wall, clear of the units on the floor.
+        cx, cy = (fl[0] + fl[2]) / 2, ROOM[1] + WALL_H / 2 + 2
+        col = C_TEAL if f.won else C_HP_FOE
+        tw = d.textlength(sc.result.upper(), font=F_BIG) + 40
+        d.rounded_rectangle((cx - tw / 2, cy - 26, cx + tw / 2, cy + 26), 8, fill=C_PANEL,
+                            outline=col, width=2)
         d.text((cx, cy), sc.result.upper(), font=F_BIG, fill=col, anchor="mm")
+    return alive
 
 
 def draw_frame(sc: Scene, tick: BattleTick | None, sub: str,
                show_result: bool = False) -> Image.Image:
-    img = Image.new("RGB", (W, H), BG)
+    img = Image.new("RGB", (W, H), C_BG)
     d = ImageDraw.Draw(img)
-    d.text((22, 18), "despot-rl", font=F_H1, fill=TEXT)
-    d.text((150, 26), sub, font=F_B, fill=DIM)
-    d.text((W - 22, 26), f"step {sc.hud['step']}", font=F_B, fill=DIM,
-           anchor="ra")
-    d.line([(20, 58), (W - 20, 58)], fill=LINE)
-    draw_map(d, sc)
-    draw_hud(d, sc)
+    draw_topbar(d, sc, sub)
+    draw_minimap(d, sc)
+    draw_squad_list(d, sc)
+    fl = draw_room(d)
+    alive = None
     if tick is not None:
-        draw_arena(d, sc, tick, show_result)
+        alive = draw_arena(d, sc, tick, fl, show_result)
+    elif sc.action == "__end__":
+        draw_idle_squad(d, sc, fl)
+        draw_end(d, sc, fl)
     else:
-        draw_card(d, sc)
+        draw_idle_squad(d, sc, fl)
+        draw_panel(d, sc, fl)
+    draw_bottom(d, sc, tick, alive)
     return img
 
 
