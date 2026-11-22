@@ -3135,3 +3135,20 @@ the 14 s from 60 s of the MP4, as before (steps 68 to 92, the level-3 fight
 against 13 Mancracks): `ffmpeg -ss 60 -t 14 -i docs/run.mp4 -vf
 "fps=12.5,scale=900:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=64:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle"
 docs/run.gif`, 821 KB.
+
+Later the same day the renderer was laid out after the game's own screen, from
+a 90-minute recording of a Sprint run in the game: the gold, humans and food
+counters along the top left with the leading zeros dimmed and the moves bar
+under the food, a strip of the squad's classes beside them; the minimap under
+them, headed "LEVEL: n", a cyan-bracketed tile for the current room and an
+icon per room; the room as a stone wall over a purple floor with a door arch
+and striped thresholds; each room's offer drawn on the floor where the game
+draws it ("SHOP LVL n" with a price under each item and REROLL and UPGRADE
+buttons, "FOOD SHOP" with its packs, the mutation shelf, a red skull where a
+fight's enemies stand); the squad standing in the room between fights; pink
+humans with green bars and their level, teal enemies with red bars, dark
+bodies on the floor; and a unit panel along the bottom with the decision in an
+orange tab, and pause, fast-forward and FIGHT on the right, lit while a fight
+plays. Shapes stand in for the sprites, since the repository ships no game art.
+The demo is re-rendered with it (same run, same 14 s window); the GIF is
+1.07 MB.
