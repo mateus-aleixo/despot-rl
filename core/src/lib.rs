@@ -64,6 +64,9 @@ const K_BLINK: i32 = 11;
 /// `C_SciCastSkill`: a percentage buff to the caster's side or a debuff to
 /// the other on one random stat (see `sim.unit_skills.make_sci_cast`).
 const K_SCI_CAST: i32 = 12;
+/// Novicator, `C_AbsorbingSummonCSGroup` (mutation 306): the caster's side's
+/// units of its class merge into one summon (see `Sim::absorb`).
+const K_ABSORB: i32 = 13;
 
 /// Heal scope: the class skill heals the whole team, unit heals use a radius.
 const SCOPE_TEAM: i32 = 0;
@@ -269,6 +272,13 @@ struct Agent {
     /// TankWithBlock's Block status: hits left to void, and their type mask.
     block_left: i32,
     block_mask: i32,
+    /// Novicator (`Sim::absorb`): merged into a MegaNovice, out of the fight
+    /// with its health stashed (so every `hp > 0` test already passes it over)
+    /// until the MegaNovice splits back or dies.
+    absorbed: bool,
+    stash_hp: f32,
+    /// A MegaNovice's absorbed units.
+    absorbing: Vec<usize>,
 }
 
 /// A timed `M_StatBonusStatus`: a duration and up to `MAX_BUFF_STATS`
@@ -664,19 +674,37 @@ impl Sim {
     /// Resurrection runs first: a unit that comes back never counts as dead, so
     /// nothing keyed off its death should have fired.
     fn process_deaths(&mut self) {
-        for i in 0..self.agents.len() {
-            if self.agents[i].death_handled || self.agents[i].hp > 0.0 {
-                continue;
-            }
-            if self.agents[i].resurrect.is_some() && self.try_resurrect(i) {
-                continue;
-            }
-            self.agents[i].death_handled = true;
-            if !self.agents[i].on_death.is_empty() {
-                // the oracle runs the unit's own skills first, then the
-                // mutation passives, and both consume randomness
-                self.run_unit_death_skills(i);
-                self.run_death_passives(i);
+        // A MegaNovice that dies takes its absorbed units with it
+        // (`OnSummonDying`), and the oracle handles their deaths in another
+        // pass of the same call.
+        let mut again = true;
+        while again {
+            again = false;
+            for i in 0..self.agents.len() {
+                if self.agents[i].death_handled || self.agents[i].hp > 0.0 {
+                    continue;
+                }
+                if self.agents[i].resurrect.is_some() && self.try_resurrect(i) {
+                    continue;
+                }
+                self.agents[i].death_handled = true;
+                if !self.agents[i].absorbing.is_empty() {
+                    let members = std::mem::take(&mut self.agents[i].absorbing);
+                    for j in members {
+                        let a = &mut self.agents[j];
+                        a.absorbed = false;
+                        a.stash_hp = 0.0;
+                        a.hp = 0.0;
+                        a.death_handled = false;
+                    }
+                    again = true;
+                }
+                if !self.agents[i].on_death.is_empty() {
+                    // the oracle runs the unit's own skills first, then the
+                    // mutation passives, and both consume randomness
+                    self.run_unit_death_skills(i);
+                    self.run_death_passives(i);
+                }
             }
         }
     }
@@ -1203,6 +1231,91 @@ impl Sim {
         self.agents.push(new);
     }
 
+    /// Novicator, mirroring `Battle.absorb`: every unit of the caster's side
+    /// and class that is alive and not stunned, silenced or panicked merges
+    /// into one summon from `template`. `OnSummoned` replaces the summon's own
+    /// numbers: health and maximum health, mana and maximum mana, damage and
+    /// armour become the sums of the absorbed units'. Each absorbed unit
+    /// leaves the fight with its health stashed and its death already handled.
+    fn absorb(&mut self, i: usize, template: i32) {
+        if template < 0 || template as usize >= self.templates.len() {
+            return;
+        }
+        let (team, class) = (self.agents[i].team, self.agents[i].class_id);
+        let members: Vec<usize> = (0..self.agents.len())
+            .filter(|&j| {
+                let a = &self.agents[j];
+                a.team == team
+                    && a.class_id == class
+                    && a.hp > 0.0
+                    && !a.absorbed
+                    && !a.has(S_STUN)
+                    && !a.has(S_SILENCE)
+                    && !a.has(S_PANIC)
+            })
+            .collect();
+        if !members.contains(&i) {
+            return;
+        }
+        self.summon(i, template);
+        let k = self.agents.len() - 1;
+        let (mut hp, mut max_hp, mut damage, mut armor, mut mana, mut max_mana) =
+            (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for &j in &members {
+            let a = &self.agents[j];
+            hp += a.hp;
+            max_hp += a.max_hp();
+            damage += a.damage;
+            armor += a.base_armor;
+            mana += a.mana;
+            max_mana += a.max_mana;
+        }
+        {
+            let m = &mut self.agents[k];
+            m.hp = hp;
+            m.max_health = max_hp;
+            m.damage = damage;
+            m.base_armor = armor;
+            m.mana = mana;
+            m.max_mana = max_mana;
+            m.absorbing = members.clone();
+        }
+        for &j in &members {
+            let a = &mut self.agents[j];
+            a.absorbed = true;
+            a.stash_hp = a.hp;
+            a.hp = 0.0;
+            a.death_handled = true;
+            a.target = -1;
+            a.vx = 0.0;
+            a.vy = 0.0;
+        }
+    }
+
+    /// `BreakApart`, mirroring `Battle.break_apart`: when the fight ends with
+    /// a MegaNovice standing, each absorbed unit gets max(1, health / count),
+    /// capped at its own maximum, and the MegaNovice is unsummoned (no death
+    /// pass).
+    fn break_apart(&mut self) {
+        for k in 0..self.agents.len() {
+            if self.agents[k].absorbing.is_empty() || self.agents[k].hp <= 0.0 {
+                continue;
+            }
+            let members = std::mem::take(&mut self.agents[k].absorbing);
+            let share = (self.agents[k].hp / members.len() as f32).max(1.0);
+            for &j in &members {
+                let cap = self.agents[j].max_hp();
+                let a = &mut self.agents[j];
+                a.absorbed = false;
+                a.death_handled = false;
+                a.stash_hp = 0.0;
+                a.hp = share.min(cap);
+            }
+            self.agents[k].hp = 0.0;
+            self.agents[k].death_handled = true;
+        }
+    }
+
     /// `C_Fight._Fight`: at the first step past each threshold, every living
     /// unit gets the status, its first tick one period later.
     fn escalate(&mut self) {
@@ -1393,6 +1506,7 @@ impl Sim {
                     self.summon(i, act.template);
                 }
             }
+            K_ABSORB => self.absorb(i, act.template),
             K_MANABURN => {
                 let (ax, ay) = (self.agents[i].x, self.agents[i].y);
                 let r2 = act.radius * act.radius;
@@ -1525,11 +1639,15 @@ impl Sim {
                     let act = self.agents[i].actions[ai].clone();
                     let is_attack = act.kind == K_ATTACK;
 
-                    // Melee reach is measured against BOTH bodies.
+                    // Melee reach is measured against BOTH bodies, and a ranged
+                    // reach short of contact still reaches at contact
+                    // (`Battle.effective_range`).
+                    let contact =
+                        self.agents[i].radius + self.agents[tgt].radius + self.melee_margin;
                     let reach = if is_attack && self.agents[i].melee {
-                        self.agents[i].radius + self.agents[tgt].radius + self.melee_margin
+                        contact
                     } else if is_attack {
-                        self.agents[i].range
+                        self.agents[i].range.max(contact)
                     } else {
                         act.range
                     };
@@ -1624,6 +1742,9 @@ impl Sim {
         let living: Vec<usize> = (0..n).filter(|&i| self.alive(i)).collect();
 
         for &i in &living {
+            if self.agents[i].absorbed {
+                continue; // merged into a MegaNovice earlier this tick
+            }
             let t = self.agents[i].target;
             if t < 0 || !self.alive(t as usize) {
                 self.agents[i].target = self.pick_target(i);
@@ -1726,6 +1847,10 @@ impl Sim {
 
         self.process_deaths();
 
+        let living: Vec<usize> = living
+            .into_iter()
+            .filter(|&i| !self.agents[i].absorbed)
+            .collect();
         let mut prefs = vec![(0.0f32, 0.0f32); n];
         for &i in &living {
             prefs[i] = self.preferred_velocity(i);
@@ -1823,6 +1948,7 @@ impl Sim {
                 }
             }
             if alive[0] == 0 || alive[1] == 0 {
+                self.break_apart();
                 return if alive[0] == alive[1] {
                     -1
                 } else if alive[0] > 0 {
@@ -1832,6 +1958,7 @@ impl Sim {
                 };
             }
             if self.ticks >= max_ticks {
+                self.break_apart();
                 return -1;
             }
             self.step();
@@ -1908,6 +2035,9 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         dying_due: 0,
         block_left: 0,
         block_mask: 0,
+        absorbed: false,
+        stash_hp: 0.0,
+        absorbing: Vec::new(),
     }
 }
 

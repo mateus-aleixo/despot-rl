@@ -60,7 +60,9 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "ResurrectionChance": Handler(PASSIVE, note="chance to revive at healthValue"),
     "OraStatBonus": Handler(PASSIVE, note="stat bonus variant"),
     "CSLinkStatBonus": Handler(PASSIVE, note="targetClass allies buffed by the Monk cast"),
-    "ClassSkill": Handler(UNIMPLEMENTED, note="grants or upgrades a class skill"),
+    # 306 (the Pit): the Novice gets `Novicator`, attached by
+    # `battle.apply_class_skills` through `granted_class_skills`.
+    "ClassSkill": Handler(PASSIVE, note="grants a class skill: 306's Novicator"),
     "ClassDiversity": Handler(PASSIVE, note="one unit gains stat x count(otherClass)"),
     "ClassDiversityMagicalDamage": Handler(PASSIVE, note="magical damage x count(otherClass)"),
     "SwapAttack": Handler(UNIMPLEMENTED, note="replaces the default attack"),
@@ -161,6 +163,23 @@ def handler_for(name: str) -> Handler:
     return h
 
 
+def handler_for_row(m: dict) -> Handler:
+    """`handler_for`, per row: a `ClassSkill` row is implemented only when the
+    sim runs the class skill it grants (`sim.actions.GRANTED_CLASS_SKILLS`,
+    306's Novicator). The shop's ClassSkill rows (320, 357, 360-364: Dalek,
+    ShooterBombing, Samurai, DeathKnight, BladeMailer, CatBot and Fish
+    summons) and 300's SciTowerManaAura stay unimplemented, so coverage, the
+    audit and the policy's `implemented` bit do not count them."""
+    h = handler_for(m["Name"])
+    if m["Name"] == "ClassSkill":
+        from .actions import GRANTED_CLASS_SKILLS
+        p = mutation_params(m)
+        key = (str(p.get("classSkillName") or ""), str(p.get("csGroupName") or ""))
+        if key not in GRANTED_CLASS_SKILLS:
+            return Handler(UNIMPLEMENTED, note=h.note)
+    return h
+
+
 def mutation_params(m: dict) -> dict[str, Any]:
     """The row's parameters, plus the model defaults it leaves out
     (`sim/model_defaults.py`)."""
@@ -200,6 +219,26 @@ def for_class(row: dict, cls: str) -> dict:
 
 def by_id(tables: dict) -> dict[int, dict]:
     return {m["ID"]: m for m in tables["SimpleMutations"]}
+
+
+def granted_class_skills(mutations: list[dict], classes: list[str]) -> dict[str, str]:
+    """`ClassSkill`: the class skill each held row gives the classes it
+    covers, for the (classSkillName, csGroupName) pairs the sim can run
+    (`sim.actions.GRANTED_CLASS_SKILLS`). Of the nine ClassSkill rows only
+    306 (Novice, Novicator) is one; see `handler_for_row`."""
+    from .actions import GRANTED_CLASS_SKILLS
+    out: dict[str, str] = {}
+    for m in mutations:
+        if m.get("Name") != "ClassSkill":
+            continue
+        p = mutation_params(m)
+        key = (str(p.get("classSkillName") or ""), str(p.get("csGroupName") or ""))
+        if key not in GRANTED_CLASS_SKILLS:
+            continue
+        for cls in classes:
+            if applies_to(m, cls):
+                out[cls] = key[0]
+    return out
 
 
 def offered_at_level(tables: dict, level: int) -> list[dict]:
@@ -317,7 +356,7 @@ def apply_to_specs(specs: list, mutations: list[dict],
     out = list(specs)
     for m in mutations:
         name = m["Name"]
-        if handler_for(name).kind != PASSIVE:
+        if handler_for_row(m).kind != PASSIVE:
             continue
         p = mutation_params(m)
         if name in ("StatBonus", "OraStatBonus"):
@@ -411,7 +450,7 @@ def effect_on(specs: list, mutation: dict,
     if not specs:
         return out
     try:
-        handler = handler_for(mutation["Name"])
+        handler = handler_for_row(mutation)
     except UnknownMutation:
         return out
     out["kind"] = handler.kind
@@ -838,7 +877,7 @@ def apply_to_agents(agents: list, mutations: list[dict],
     counts: dict[str, int] = {}
     for m in mutations:
         name = m["Name"]
-        h = handler_for(name)
+        h = handler_for_row(m)
         counts[h.kind] = counts.get(h.kind, 0) + 1
         p = mutation_params(m)
         if name in ("StatBonus", "OraStatBonus") and is_timed(p):
@@ -881,6 +920,8 @@ def apply_to_agents(agents: list, mutations: list[dict],
             continue
         if h.kind != PASSIVE or name in ("StatBonus", "OraStatBonus"):
             continue
+        if name == "ClassSkill":
+            continue          # a class skill, attached in apply_class_skills
         if name == "ClassDiversity":
             continue          # a standing stat change, done in apply_to_specs
         if name == "ClassDiversityMagicalDamage":
@@ -980,7 +1021,7 @@ def coverage(tables: dict) -> dict:
     unknown: set[str] = set()
     for m in tables["SimpleMutations"]:
         try:
-            kind = handler_for(m["Name"]).kind
+            kind = handler_for_row(m).kind
         except UnknownMutation:
             unknown.add(m["Name"])
             kind = "UNREGISTERED"

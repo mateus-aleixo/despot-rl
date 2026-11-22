@@ -2359,7 +2359,7 @@ class RunState:
             team0 = place_at(grid, fielded, cells, team=0)
         else:
             team0 = deploy(grid, layout, fielded, 0, "p", rng)
-        apply_class_skills(self.tables, team0)
+        apply_class_skills(self.tables, team0, self.mutations)
         if self.mutations:
             from .mutations import (apply_to_agents, boost_agent_chances,
                                     chance_bonuses, underdog)

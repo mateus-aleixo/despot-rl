@@ -38,7 +38,12 @@ class Assumptions:
     # whether the attack range test uses surface distance for these units.
     agent_radius_per_size: float = 3.0
 
-    # Extra reach beyond touching, for a unit whose Range stat is 0.
+    # Extra reach beyond touching, for a unit whose Range stat is 0, and the
+    # floor of a ranged unit's reach: `Battle.effective_range` gives a ranged
+    # attack max(range, both radii + this). Since 2026-11-22: 12 classes
+    # (MegaNovice, Samurai, DeathSword, both Despot2 forms, ...) have Range x 6
+    # equal to their own radius and could never land a hit centre-to-centre.
+    # Settle by: the same composed-range question as below.
     melee_margin: float = 1.0
 
     # 88 of 168 unit rows have Range 0, and melee weapons add none, yet

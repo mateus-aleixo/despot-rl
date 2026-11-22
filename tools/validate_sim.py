@@ -286,23 +286,36 @@ print("\n== reach vs body size ==")
 # minimum separation of two bodies can never land a hit. This is what silently
 # disabled the entire Dodger line when the agent radius was 6.
 #
-# octopus-claws is a real unresolved case, not an accepted one: its reach is
-# exactly 6.0 against a minimum separation of exactly 6.0, and the verified
-# test is a strict `>`, so it lands nothing. Either the radius is slightly
-# smaller than Size/2 tiles, or bodies overlap a little in practice. It is
-# pinned here so it stays visible and so any NEW unreachable item still fails.
-KNOWN_UNREACHABLE = {"octopus-claws"}
+# octopus-claws (reach exactly 6.0 against a separation of exactly 6.0, under a
+# strict `>`) and 12 unit classes whose Range x 6 equals their own radius
+# (MegaNovice, Samurai, DeathSword, both Despot2 forms, ...) landed nothing
+# under the plain centre-to-centre test, though all of them attack in the
+# game. Since 2026-11-22 `Battle.effective_range` lets a short reach reach at
+# contact, and this keeps every item and unit class able to hit a same-size
+# target.
+from sim.battle import Agent as _ReachAgent
+_reach_b = Battle(GRID, [], build_trees=False)
+
+
+def _reaches_own_size(spec) -> bool:
+    a = _ReachAgent(spec=spec, team=0, x=0.0, y=0.0, hp=1.0)
+    t = _ReachAgent(spec=spec, team=1, x=0.0, y=0.0, hp=1.0)
+    return _reach_b.effective_range(a, None, t) > 2 * spec.radius
+
 
 _unreachable = set()
 for i in TABLES["Items"]:
     if not i["Damage"]:
         continue
-    u = build_player_squad(TABLES, [(i["Name"], 1)])[0]
-    if u.range_world <= 2 * u.radius:
+    if not _reaches_own_size(build_player_squad(TABLES, [(i["Name"], 1)])[0]):
         _unreachable.add(i["Name"])
-check("no new item is unable to reach a same-size target",
-      _unreachable == KNOWN_UNREACHABLE,
-      f"unreachable: {sorted(_unreachable)}, expected: {sorted(KNOWN_UNREACHABLE)}")
+for _cls, _levels in units_by_class(TABLES).items():
+    _size = int((TABLES["Meta"]["Classes"].get(_cls) or {}).get("Size") or 1)
+    if not _reaches_own_size(build_unit(units_by_class(TABLES), _cls, min(_levels),
+                                        name=_cls, size=_size)):
+        _unreachable.add(_cls)
+check("every item and unit class can reach a same-size target", not _unreachable,
+      f"unreachable: {sorted(_unreachable)}")
 
 print("\n== class skills ==")
 from sim.actions import (PASSIVE_SKILLS, build_actions, resolve_class_skills,
@@ -1258,6 +1271,72 @@ _moved = sum(
         _mut_fight([328], item=_item_for("Tank"), n=3, seed=_s)[2].run()))
     for _s in range(5))
 check("CSTauntTime changes the fight", _moved == 5, f"{_moved}/5 fights differ")
+
+# ClassSkill (306, the Pit's reward): the Novice gets Novicator, in the
+# AbsorbingSummon group (`C_AbsorbingSummonCSGroup`). Every Novice that can act
+# merges into one MegaNovice whose health, maximum, mana, damage and armour are
+# the sums of theirs (`OnSummoned`); its death kills them (`OnSummonDying`);
+# a won fight splits it back, each Novice on max(1, health / count) capped at
+# its own maximum (`Unsummon`, `OnSummonDeclined`).
+from sim.mutations import for_class as _for_class
+
+_M306 = _for_class(_MBY[306], "Novice")
+_UBC_S = units_by_class(_STRICT)
+
+
+def _novice_fight(n, enemy, ne, seed=1, muts=(_M306,)):
+    layout = LAYOUTS[seed % len(LAYOUTS)]
+    grid = Grid.from_layout(layout)
+    rng = random.Random(seed)
+    t0 = deploy(grid, layout, [build_unit(_UBC_S, "Novice", 1, name="Novice")
+                               for _ in range(n)], 0, "p", rng)
+    apply_class_skills(_STRICT, t0, list(muts))
+    size = int((_STRICT["Meta"]["Classes"].get(enemy) or {}).get("Size") or 1)
+    t1 = deploy(grid, layout, [build_unit(_UBC_S, enemy, 1, name=enemy, size=size)
+                               for _ in range(ne)], 1, "e1", rng)
+    return t0, t1, Battle(grid, t0 + t1, seed=seed, tables=_STRICT)
+
+
+_t0n = _novice_fight(5, "Novice", 3)[0]
+_t0plain = _novice_fight(5, "Novice", 3, muts=())[0]
+check("306 gives every Novice the Novicator class skill (cooldown 100, no mana)",
+      all(any(act.name == "Novicator" and act.cooldown == 100 and act.mana_cost == 0
+              for act in a.actions) for a in _t0n)
+      and not any(act.name == "Novicator" for a in _t0plain for act in a.actions))
+
+_t0n, _t1n, _bn = _novice_fight(5, "Novice", 3)
+_hp_in = sum(a.hp for a in _t0n)
+while not any(a.spec.cls == "MegaNovice" for a in _bn.agents) and _bn.tick_count < 200:
+    _bn.step()
+_mega = next((a for a in _bn.agents if a.spec.cls == "MegaNovice"), None)
+check("Novicator merges all five Novices into one MegaNovice of Size 2",
+      _mega is not None and len(_mega.absorbing) == 5 and _mega.spec.size == 2
+      and all(a.absorbed and not a.alive for a in _t0n),
+      f"{len(_mega.absorbing) if _mega else 0} absorbed")
+check("the MegaNovice's numbers are the sums of the Novices'",
+      _mega is not None and _mega.spec.health == 5 * 70 and _mega.spec.damage == 5 * 20
+      and _mega.spec.armor == 5 * 1 and abs(_mega.hp - _hp_in) < 1e-6,
+      f"health {_mega.spec.health if _mega else None}, damage "
+      f"{_mega.spec.damage if _mega else None}, armour {_mega.spec.armor if _mega else None}")
+_rn = _bn.run()
+_share = max(1.0, _mega.hp / 5) if _mega else 0.0
+check("a won fight splits it back: each Novice on max(1, health / 5), capped at its maximum",
+      _rn.winner == 0 and all(a.alive and abs(a.hp - min(_share, a.max_hp)) < 1e-6
+                              for a in _t0n),
+      f"winner {_rn.winner}, Novices {[round(a.hp, 1) for a in _t0n]}, share {_share:.1f}")
+
+_t0d, _t1d, _bd = _novice_fight(5, "Novice", 3, seed=2)
+while not any(a.spec.cls == "MegaNovice" for a in _bd.agents) and _bd.tick_count < 200:
+    _bd.step()
+_megad = next(a for a in _bd.agents if a.spec.cls == "MegaNovice")
+_megad.hp = 0.0
+_bd._process_deaths()
+check("a MegaNovice's death kills every Novice inside it, in the same pass",
+      all(a.hp == 0.0 and not a.alive and not a.absorbed and a.death_handled for a in _t0d)
+      and _megad.absorbing == [])
+_lost = _novice_fight(5, "Zombie", 2)[2].run()
+check("a lost fight leaves no Novice alive", _lost.winner == 1 and _lost.survivors[0] == 0,
+      f"winner {_lost.winner}, survivors {_lost.survivors}")
 
 # The Medic's class skill heals the lowest health, not the most missing
 # (`C_HealCSkill.GetMostDamagedTarget`, strict `<` from float.MaxValue over the

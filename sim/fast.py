@@ -31,7 +31,7 @@ PASSIVE_STRIDE = 21
 # Action kinds, matching core/src/lib.rs
 (K_ATTACK, K_DIRECT, K_AOE, K_HEAL, K_DRAIN, K_MANABURN,
  K_BUFF_SELF, K_DEBUFF_AROUND, K_SUMMON, K_SPIRIT_LINK,
- K_STATUS, K_BLINK, K_SCI_CAST) = range(13)
+ K_STATUS, K_BLINK, K_SCI_CAST, K_ABSORB) = range(14)
 SCOPE_TEAM, SCOPE_SELF, SCOPE_RADIUS = range(3)
 
 # Control statuses, as indices into the core's `Agent::statuses`.
@@ -457,11 +457,15 @@ class _Templates:
         self.passives: list = []     # rows, column 0 is the template index
         self.failure = ""
 
-    def get(self, cls: str | None, level: int) -> int:
-        """The template index for a class at a level, or -1 if there is none."""
+    def get(self, cls: str | None, level: int, meta_size: bool = False) -> int:
+        """The template index for a class at a level, or -1 if there is none.
+
+        Summons are built at Size 1, as `Battle.summon` builds them; with
+        `meta_size` the body is the class's `Meta.Classes` Size instead, as
+        `Battle.absorb` builds its MegaNovice."""
         if not cls or self.tables is None:
             return -1
-        key = "%s:%s" % (cls, level)
+        key = "%s:%s%s" % (cls, level, ":meta" if meta_size else "")
         if key in self.index:
             return self.index[key]
         from .battle import Agent
@@ -473,7 +477,10 @@ class _Templates:
         ubc = units_by_class(self.tables)
         if cls not in ubc:
             return -1
-        spec = build_unit(ubc, cls, level, name=cls + "(summon)")
+        size = 1
+        if meta_size:
+            size = int((self.tables["Meta"]["Classes"].get(cls) or {}).get("Size") or 1)
+        spec = build_unit(ubc, cls, level, name=cls + "(summon)", size=size)
         agent = Agent(spec=spec, team=0, x=0.0, y=0.0, hp=spec.health, summoned=True)
         agent.actions = build_actions(spec, None)
         if spec.skills:
@@ -539,6 +546,15 @@ def action_rows(a, i: int, templates: "_Templates") -> list[tuple]:
             if template < 0:
                 raise Unrepresentable(f"{a.spec.name}'s {act.name} has no summon template")
             count = 1
+        elif act.name == "Novicator":
+            # `Battle.absorb`: the template is the summon at its Meta size,
+            # which is what the oracle builds.
+            kind = K_ABSORB
+            cls = str(act.params.get("summonClass") or "MegaNovice")
+            lvl = int(_num(act.params, "unit level", default=1) or 1)
+            template = templates.get(cls, lvl, meta_size=True)
+            if template < 0:
+                raise Unrepresentable(f"{a.spec.name}'s {act.name} has no {cls} template")
         else:
             h = REGISTRY.get(act.name)
             eff = h.effect if h else ""

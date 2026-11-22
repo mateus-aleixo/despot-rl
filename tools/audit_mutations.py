@@ -156,7 +156,7 @@ def main():
         item_class.setdefault(r.get("Class"), name)
 
     rows = [m for m in tables["SimpleMutations"]
-            if M.handler_for(m["Name"]).kind in (PASSIVE, ACTIVE)
+            if M.handler_for_row(m).kind in (PASSIVE, ACTIVE)
             and (args.only is None or m["Name"] == args.only)]
     flagged = 0
     print(f"{len(rows)} implemented mutation rows\n")

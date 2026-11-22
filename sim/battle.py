@@ -31,6 +31,7 @@ import json
 import math
 import pathlib
 import random
+import dataclasses
 from dataclasses import dataclass, field
 
 from .actions import Action, build_actions, resolve_class_skills
@@ -265,10 +266,15 @@ class Agent:
     block_mask: int = 0
     # AoeBurn, one per source: (total damage, radius, mana per burst)
     aoe_burns: list = field(default_factory=list)
+    # Novicator (`C_AbsorbingSummonCSGroup`): a unit merged into a MegaNovice
+    # is out of the fight (the game makes it Unrendered) until the MegaNovice
+    # splits back; the MegaNovice holds the units it absorbed.
+    absorbed: bool = False
+    absorbing: list = field(default_factory=list)
 
     @property
     def alive(self) -> bool:
-        return self.hp > 0.0 and not self.corpse
+        return self.hp > 0.0 and not self.corpse and not self.absorbed
 
     def has(self, status: str) -> bool:
         return self.statuses.get(status, 0.0) > 0.0
@@ -417,6 +423,8 @@ class Battle:
         living = [a for a in self.agents if a.alive]
 
         for ag in living:
+            if ag.absorbed:
+                continue        # merged into a MegaNovice earlier this tick
             if ag.target is None or not ag.target.alive:
                 ag.target = self.pick_target(ag)
                 ag.repath_in = 0.0
@@ -475,6 +483,7 @@ class Battle:
 
         self._process_deaths()
 
+        living = [a for a in living if not a.absorbed]
         prefs = {id(ag): self._preferred_velocity(ag, dt) for ag in living}
 
         for ag in living:
@@ -552,9 +561,15 @@ class Battle:
         """
         if action is not None and action.name != "attack":
             return action.range_world
+        contact = ag.spec.radius + tgt.spec.radius + self.a.melee_margin
         if not ag.spec.melee:
-            return ag.spec.range_world
-        return ag.spec.radius + tgt.spec.radius + self.a.melee_margin
+            # A Range stat short of the two bodies' contact distance could never
+            # be met centre-to-centre: 12 unit classes have Range x 6 exactly
+            # equal to their own radius (MegaNovice, Samurai, DeathSword, both
+            # Despot2 forms, ...), and every one plainly attacks in the game.
+            # So a short reach still reaches at contact (assumptions.melee_margin).
+            return max(ag.spec.range_world, contact)
+        return contact
 
     # -- effects -----------------------------------------------------------
     def land_attack(self, ag: Agent, action: Action) -> None:
@@ -870,24 +885,110 @@ class Battle:
         self._init_agent(new)
         self.agents.append(new)
 
+    def absorb(self, caster: Agent, action) -> None:
+        """Novicator, `C_AbsorbingSummonCSGroup` (mutation 306).
+
+        One Novice opens a pool (`AbsorbingCircleStrategy`, one unit) and every
+        other Novice of its side that can still act walks in and is absorbed
+        (`InProgress`: health above 0, none of Dead, Hidden, Disabled, Spawning,
+        DeSpawning, Stunned, Unrendered or TurnedOff, and not Fearful,
+        Catatonic, Taunted, Silent, Resurrecting or Hexed). Here the merge is
+        instant, as every summon in the sim is (no walk, no spawn clip).
+
+        `OnSummoned` throws away the MegaNovice's own table numbers: health is
+        its health bonus plus the sum of the absorbed units' health, maximum
+        health the sum of their total maximums, mana likewise, damage and armour
+        the sums of their base values, experience 0 out of infinity. Its attack
+        speed, range, speed, size and StatusEvasion stay its own.
+        """
+        if self.tables is None:
+            return
+        from .data import units_by_class
+        ubc = units_by_class(self.tables)
+        cls = str(action.params.get("summonClass") or "MegaNovice")
+        level = int(action.params.get("unit level") or 1)
+        if cls not in ubc:
+            return
+        members = [o for o in self.agents
+                   if o.team == caster.team and o.spec.cls == caster.spec.cls and o.alive
+                   and not (o.has("stun") or o.has("silence") or o.has("panic"))]
+        if caster not in members:
+            return
+        size = int((self.tables["Meta"]["Classes"].get(cls) or {}).get("Size") or 1)
+        base = build_unit(ubc, cls, level, name=f"{cls}(summon)", size=size)
+        spec = dataclasses.replace(
+            base,
+            health=sum(o.max_hp for o in members),
+            damage=sum(o.spec.damage for o in members),
+            armor=sum(o.spec.armor for o in members),
+            mana=sum(o.spec.mana for o in members),
+        )
+        new = Agent(spec=spec, team=caster.team,
+                    x=caster.x + self.rng.uniform(-spec.radius, spec.radius),
+                    y=caster.y + self.rng.uniform(-spec.radius, spec.radius),
+                    hp=sum(o.hp for o in members), summoned=True)
+        new.mana = sum(o.mana for o in members)
+        new.actions = build_actions(spec, None)
+        if self.fury_on:
+            new.fury_due = self.tick_count + self.fury_period
+        if self.dying_on:
+            new.dying_due = self.tick_count + self.dying_period
+        self._init_agent(new)
+        for o in members:
+            o.absorbed = True
+            o.target = None
+            o.vx = o.vy = 0.0
+        new.absorbing = members
+        self.agents.append(new)
+
+    def break_apart(self) -> None:
+        """`EnemyTeamDying` -> `BreakApart` -> `Unsummon` -> `OnSummonDeclined`:
+        when the fight ends with a MegaNovice standing, it splits back into the
+        units it absorbed. `afterFightHealth` is max(1, (health / healthMult -
+        healthBonus) / count), and each unit gets that, capped at its own total
+        maximum. The MegaNovice is unsummoned, not killed."""
+        for ag in self.agents:
+            if not ag.absorbing or not ag.alive:
+                continue
+            share = max(1.0, ag.hp / len(ag.absorbing))
+            for o in ag.absorbing:
+                o.absorbed = False
+                o.hp = min(share, o.max_hp)
+            ag.absorbing = []
+            ag.corpse = True
+            ag.death_handled = True
+
     def _process_deaths(self) -> None:
         """Fire on-death skills once per unit, then the on-death passives.
 
         Resurrection runs first: a unit that comes back never counts as dead,
         so nothing that keys off its death should have fired.
+
+        A MegaNovice that dies takes its absorbed units with it
+        (`OnSummonDying` sets each one's health to 0), and their deaths are
+        handled in the same pass.
         """
         from .mutations import run_death_passives, try_resurrect
         from .unit_skills import run_death_effects
-        for ag in list(self.agents):
-            if ag.death_handled or ag.hp > 0.0:
-                continue
-            if ag.resurrect is not None and try_resurrect(self, ag):
-                continue
-            ag.death_handled = True
-            if ag.on_death:
-                run_death_effects(ag, self)
-            if ag.on_death_passives:
-                run_death_passives(ag, self)
+        again = True
+        while again:
+            again = False
+            for ag in list(self.agents):
+                if ag.death_handled or ag.hp > 0.0:
+                    continue
+                if ag.resurrect is not None and try_resurrect(self, ag):
+                    continue
+                ag.death_handled = True
+                if ag.absorbing:
+                    for o in ag.absorbing:
+                        o.absorbed = False
+                        o.hp = 0.0
+                    ag.absorbing = []
+                    again = True
+                if ag.on_death:
+                    run_death_effects(ag, self)
+                if ag.on_death_passives:
+                    run_death_passives(ag, self)
 
     def _step_projectiles(self, dt: float) -> None:
         still = []
@@ -922,8 +1023,11 @@ class Battle:
             alive = {t: sum(1 for a in self.agents if a.alive and a.team == t) for t in (0, 1)}
             if alive[0] == 0 or alive[1] == 0:
                 winner = None if alive[0] == alive[1] else (0 if alive[0] else 1)
+                self.break_apart()
+                alive = {t: sum(1 for a in self.agents if a.alive and a.team == t) for t in (0, 1)}
                 return self._result(winner, alive)
             self.step()
+        self.break_apart()
         alive = {t: sum(1 for a in self.agents if a.alive and a.team == t) for t in (0, 1)}
         return self._result(None, alive)
 
@@ -937,12 +1041,20 @@ class Battle:
 
 # ------------------------------------------------------------------ squad setup
 
-def apply_class_skills(tables: dict, agents: list[Agent]) -> dict[str, dict]:
-    """Resolve and attach class skills for one side, by its composition."""
+def apply_class_skills(tables: dict, agents: list[Agent],
+                       mutations: list[dict] | None = None) -> dict[str, dict]:
+    """Resolve and attach class skills for one side, by its composition.
+
+    A held `ClassSkill` mutation gives its class the named class skill
+    (`sim.mutations.granted_class_skills`)."""
     counts: dict[str, int] = {}
     for ag in agents:
         counts[ag.spec.cls] = counts.get(ag.spec.cls, 0) + 1
-    resolved = resolve_class_skills(tables, counts)
+    granted = None
+    if mutations:
+        from .mutations import granted_class_skills
+        granted = granted_class_skills(mutations, sorted(counts))
+    resolved = resolve_class_skills(tables, counts, granted)
 
     for ag in agents:
         skill = resolved.get(ag.spec.cls)

@@ -270,6 +270,47 @@ print("  (a blinker teleports 25 units and walks back, over and over, so the two
 print("   widths end the fight a few ticks apart -- the damage is identical, which")
 print("   is what says the blink itself agrees)")
 
+# --------------------------------------------------------------------------
+# Novicator (306): item-less Novices merge into a MegaNovice, which splits back
+# on a win or kills them when it dies. Measured on whole fights: the winner, the
+# length, and the Novices' health at the end (the split's share).
+print("\n== differential: Novicator (306) ==")
+from sim.mutations import for_class as _for_class
+_M306 = _for_class(MUT_BY_ID[306], "Novice")
+
+
+def make_novices(seed, n_nov, enemy, n_en):
+    layout = layouts[seed % len(layouts)]
+    grid = Grid.from_layout(layout)
+    rng = random.Random(seed)
+    specs = [build_unit(ubc, "Novice", 1, name="Novice") for _ in range(n_nov)]
+    size = int((META.get(enemy) or {}).get("Size") or 1)
+    especs = [build_unit(ubc, enemy, 1, name=enemy, size=size) for _ in range(n_en)]
+    t0 = deploy(grid, layout, specs, 0, "p", rng)
+    t1 = deploy(grid, layout, especs, 1, "e1", rng)
+    apply_class_skills(t, t0, [_M306])
+    return grid, Battle(grid, t0 + t1, seed=seed, tables=t), len(t0)
+
+
+print(f"    {'fight':26s} {'winners':9s} {'tick err':9s} {'Novice hp err':13s} oracle wins")
+for enemy, n_nov, n_en in (("Novice", 5, 3), ("Novice", 5, 5), ("CatBot", 5, 1),
+                           ("Mancrack", 5, 3)):
+    n = 16
+    agree, wins, tr, herr = 0, 0, [], []
+    for s in range(n):
+        g1, b1, k = make_novices(s, n_nov, enemy, n_en)
+        g2, b2, _ = make_novices(s, n_nov, enemy, n_en)
+        py = b1.run()
+        rs = fast_battle(g2, b2.agents, seed=s, tables=t)
+        agree += int(py.winner == rs["winner"])
+        wins += int(py.winner == 0)
+        tr.append(abs(py.ticks - rs["ticks"]) / max(1, py.ticks))
+        herr.append(max(abs((b1.agents[i].hp if b1.agents[i].alive else 0.0)
+                            - max(0.0, float(rs["hp"][i]))) for i in range(k)))
+    label = f"{n_nov} Novices vs {n_en} {enemy}"
+    print(f"    {label:26s} {f'{agree}/{n}':9s} {statistics.mean(tr)*100:7.2f}%  "
+          f"{statistics.mean(herr):9.2f}     {wins}/{n}")
+
 print("\n== speed ==")
 N = 40
 py_t0 = time.perf_counter()

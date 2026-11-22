@@ -24,7 +24,12 @@ from .assumptions import DEFAULT, TILE
 PASSIVE_SKILLS = {"CriticalStrike", "ASAura", "Dodge"}
 
 # Class skills that target the caster, so they need no approach.
-SELF_CAST = {"Tank", "Cultist", "Scientist", "SpiritLink"}
+SELF_CAST = {"Tank", "Cultist", "Scientist", "SpiritLink", "Novicator"}
+
+# Class skills a `ClassSkill` mutation grants, as (classSkillName, csGroupName)
+# pairs the sim can run. Mutation 306 (the Pit's reward) gives the Novice the
+# `Novicator` in the `AbsorbingSummon` group; nothing else ships the name.
+GRANTED_CLASS_SKILLS = {("Novicator", "AbsorbingSummon")}
 
 # A mutation-granted self buff also needs no approach.
 SELF_CAST_PREFIX = "Mutation:"
@@ -80,16 +85,18 @@ def skill_for_class(tables: dict, cls: str) -> str | None:
     return (tables["Meta"]["Classes"].get(cls) or {}).get("Skill")
 
 
-def resolve_class_skills(tables: dict, class_counts: dict[str, int]) -> dict[str, dict]:
+def resolve_class_skills(tables: dict, class_counts: dict[str, int],
+                         granted: dict[str, str] | None = None) -> dict[str, dict]:
     """`class -> {name, level, params}` for the squad's composition.
 
     The level is the highest ClassSkills row whose `HumansRequired` is met by
-    the number of humans of that class.
+    the number of humans of that class. `granted` maps a class to a class
+    skill a `ClassSkill` mutation gave it, which stands in for the class's own.
     """
     rows = class_skill_rows(tables)
     out: dict[str, dict] = {}
     for cls, count in class_counts.items():
-        name = skill_for_class(tables, cls)
+        name = (granted or {}).get(cls) or skill_for_class(tables, cls)
         if not name or name not in rows:
             continue
         eligible = [r for r in rows[name] if r["HumansRequired"] <= count]
@@ -182,6 +189,11 @@ def effect_summon(action, agent, battle):
     battle.summon(agent, cls, level)
 
 
+def effect_absorb(action, agent, battle):
+    """Novicator: the side's Novices merge into one MegaNovice (`Battle.absorb`)."""
+    battle.absorb(agent, action)
+
+
 EFFECTS = {
     "attack": effect_attack,
     "Heal": effect_heal,
@@ -191,6 +203,7 @@ EFFECTS = {
     "SpiritLink": effect_spirit_link,
     "Cultist": effect_summon,
     "Scientist": effect_summon,
+    "Novicator": effect_absorb,
 }
 
 
