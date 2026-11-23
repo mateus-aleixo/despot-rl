@@ -52,6 +52,20 @@ verified against pycryptodome by running it at Nb=4, where Rijndael is AES.
 `FS.Unzip` is gzip, not zip. The decompressed payload is a flat stream of
 `path\n<single-line json>\n` records.
 
+## The server's copy (2026-11-23)
+
+These TextAssets are only the starting point: the game plays the copy its
+server hands out, which `C_ClientData` saves as `clientData.bin` in the
+player's `LocalLow/Konfa Games/Despot's Game` (notes/reference-sim.md, "The
+live data, found"). That file is a persistent model:
+`C_PersistentModel<object>.Load` runs `FS.LoadBytes`, then
+`StringCipher.Decrypt` with a second 32-character literal (it is the call's
+string argument in that function, three times over), then `FS.Unzip`. The JSON
+inside holds `version`, `data`, `hash` and `date`, and `data` is base64 of the
+scheme above, asset passphrase and all. `tools/decrypt_client_data.py` does
+both layers, reading the second literal from `DESPOT_SAVE_PASSPHRASE`, and
+writes `data/extracted/live/`, which `load_ruleset(source="live")` reads.
+
 ## Dead ends, recorded so they are not repeated
 
 - The passphrase *is* a plain IL2CPP string literal, but a literal sweep filtered

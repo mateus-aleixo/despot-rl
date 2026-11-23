@@ -3687,6 +3687,22 @@ if _core_available():
               _agree == 10 and (sum(_err) / max(1, len(_err))) < 1e-4,
               f"winners {_agree}/10, damage error {100 * sum(_err) / max(1, len(_err)):.3f}%")
 
+print("\n== the live data ==")
+# The server's copy the game plays (`tools/decrypt_client_data.py`); only
+# checked where it has been extracted.
+from sim.data import LIVE_METADATA as _LIVE_META
+if _LIVE_META.exists():
+    _lv = load_ruleset(source="live")
+    _uf = [mutation_params(m) for m in _lv["SimpleMutations"] if m["ID"] == 269]
+    check("the live ruleset loads, with every table the install's has",
+          sorted(_lv) == sorted(_STRICT), f"{sorted(set(_STRICT) ^ set(_lv))}")
+    check("live UnderFeed (269) cuts food by 30%, as the recorded run showed",
+          _uf and _uf[0].get("value") == 30, f"{_uf}")
+    _lst = RunState.new(_lv, seed=3)
+    check("a run starts on the live data", _lst.rooms is not None and _lst.squad)
+else:
+    print("  (no live data extracted; skipped)")
+
 print("\n== throughput ==")
 t0 = time.perf_counter()
 n = 20

@@ -3386,3 +3386,19 @@ should read this file (when it is newer than the install) rather than the
 TextAssets alone. The tables here stay as they are until the batch-2
 boundary, where the switch is made together with turning the grid on (his
 call, 2026-11-23), since it moves every number measured so far.
+
+`tools/decrypt_client_data.py` extracts it to `data/extracted/live/`, and
+`load_ruleset(source="live")` plays it (the server copy holds the main group
+only; anything it lacks comes from the install). A preview of the boundary, on
+the heuristic, paired over 2400 seeds from 40000:
+
+| data | grid off | grid on |
+|---|---|---|
+| install (now) | 3.297 | 3.680 |
+| live | 3.607 | 4.010 |
+
+The live data alone is +0.310 [+0.265, +0.353] with the grid off and +0.331
+[+0.285, +0.375] with it on; the grid on the live data is +0.404 [+0.344,
++0.460]; the boundary as decided, install with no grid to live with the grid,
+is +0.714 [+0.657, +0.769]. `dialogs.py` still reads the install's
+`dialogs.json` directly, which the switch has to move too.

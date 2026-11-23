@@ -23,6 +23,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 JSON_ROOT = ROOT / "data" / "extracted" / "json"
 MAIN = JSON_ROOT / "EncryptedMainGroup"
 METADATA = ROOT / "data" / "extracted" / "gamedata" / "metadata.txt"
+# The server's copy of the main group, which is what the game plays
+# (`tools/decrypt_client_data.py`, notes/reference-sim.md "The live data,
+# found"). It carries its own metadata.json; files it does not hold come from
+# the install's extraction.
+LIVE_MAIN = ROOT / "data" / "extracted" / "live" / "json" / "EncryptedMainGroup"
+LIVE_METADATA = LIVE_MAIN / "metadata.json"
 
 
 class MergeNotImplemented(NotImplementedError):
@@ -127,8 +133,11 @@ UNIMPLEMENTED = {"remover", "cloner"}
 # loading
 # --------------------------------------------------------------------------
 
-def _read(path: str, root: pathlib.Path = MAIN) -> Any:
+def _read(path: str, root: pathlib.Path = MAIN,
+          fallback: pathlib.Path | None = None) -> Any:
     p = root / path
+    if not p.exists() and fallback is not None:
+        p = fallback / path
     if not p.exists():
         raise FileNotFoundError(f"{p} (did tools/split_gamedata.py run?)")
     if p.suffix.lower() == ".csv":
@@ -151,20 +160,34 @@ def _layers(metadata: dict, mode: str, chip: str, without_food: bool) -> list[di
 
 
 def load_ruleset(mode: str = "Default", chip: str = "default", without_food: bool = False,
-                 strict: bool = True) -> dict[str, Any]:
+                 strict: bool = True, source: str = "install") -> dict[str, Any]:
     """Resolve one ruleset into `logical name -> parsed table`.
 
     With `strict`, a merge strategy this loader does not implement raises. Turn
     it off only to inspect partial data, never to produce numbers.
+
+    `source` picks the data: `"install"` (the default, the tables extracted
+    from the game's install, which every number so far was measured on) or
+    `"live"` (the server's copy the game plays, `tools/decrypt_client_data.py`).
+    The batch-2 boundary moves the default to `"live"`.
     """
-    metadata = json.loads(METADATA.read_text(encoding="utf-8"))
+    if source == "live":
+        if not LIVE_METADATA.exists():
+            raise FileNotFoundError(f"{LIVE_METADATA} (did tools/decrypt_client_data.py run?)")
+        metadata = json.loads(LIVE_METADATA.read_text(encoding="utf-8"))
+        root, fallback = LIVE_MAIN, MAIN
+    elif source == "install":
+        metadata = json.loads(METADATA.read_text(encoding="utf-8"))
+        root, fallback = MAIN, None
+    else:
+        raise ValueError(f"source {source!r}: 'install' or 'live'")
     tables: dict[str, Any] = {}
     for layer in _layers(metadata, mode, chip, without_food):
         for section in ("Files", "CSV"):
             for name, spec in layer.get(section, {}).items():
                 path, _, strategy = spec.partition("?")
                 strategy = strategy or None
-                data = _read(path)
+                data = _read(path) if source == "install" else _read(path, root, fallback)
                 if name not in tables:
                     tables[name] = data
                     continue

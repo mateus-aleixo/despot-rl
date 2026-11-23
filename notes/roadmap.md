@@ -397,7 +397,9 @@ the sim's tables in 27 files: Novice damage doubled, most items cheaper, the
 summon class skills at half mana, 46 mutation rows. Decided 2026-11-23: the
 sim switches to the live data at the batch-2 boundary, together with turning
 the grid on, so everything is re-measured once; the extraction will read
-`clientData.bin` from then on, so later patches come in with it.
+`clientData.bin` from then on, so later patches come in with it. The tool and
+`load_ruleset(source="live")` are in already; the preview puts the heuristic at
+4.010 after the switch against 3.297 now (+0.714 [+0.657, +0.769]).
 
 2026-11-23: the grid is the run's, bought with its gold (`notes/reference-sim.md`,
 "The mutation grid, read"), and the sim has it now, in `sim/grid.py`, off by
