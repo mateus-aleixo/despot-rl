@@ -387,7 +387,8 @@ sim was checked against a 90-minute recording of the game (`notes/reference-sim.
 in the footage come from the mutation grid, first taken for the account's
 meta-progression. Two run-layer questions came out of it, for the batch they
 belong to: the item stash with GetItemBack's chance to return a dead unit's
-item, and food drops smaller than UnderFeed's 20% in two runs.
+item, and food drops smaller than UnderFeed's 20% in two runs (a mutation
+he took at an altar, he says; which row gives 30% is open).
 
 2026-11-23: the grid is the run's, bought with its gold (`notes/reference-sim.md`,
 "The mutation grid, read"), and the sim has it now, in `sim/grid.py`, off by

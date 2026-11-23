@@ -3197,7 +3197,12 @@ Not settled:
 
 * In two runs food drops by less than the squad (9, then 13, with 18 humans; 23
   with 33), more than UnderFeed's 20% alone accounts for. The held mutations
-  and the team's make-up at those moves were not read.
+  and the team's make-up at those moves were not read. He says (2026-11-23) it
+  was a mutation he took at an altar. The drops fit a 30% cut exactly (`round(0.7
+  * n)` for every squad size seen), and the only food cut in the tables is
+  UnderFeed at 20% (269), so either that row comes to 30% in the game or another
+  row does it. The recording is deleted; a Default one with the mutation held
+  would settle which.
 * The mutation shop shows "REROLLS: 3" in one run and "REROLLS: 5" in another,
   where the sim gave 2 per shop (`C_Room..ctor`). Settled 2026-11-23: every
   run has the grid table's always-on AdditionalRerolls 1, so an altar gives 3,
