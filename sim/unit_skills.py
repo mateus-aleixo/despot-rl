@@ -55,7 +55,7 @@ REGISTRY: dict[str, Handler] = {
     # -- passives ---------------------------------------------------------
     "SplashAround": Handler(PASSIVE, note="attacks splash for percent% in radius"),
     "Evasion": Handler(PASSIVE, note="Chance% to evade an incoming hit"),
-    "StatusEvasion": Handler(PASSIVE, note="evades statuses; treated as evasion"),
+    "StatusEvasion": Handler(PASSIVE, note="turns away incoming statuses of a type, by chance"),
     "CriticalStrike": Handler(PASSIVE, note="chance% for mult x damage"),
     "Regeneration": Handler(PASSIVE, note="+value of a stat every period"),
     "Vampirism": Handler(PASSIVE, note="heals the attacker for a share of damage"),
@@ -189,6 +189,32 @@ def evasion_entry(params: dict) -> tuple[float, float, bool]:
             param(params, "healthThreshold", "HealthThreshold",
                   default=EVASION_HEALTH_THRESHOLD),
             str(str_param(params, "jumpBack", "JumpBack", default="")).lower() == "true")
+
+
+def status_evasion_entry(params: dict) -> tuple[float, int]:
+    """One `M_StatusEvasionSkill` row: `chance` and the `StatusType` mask
+    `C_StatusEvasionSkill.Init` builds, Negative for `clearNegative` and
+    Positive for `clearPositive`.
+
+    It is an active skill with no behaviour tree (`BTName` is null): all it
+    does is answer `OnStatusConfirm` (`Battle.resists`). Until 2026-11-23 the
+    sim read it as an evasion of attacks, a dodge the game never rolls, for
+    the units that carry it: Despot2Hard (skill 122, 50%), the MegaNovice
+    (142, 20%), Scientists and Cultists holding mutation 324, and the grid's
+    node. Both flags carry `[DefaultValueAttribute]`; every
+    shipped row sets them, `clearNegative` true and `clearPositive` false,
+    which is also what a row without them is taken to mean here.
+    """
+    from .battle import Q_NEGATIVE, Q_POSITIVE
+    from .model_defaults import CHANCE
+
+    def flag(name, default):
+        v = str_param(params, name, name[0].upper() + name[1:])
+        return default if v is None else str(v).lower() == "true"
+
+    mask = ((Q_NEGATIVE if flag("clearNegative", True) else 0)
+            | (Q_POSITIVE if flag("clearPositive", False) else 0))
+    return (param(params, "chance", "Chance", default=CHANCE), mask)
 
 
 def vampirism_entry(params: dict) -> tuple[float, bool, int]:
@@ -491,8 +517,10 @@ def apply_unit_skills(agent, tables: dict) -> list:
             if cs == "SplashAround":
                 agent.splash = (param(p, "percent", "Percent", default=100.0),
                                 param(p, "radius", "Radius", default=0.0))
-            elif cs in ("Evasion", "StatusEvasion"):
+            elif cs == "Evasion":
                 agent.evasions.append(evasion_entry(p))
+            elif cs == "StatusEvasion":
+                agent.status_evasions.append(status_evasion_entry(p))
             elif cs == "CriticalStrike":
                 agent.crit_chance = max(agent.crit_chance, param(p, "chance", "Chance"))
                 agent.crit_mult = max(agent.crit_mult, param(p, "mult", "value", default=1.0))
@@ -615,7 +643,7 @@ def make_status(params, cs_class=""):
         else:
             victims = [agent.target] if agent.target is not None and agent.target.alive else []
         for o in victims:
-            o.apply_status(status, duration)
+            battle.afflict(o, status, duration)
             if dmg:
                 battle.hit(agent.team, o, dmg, magical=magical, attacker=agent)
     return effect

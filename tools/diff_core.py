@@ -353,6 +353,35 @@ for mid, n in ((363, 2), (363, 3), (363, 4), (364, 2), (364, 4)):
     print(f"  {label:16s} {str(sorted(made)):15s} {f'{agree}/24':9s} {f'{matched}/24':13s} "
           f"{exact}/{matched}")
 
+print("\n== differential: SummonSimple with the grid's summon bonus ==")
+# Fhtagn 3, Mglw'nafh 2, Wgah'nagl 1 on the summoners: +120% damage, +250%
+# health, +100% attack speed for what they summon (`Battle._summon_bonus`).
+_BONUS = [("damage", 120.0), ("health", 250.0), ("attack_speed", 100.0)]
+
+
+def boosted(seed, mid, n):
+    b = grouped(seed, mid, n)
+    for a in b.agents:
+        if a.team == 0:
+            a.summon_bonus = list(_BONUS)
+    return b
+
+
+print(f"  {'squad':16s} {'winners':9s} {'tick-matched':13s} exact")
+for mid, n in ((363, 2), (363, 4), (364, 2), (364, 4)):
+    agree = exact = matched = 0
+    for s in range(24):
+        py = boosted(s, mid, n).run()
+        rs = fast_battle(DGRID, boosted(s, mid, n).agents, seed=s, tables=t)
+        agree += int(py.winner == rs["winner"])
+        if py.ticks != rs["ticks"]:
+            continue
+        matched += 1
+        exact += int(abs(py.total_damage[0] - rs["damage"][0]) < 0.5
+                     and abs(py.total_damage[1] - rs["damage"][1]) < 0.5)
+    label = f"{n} {_SS[mid][0]}s"
+    print(f"  {label:16s} {f'{agree}/24':9s} {f'{matched}/24':13s} {exact}/{matched}")
+
 print("\n== speed ==")
 N = 40
 py_t0 = time.perf_counter()

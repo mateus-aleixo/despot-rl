@@ -395,10 +395,13 @@ default: `RunState.new(grid=True)`, `DespotRunEnv(grid=True)`, and a heuristic
 rule for it. Off, the heuristic reads 3.297 as before (no run changes); on, 3.689
 (+0.393 [+0.337, +0.448]). Every run also gets the altar's always-on extra
 reroll now, which was the "REROLLS: 3" in the recording, and percentage
-resistance bonuses compound as the game's do. Still open on the grid: the three
-summon nodes, which need per-team summon templates in the Rust core. Whether
-the boundary re-baseline turns the grid on is the next decision; the game
-always has it.
+resistance bonuses compound as the game's do. Later the same day the grid's
+last two gaps were closed in both engines: StatusEvasion turns away statuses
+instead of attacks, and the summon nodes reach what a team summons
+(`notes/reference-sim.md`, "StatusEvasion and the summon bonus, read").
+Decided 2026-11-23: the batch-2 boundary re-baseline turns the grid on, since
+the game always has it; until then batch-2 measurements stay grid-off, with a
+grid-on check for anything that touches stats or gold.
 
 The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
 **stopped part-way and its checkpoints deleted** on 2026-09-02. Re-run it if

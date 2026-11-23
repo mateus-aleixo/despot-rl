@@ -236,12 +236,10 @@ _STAT_CELLS = (15, 16, 13, 10, 17)
 
 def _grid_pick(st: RunState, actions: list, policy: str = "cheapest",
                reserve: float = 0.0):
-    """A grid node on offer that the sim gives an effect and that leaves
-    `reserve` gold: the cheapest, or under `"stats"` the first of
-    `_STAT_CELLS` and then the cheapest. Ties go to the lower cell."""
-    from sim.grid import inert
-    live = [a for a in actions if not inert(st.grid.nodes[a[1]])
-            and st.gold - st.grid.nodes[a[1]].cost >= reserve]
+    """A grid node on offer that leaves `reserve` gold: the cheapest, or
+    under `"stats"` the first of `_STAT_CELLS` and then the cheapest. Ties go
+    to the lower cell."""
+    live = [a for a in actions if st.gold - st.grid.nodes[a[1]].cost >= reserve]
     if not live:
         return None
     if policy == "stats":

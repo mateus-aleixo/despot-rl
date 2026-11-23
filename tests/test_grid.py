@@ -2,7 +2,7 @@
 
 `tools/validate_sim.py` checks the same rules against the shipped grid.
 """
-from sim.grid import Grid, always_on_rows, inert, singular
+from sim.grid import Grid, always_on_rows, singular
 
 # Three columns, two rows:
 #   (0,0) A -R-> (1,0) B -R-> (2,0) D
@@ -77,8 +77,6 @@ def test_rows_and_run_values():
     assert names == ["StatBonus", "StatBonus"]        # RoomCount is run-side
     assert g.run_value("RoomCount", "rooms") == 2
     assert g.run_value("RoomCount", "rerollShrines") == 2
-    assert inert(g.nodes[cell(g, 1, 1)])
-    assert not inert(g.nodes[cell(g, 0, 0)])
 
 
 def test_always_on_rows():

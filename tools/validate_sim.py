@@ -3471,7 +3471,7 @@ print("\n== the mutation grid ==")
 # `sim/grid.py`: the 5 x 5 grid a run buys with gold, off unless asked for.
 import types as _types
 
-from sim.grid import Grid as _MutationGrid, inert as _inert
+from sim.grid import Grid as _MutationGrid
 from sim.mutations import apply_stat_bonus as _asb
 from sim.run import RoomMap as _RoomMap
 
@@ -3505,8 +3505,8 @@ _rc = _g.nodes[_cell[(2, 0)]]
 check("RoomCount's roomses and rerollShrineses read as rooms and rerollShrines",
       _rc.params(2)["rooms"] == 2 and _rc.params(2)["rerollShrines"] == 2,
       f"{_rc.params(2)}")
-check("the summon nodes are the three the sim leaves without effect",
-      sorted((n.x, n.y) for n in _g.nodes.values() if _inert(n))
+check("the summon nodes are the three Summon-kind StatBonus cells",
+      sorted((n.x, n.y) for n in _g.nodes.values() if n.scalars.get("kind") == "Summon")
       == [(1, 4), (2, 4), (3, 4)])
 check("run-side nodes are not fight rows",
       all(r["Name"] == "StatBonus" for r in _g.rows()), f"{[r['Name'] for r in _g.rows()]}")
@@ -3605,6 +3605,87 @@ _m = _e1.action_mask()
 _gi = sorted(_e1._decode(i)[1] for i in _m.nonzero()[0] if _e1._decode(i)[0] == "buy_grid")
 check("the grid's open cells are in the env's mask",
       bool(_gi) and _gi == _e1.state.grid.buyable(50.0), f"{_gi}")
+
+print("\n== status evasion and the summon bonus ==")
+from sim.battle import Q_NEGATIVE as _QN
+
+# StatusEvasion (`C_StatusEvasionSkill.OnStatusConfirm`): a roll against an
+# incoming status of the types its mask names, not a dodge of attacks.
+_mn = _place_at(GRID, [build_unit(_UBC_S, "MegaNovice", 1, name="MegaNovice")], _CELLS[:1], team=1)
+_bm = Battle(GRID, _mn + _place_at(GRID, build_player_squad(_STRICT, [("broadsword", 1)]),
+                                   _CELLS[1:2], team=0), seed=0, tables=_STRICT)
+check("the MegaNovice's skill 142 is a 20% evasion of Negative statuses, not a dodge",
+      _mn[0].evasions == [] and _mn[0].status_evasions == [(20.0, _QN)],
+      f"{_mn[0].evasions} {_mn[0].status_evasions}")
+_sb = Battle(GRID, _place_at(GRID, build_player_squad(_STRICT, [("broadsword", 1)] * 2),
+                             _CELLS[:2], team=0), seed=0, tables=_STRICT)
+_x, _y = _sb.agents[0], _sb.agents[1]
+_x.status_evasions = [(100.0, _QN)]
+_sb.afflict(_x, "stun", 2.0)
+_sb.add_stat_buff(_x, 2.0, (("speed", -20.0, True),))
+_sb.add_stat_buff(_x, 2.0, (("damage", 10.0, True),))
+_sb.add_stat_buff(_x, 2.0, (("speed", -20.0, True),), mechanic=True)
+check("a sure status evasion turns away a stun and a debuff, never a buff or Mechanics",
+      not _x.has("stun") and [b.stats for b in _x.buffs]
+      == [(("damage", 10.0, True),), (("speed", -20.0, True),)], f"{[b.stats for b in _x.buffs]}")
+_y.status_evasions = [(0.0, _QN)]
+_sb.afflict(_y, "stun", 2.0)
+check("at 0% it turns nothing away", _y.has("stun"))
+_se = _g.nodes[_cell[(3, 3)]]
+_se.level = 2
+_sa = _GAgent(spec=_gs.specs()[0], team=0, x=0.0, y=0.0, hp=100.0)
+_ata([_sa], [_se.row()], random.Random(0))
+check("the grid's StatusEvasion 2 is a 35% evasion of Negative statuses",
+      _sa.status_evasions == [(35.0, _QN)] and _sa.evasions == [],
+      f"{_sa.status_evasions} {_sa.evasions}")
+
+# The summon bonus: `C_StatBonusMutation.OnTeamInserted` on a unit of
+# `SummonKind` Summon, percentages multiplying the summon's own numbers.
+_cb = Battle(GRID, _place_at(GRID, build_player_squad(_STRICT, [("broadsword", 1)]),
+                             _CELLS[:1], team=0), seed=0, tables=_STRICT)
+_c = _cb.agents[0]
+_cb.summon(_c, "CatBotSummon", 1)
+_plain = _cb.agents[-1]
+_c.summon_bonus = [("health", 100.0), ("damage", 20.0), ("attack_speed", 100.0)]
+_cb.summon(_c, "CatBotSummon", 1)
+_boost = _cb.agents[-1]
+_cd = lambda ag: next(a.cooldown for a in ag.actions if a.name == "attack")
+check("a team's summon bonus: health x2 (full), damage x1.2, the swing twice as often",
+      abs(_boost.spec.health - 2.0 * _plain.spec.health) < 1e-6
+      and abs(_boost.hp - _boost.spec.health) < 1e-6
+      and abs(_boost.spec.damage - 1.2 * _plain.spec.damage) < 1e-6
+      and abs(2.0 * _cd(_boost) - _cd(_plain)) < 1e-9 and _boost.summon_bonus == _c.summon_bonus,
+      f"{_plain.spec.health}->{_boost.spec.health} {_plain.spec.damage}->{_boost.spec.damage} "
+      f"{_cd(_plain)}->{_cd(_boost)}")
+_gs3 = RunState.new(_STRICT, seed=33, grid=True)
+_gs3.grid.nodes[_cell[(1, 4)]].level = 1
+_gs3.grid.nodes[_cell[(2, 4)]].level = 2
+_sg = _GAgent(spec=_gs3.specs()[0], team=0, x=0.0, y=0.0, hp=100.0)
+_ata([_sg], _gs3.fight_mutations, random.Random(0))
+check("the grid's Fhtagn 1 and Mglw'nafh 2 reach the squad as its summons' bonus",
+      _sg.summon_bonus == [("damage", 20.0), ("health", 250.0)]
+      and _gs3.specs()[0].health == RunState.new(_STRICT, seed=33).specs()[0].health,
+      f"{_sg.summon_bonus}")
+
+# Both engines: a stun that a sure status evasion turns away, at 1v1, exact.
+if _core_available():
+    def _se_fight(seed, chance):
+        t0, t1, b = _mut_fight([224], n=1, seed=seed, foes=1)
+        for a in t1:
+            a.status_evasions = [(chance, _QN)]
+        return b
+
+    for _ch in (100.0, 50.0):
+        _agree, _err = 0, []
+        for _s in range(10):
+            _py = _se_fight(_s, _ch).run()
+            _rs = _fast_battle(GRID, _se_fight(_s, _ch).agents, seed=_s, tables=_STRICT)
+            _agree += int(_py.winner == _rs["winner"])
+            if _py.total_damage[0]:
+                _err.append(abs(_rs["damage"][0] - _py.total_damage[0]) / _py.total_damage[0])
+        check(f"the core reproduces a {_ch:.0f}% status evasion against PassiveStun at 1v1",
+              _agree == 10 and (sum(_err) / max(1, len(_err))) < 1e-4,
+              f"winners {_agree}/10, damage error {100 * sum(_err) / max(1, len(_err)):.3f}%")
 
 print("\n== throughput ==")
 t0 = time.perf_counter()

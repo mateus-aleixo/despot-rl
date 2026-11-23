@@ -2889,8 +2889,9 @@ Novices, which no item makes.
 Still open, each a mechanic the sim does not have: `stackBehaviour`
 `ProlongDuration` (350's armour on cast prolongs one status where the sim
 stacks another), EventualKnockback's `knockbackType` `Fly` (338; the sim
-pushes), StatusEvasion's `clearNegative` (324), Animate's corpse rules
-(`animateRadius`, `pushAway`).
+pushes), Animate's corpse rules (`animateRadius`, `pushAway`).
+StatusEvasion's `clearNegative` (324) was read on 2026-11-23: see
+"StatusEvasion and the summon bonus, read".
 
 On the heuristic, paired over 2400 seeds from 40000: the actives -0.003
 [-0.007, +0.002], CooldownReduction -0.001 [-0.002, +0.001], `kind` +0.000
@@ -3269,11 +3270,9 @@ The fight-side nodes are mutation rows the battle pipeline already handled
 (StatBonus, ModifyDamage, CooldownReduction, Vampirism, ChanceIncrease,
 StatusEvasion), so both engines take them unchanged, plus Regeneration, which
 now lands on `Agent.regen` (no `Mutations.json` row is one, and only the enemy
-Samurai carry a regeneration of their own). StatusEvasion keeps the sim's
-reading as an evasion, the open item row 324 already has. The three `kind:
-Summon` nodes raise the stats of units summoned in a fight; a summon's stats
-come from a template both teams share in the Rust core, so they are left
-without effect, though they can be bought and count toward `totalLevels`.
+Samurai carry a regeneration of their own). StatusEvasion and the three
+`kind: Summon` nodes needed more, done the same day: see "StatusEvasion and
+the summon bonus, read".
 
 Reading the Magic Defense node turned up a rule the sim had wrong for every
 percentage resistance bonus: `C_StatBonusStatus.ApplyStatus` is the one caller
@@ -3294,3 +3293,55 @@ node first instead lost levels: the cheap nodes (SALE, mana, altars) take the
 first rooms' gold and no fight feels them. 5 runs stop at `max_steps` with the
 grid and 4 without. `DespotRunEnv(grid=True)` has 69 actions and a 556-wide
 observation, against 44 and 455.
+
+## StatusEvasion and the summon bonus, read (2026-11-23)
+
+StatusEvasion is not an evasion of attacks. `C_StatusEvasionSkill` is an active
+skill with no behaviour tree (`BTName` returns null). `Init` builds a
+`StatusType` mask from its row, Negative (2) for `clearNegative` and Positive
+(1) for `clearPositive`, and subscribes `OnStatusConfirm` to the unit's status
+confirmation. As a status is about to land, the hook leaves it alone when it is
+already rejected, when it carries Mechanics (4), or when its type misses the
+mask; otherwise `PseudoRandom.Get(chance)` rejects it. What a status is comes
+from its controller's `Qualify`: stun, silence, fear, taunt, hex, anti-heal,
+the watcher's disable and explode-after-death are Negative; a damage over time
+is Negative (Neutral when its source is a DeferredDamage skill); a stat bonus is
+Positive above 0 and Negative below, plus Mechanics when its row says
+`mechanic`; DyingDot always carries Mechanics; the rest default to Neutral.
+
+The sim had folded StatusEvasion into `Agent.evasions`, a dodge the game never
+rolls, for the units that carry it: Despot2Hard (skill 122, 50%), the
+MegaNovice (142, 20%), Scientists and Cultists holding mutation 324 (35%) and
+the grid's node. It is `Agent.status_evasions` now, read in both engines by
+`Battle.resists` (`resists` in the core) at every stun, silence and panic
+(`afflict`) and every stat buff (`add_stat_buff`, `add_buff`, SciCast): one
+roll per source whose mask matches, in the order the sources were attached,
+and none for a buff it cannot touch, so the random stream only moves where the
+game would roll. ChanceIncrease raises its chance as it raises every other.
+Without the dodge the MegaNovice loses to three Mancracks in all 16 of
+`tools/diff_core.py`'s fights (it won 11 before), and the engines now agree on
+all 16. `tools/validate_sim.py` has both engines exact on a 100% and a 50%
+status evasion against PassiveStun at 1v1.
+
+The grid's three summon nodes (Fhtagn, Mglw'nafh, Wgah'nagl) are StatBonus rows
+of `kind: Summon`. Every summon skill and summon class-skill group creates its
+unit with `SummonKind` 4 (`C_SummonSkill` and `C_SummonCSGroup` return it;
+Animate and BlackSwan override it), and `C_StatBonusMutation.OnTeamInserted`
+gives a Summon-kind unit the status as it joins the team. So a team's summons
+get the percentages, which multiply as every percentage but resistance does.
+Both engines carry the team's rows on each unit that can summon
+(`Agent.summon_bonus`, a `P_SUMMON_BONUS` passive row for the core) and apply
+them as the summon appears (`Battle._summon_bonus`): health and damage
+multiply, and attack speed divides the attack's cooldown, which is where the
+spec's rate lands in both. A summon passes the bonus on to what it summons. The
+MegaNovice gets it on top of its summed numbers; whether the game's status
+lands before or after `OnSummoned` replaces them was not read.
+`tools/diff_core.py` runs SummonSimple with the bonus: winners agree on 24, 24,
+24 and 20 of 24 fights (23, 24, 24 and 19 without it).
+
+Measured on the heuristic, paired over 2400 seeds from 40000 against
+`31ff15d`: with the grid off it reads 3.297 and no run changes. With the grid
+on it reads 3.680, -0.010 [-0.017, -0.002], 81 runs different: the grid's
+StatusEvasion node no longer gives a dodge, and the summon nodes now act;
+which of the two moved it was not split. The grid against no grid is now
++0.383 [+0.328, +0.438].

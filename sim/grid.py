@@ -215,15 +215,6 @@ class Grid:
         return tuple(n.level for _, n in sorted(self.nodes.items()))
 
 
-def inert(node: Node) -> bool:
-    """Whether the sim gives the node no effect yet. The three `kind: Summon`
-    StatBonus nodes (Fhtagn, Mglw'nafh, Wgah'nagl) raise the stats of units
-    summoned in a fight, and a summon's stats come from a template shared by
-    both teams in the Rust core, so nothing applies them; they can still be
-    bought, as in the game, and still count toward `totalLevels`."""
-    return str(node.scalars.get("kind") or "") == "Summon"
-
-
 def always_on_rows(tables: dict) -> list[dict]:
     """The grid table's `SimpleMutations`: what `C_Mutations.CreateSimpleMutations`
     gives every run of the ruleset, whatever is bought. In Default that is

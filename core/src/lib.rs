@@ -111,6 +111,34 @@ const P_REVENGE: i32 = 20;
 const P_SUSTAIN: i32 = 21;
 /// `C_AoeBurnSkill`: on each hit, a burn around the target, for mana.
 const P_AOE_BURN: i32 = 22;
+/// `C_StatBonusStatus.Qualify` over a buff's stats: Positive for a value above
+/// 0, Negative below, each stat adding its bit (`Battle.add_stat_buff`).
+fn quality(stats: &[(i32, f32, bool)]) -> i32 {
+    let mut q = 0;
+    for &(_, amount, _) in stats {
+        if amount > 0.0 {
+            q |= Q_POSITIVE;
+        } else if amount < 0.0 {
+            q |= Q_NEGATIVE;
+        }
+    }
+    q
+}
+
+/// `C_StatusEvasionSkill`: a chance to turn away a status of the types in a
+/// mask, as it lands (`Battle.resists`).
+const P_STATUS_EVASION: i32 = 23;
+/// The team's Summon-kind StatBonus, carried by a unit for what it summons
+/// (`Battle._summon_bonus`): the stat code and the percent.
+const P_SUMMON_BONUS: i32 = 24;
+const SB_HEALTH: i32 = 1;
+const SB_DAMAGE: i32 = 2;
+const SB_ATTACK_SPEED: i32 = 3;
+
+/// `StatusType`, the flags `C_Status.Qualify` returns.
+const Q_POSITIVE: i32 = 1;
+const Q_NEGATIVE: i32 = 2;
+const Q_MECHANICS: i32 = 4;
 
 /// `DamageType`, the flags enum from the game. Only the bits the gates read.
 const DT_PHYSICAL: i32 = 1;
@@ -212,6 +240,8 @@ struct Agent {
     crit_chance: f32,
     crit_mult: f32,
     evasions: Vec<(f32, f32, bool)>, // (chance, health threshold, jump back)
+    status_evasions: Vec<(f32, i32)>, // (chance, StatusType mask)
+    summon_bonus: Vec<(i32, f32)>,     // (stat code, percent) for its summons
     dodge_cooldown: f32,
     dodge_ready_in: f32,
     unit_dodge_cooldown: f32,
@@ -546,9 +576,43 @@ impl Sim {
         if duration <= 0.0 || p.nstats == 0 {
             return;
         }
+        if self.resists(i, quality(&p.stats[..p.nstats])) {
+            return;
+        }
         self.agents[i]
             .buffs
             .push(Buff::from_stats(duration, &p.stats[..p.nstats]));
+    }
+
+    /// `C_StatusEvasionSkill.OnStatusConfirm`, once per source, as
+    /// `Battle.resists` has it: Mechanics is never turned away, a source whose
+    /// mask misses the status does not roll, and the first that rejects it
+    /// settles it.
+    fn resists(&mut self, i: usize, q: i32) -> bool {
+        if q & Q_MECHANICS != 0 || self.agents[i].status_evasions.is_empty() {
+            return false;
+        }
+        for k in 0..self.agents[i].status_evasions.len() {
+            let (chance, mask) = self.agents[i].status_evasions[k];
+            if mask & q == 0 {
+                continue;
+            }
+            if (self.rng.random() as f32) * 100.0 < chance {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A control status (stun, silence, panic), Negative: `Battle.afflict`.
+    fn afflict(&mut self, i: usize, status: usize, seconds: f32) {
+        if seconds <= 0.0 {
+            return;
+        }
+        if self.resists(i, Q_NEGATIVE) {
+            return;
+        }
+        self.agents[i].apply_status(status, seconds);
     }
 
     /// `C_PassiveSkill.OnDamageCreated`, for the unit that dealt the damage.
@@ -564,8 +628,8 @@ impl Sim {
                     let who = if p.cast_source { attacker } else { tgt };
                     self.add_stat_buff(who, p.duration, &p);
                 }
-                P_FEARSOME => self.agents[tgt].apply_status(S_PANIC, p.duration),
-                P_PASSIVE_STUN => self.agents[tgt].apply_status(S_STUN, p.duration),
+                P_FEARSOME => self.afflict(tgt, S_PANIC, p.duration),
+                P_PASSIVE_STUN => self.afflict(tgt, S_STUN, p.duration),
                 P_MANA_BREAK => {
                     self.agents[tgt].mana = (self.agents[tgt].mana - p.amount).max(0.0);
                 }
@@ -587,7 +651,7 @@ impl Sim {
             match p.kind {
                 P_CRAGGY => {
                     let st = if p.status == 2 { S_SILENCE } else { S_STUN };
-                    self.agents[attacker].apply_status(st, p.duration);
+                    self.afflict(attacker, st, p.duration);
                 }
                 P_UNTOUCHABLE => self.add_stat_buff(attacker, p.duration, &p),
                 _ => {}
@@ -1197,6 +1261,9 @@ impl Sim {
         if stats.is_empty() {
             return;
         }
+        if self.resists(i, quality(&stats)) {
+            return;
+        }
         self.agents[i]
             .buffs
             .push(Buff::from_stats(act.duration, &stats));
@@ -1228,6 +1295,29 @@ impl Sim {
         attach_actions(&mut one, &acts);
         attach_passives(&mut one, &pas);
         let [mut new] = one;
+        // The team's summon bonus, as `Battle._summon_bonus` builds the spec:
+        // health and damage multiply, and attack speed divides the attack's
+        // cooldown, which is where the spec's rate lands.
+        let bonus = self.agents[i].summon_bonus.clone();
+        for &(stat, pct) in &bonus {
+            let m = 1.0 + pct / 100.0;
+            match stat {
+                SB_HEALTH => {
+                    new.hp *= m;
+                    new.max_health *= m;
+                }
+                SB_DAMAGE => new.damage *= m,
+                SB_ATTACK_SPEED => {
+                    for a in new.actions.iter_mut() {
+                        if a.kind == K_ATTACK {
+                            a.cooldown /= m;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        new.summon_bonus = bonus;
         // `SubscribeUnits`: a unit that joins after a threshold gets the status.
         if self.fury_on {
             new.fury_due = self.ticks + self.fury_period;
@@ -1286,6 +1376,20 @@ impl Sim {
             m.mana = mana;
             m.max_mana = max_mana;
             m.absorbing = members.clone();
+        }
+        // The summon bonus on the sums (`summon` already sped up the attack).
+        let bonus = self.agents[i].summon_bonus.clone();
+        for &(stat, pct) in &bonus {
+            let f = 1.0 + pct / 100.0;
+            let m = &mut self.agents[k];
+            match stat {
+                SB_HEALTH => {
+                    m.hp *= f;
+                    m.max_health *= f;
+                }
+                SB_DAMAGE => m.damage *= f,
+                _ => {}
+            }
         }
         for &j in &members {
             let a = &mut self.agents[j];
@@ -1424,9 +1528,11 @@ impl Sim {
                 for o in 0..self.agents.len() {
                     let ours = self.agents[o].team == team;
                     if self.agents[o].hp > 0.0 && ours != debuff && act.duration > 0.0 {
-                        self.agents[o]
-                            .buffs
-                            .push(Buff::from_stats(act.duration, &[(stat, value, true)]));
+                        let one = [(stat, value, true)];
+                        if value == 0.0 || self.resists(o, quality(&one)) {
+                            continue;
+                        }
+                        self.agents[o].buffs.push(Buff::from_stats(act.duration, &one));
                     }
                 }
             }
@@ -1478,7 +1584,7 @@ impl Sim {
                 let slot = act.status.max(0) as usize;
                 for j in victims {
                     if slot < N_STATUS {
-                        self.agents[j].apply_status(slot, act.duration);
+                        self.afflict(j, slot, act.duration);
                     }
                     if act.damage != 0.0 {
                         self.hit(team, j, act.damage, act.magical, i as i32);
@@ -2057,6 +2163,8 @@ fn build_agent(s: &[f32], x: f32, y: f32, pick_next_dist: f32) -> Agent {
         crit_chance: s[13],
         crit_mult: s[14],
         evasions: Vec::new(),
+        status_evasions: Vec::new(),
+        summon_bonus: Vec::new(),
         dodge_cooldown: s[15],
         dodge_ready_in: 0.0,
         unit_dodge_cooldown: s[16],
@@ -2188,6 +2296,8 @@ fn attach_passives(agents: &mut [Agent], rows: &[f32]) {
             P_MODIFY_DAMAGE => a.damage_bonus.push((p.damage_mask, p.amount, p.flag)),
             P_RESURRECT => a.resurrect = Some((p.chance, p.amount, p.flag)),
             P_EVASION => a.evasions.push((p.chance, p.amount, p.flag)),
+            P_STATUS_EVASION => a.status_evasions.push((p.chance, p.status)),
+            P_SUMMON_BONUS => a.summon_bonus.push((p.status, p.amount)),
             P_VAMPIRISM => a.vampirisms.push((p.amount, p.flag, p.damage_mask)),
             P_EXPLODE => a.explodes.push((p.amount, p.radius, p.chance, p.damage_mask)),
             P_KNOCKBACK => {

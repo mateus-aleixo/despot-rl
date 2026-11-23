@@ -278,6 +278,14 @@ MUTATION_KINDS = {"None": 0, "Melee": 1, "Range": 2, "Summon": 4, "Human": 8, "U
                   "Robot": 32, "TeamMember": 64, "Class": 128, "HumanTeamMember": 72}
 
 
+def _kind_name(mutation: dict) -> str | None:
+    """The row's `kind` parameter, as written, or None."""
+    for i in range(1, 10):
+        if mutation.get(f"Param{i}Name") == "kind":
+            return str(mutation.get(f"Param{i}Value"))
+    return None
+
+
 def kind_applies(mutation: dict, spec) -> bool:
     """`C_Mutation.IsApplicable`: `(mutation.kind & unit.kind) == mutation.kind`.
 
@@ -660,6 +668,7 @@ def boost_agent_chances(agent, bonuses) -> None:
     if agent.crit_chance:
         agent.crit_chance = boost_chance(agent.crit_chance, bonuses)
     agent.evasions = [(boost_chance(c, bonuses), t, j) for c, t, j in agent.evasions]
+    agent.status_evasions = [(boost_chance(c, bonuses), m) for c, m in agent.status_evasions]
     agent.knockbacks = [(boost_chance(c, bonuses), r, s, a, m)
                         for c, r, s, a, m in agent.knockbacks]
     agent.explodes = [(d, r, boost_chance(c, bonuses), m) for d, r, c, m in agent.explodes]
@@ -736,9 +745,9 @@ def fire_on_attack(battle, attacker, target, dtype: int) -> None:
             battle.add_stat_buff(who, param(p, "duration", "Duration"),
                                  status_stats(p, numbered=True))
         elif name == "FearsomeAttack":
-            target.apply_status("panic", param(p, "Duration", "duration"))
+            battle.afflict(target, "panic", param(p, "Duration", "duration"))
         elif name == "PassiveStun":
-            target.apply_status("stun", param(p, "duration", "Duration"))
+            battle.afflict(target, "stun", param(p, "duration", "Duration"))
         elif name == "ManaBreak":
             target.mana = max(0.0, target.mana - param(p, "amount", "Amount"))
 
@@ -756,8 +765,8 @@ def fire_on_damaged(battle, victim, attacker, dtype: int) -> None:
             # Stun (`sim/model_defaults.py`).
             from .model_defaults import CRAGGY_DEBUFF
             debuff = str_param(p, "debuff", "Debuff", default=CRAGGY_DEBUFF)
-            attacker.apply_status("silence" if debuff == "Silence" else "stun",
-                                  duration)
+            battle.afflict(attacker, "silence" if debuff == "Silence" else "stun",
+                           duration)
         elif name == "Untouchable":
             battle.add_stat_buff(attacker, duration, status_stats(p))
 
@@ -936,6 +945,18 @@ def apply_to_agents(agents: list, mutations: list[dict],
                     if act is not None:
                         a.actions.append(act)
             continue
+        if name == "StatBonus" and _kind_name(m) == "Summon":
+            # The grid's summon nodes: what the team's summons get, carried by
+            # every unit that can summon (`Battle._summon_bonus`). Percentages
+            # of health, damage and attack speed are all the rows hold.
+            field_ = STAT_FIELDS.get(str(str_param(p, "stat", "Stat", default="")))
+            if (field_ in ("health", "damage", "attack_speed")
+                    and _is_pct(p, "percentage", "Percentage")):
+                bonus = param(p, "bonus", "Bonus", "value", "Value")
+                for a in agents:
+                    if applies_to(m, a.spec.cls, rng, None):
+                        a.summon_bonus.append((field_, bonus))
+            continue
         if h.kind != PASSIVE or name in ("StatBonus", "OraStatBonus"):
             continue
         if name == "ClassSkill":
@@ -982,9 +1003,12 @@ def apply_to_agents(agents: list, mutations: list[dict],
                 # `targetClass` for the class skill's own duration, so it rides
                 # along on the caster's class-skill action.
                 a.cs_link_bonus.append(p)
-            elif name in ("Evasion", "StatusEvasion"):
+            elif name == "Evasion":
                 from .unit_skills import evasion_entry
                 a.evasions.append(evasion_entry(p))
+            elif name == "StatusEvasion":
+                from .unit_skills import status_evasion_entry
+                a.status_evasions.append(status_evasion_entry(p))
             elif name == "Vampirism":
                 from .unit_skills import vampirism_entry
                 a.vampirisms.append(vampirism_entry(p))

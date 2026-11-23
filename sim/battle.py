@@ -111,6 +111,14 @@ LONG_FIGHT_TIME, LONG_FIGHT_TIME_FINAL_BOSS = 180.0, 1320.0
 FURY_TICK, FURY_MULT = 2.0, 1.1
 DYING_TICK, DYING_PCT = 3.0, 10.0
 
+# `StatusType` (dump.cs): what `C_Status.Qualify` says a status is, a flags
+# set. Stun, silence, fear (the sim's "panic"), taunt, hex, anti-heal and the
+# damage-over-time statuses are Negative; a `M_StatBonusStatus` is Positive or
+# Negative by the sign of its value, with Mechanics added when the row says
+# `mechanic`; DyingDot always carries Mechanics. `C_StatusEvasionSkill` reads
+# it (see `Battle.resists`).
+Q_POSITIVE, Q_NEGATIVE, Q_MECHANICS = 1, 2, 4
+
 
 # `DamageType`, verbatim from the dumped enum. It is a flags set, and the
 # agent-level passives gate on it: a skill with `damageType: Physical` fires
@@ -209,6 +217,12 @@ class Agent:
     # per skill and each subscribes to the damage separately: two sources are
     # two independent rolls, not the better of the two.
     evasions: list = field(default_factory=list)   # (chance, threshold, jump_back)
+    # `C_StatusEvasionSkill`, one per source: (chance, the `StatusType` mask it
+    # turns away). Not an evasion of attacks; see `Battle.resists`.
+    status_evasions: list = field(default_factory=list)
+    # Summon-kind StatBonus rows of the unit's team, as (spec field, percent):
+    # what the units it summons get as they join (`Battle._summon_bonus`).
+    summon_bonus: list = field(default_factory=list)
     # Same reasoning for vampirism: one `C_VampirismSkill` per source, each
     # with its own damage addon, so two sources heal twice.
     vampirisms: list = field(default_factory=list)  # (value, percentage, damage mask)
@@ -831,18 +845,59 @@ class Battle:
         ) if v)
         self.add_stat_buff(ag, duration, stats)
 
-    def add_stat_buff(self, ag: Agent, duration: float, stats) -> None:
+    def add_stat_buff(self, ag: Agent, duration: float, stats,
+                      mechanic: bool = False) -> None:
         """A timed `M_StatBonusStatus`: (stat, amount, percentage) triples.
 
         A Health bonus raises the ceiling only. The game's status is a stat
         contribution rather than a heal, and nothing found says the current
         value follows it up, so the unit gains room to be healed into rather
         than the hit points themselves.
+
+        `C_StatBonusStatus.Qualify` makes it Positive for a value above 0 and
+        Negative below, with Mechanics when `mechanic`; the unit's status
+        evasions get their say before it lands (`resists`). A buff here can
+        carry several stats, so it takes the bits of each.
         """
         stats = tuple(stats)
         if duration <= 0.0 or not stats:
             return
+        q = Q_MECHANICS if mechanic else 0
+        for _, amount, _ in stats:
+            q |= Q_POSITIVE if amount > 0.0 else (Q_NEGATIVE if amount < 0.0 else 0)
+        if self.resists(ag, q):
+            return
         ag.buffs.append(Buff(remaining=duration, stats=stats))
+
+    def resists(self, ag: Agent, qualification: int) -> bool:
+        """`C_StatusEvasionSkill.OnStatusConfirm`, once per source, as a status
+        is about to land on `ag`.
+
+        `Init` builds the skill's mask from its row: `clearNegative` turns
+        Negative away, `clearPositive` Positive. A status carrying Mechanics
+        is never turned away, nor one whose bits miss the mask; otherwise
+        `PseudoRandom.Get(chance)` (taken as a uniform draw,
+        `pseudo_random_is_uniform`) rejects it. The first source that rejects
+        it settles it: the next one sees `confirm` already false.
+        """
+        if qualification & Q_MECHANICS or not ag.status_evasions:
+            return False
+        for chance, mask in ag.status_evasions:
+            if not mask & qualification:
+                continue
+            if self.rng.random() * 100.0 < chance:
+                return True
+        return False
+
+    def afflict(self, ag: Agent, status: str, seconds: float) -> None:
+        """A control status on `ag` (stun, silence, panic): each is Negative
+        (`C_StunStatus`, `C_SilentStatus`, `C_FearStatus` qualify as 2), so
+        the unit's status evasions get their roll first."""
+        if seconds <= 0.0:
+            return
+        if self.resists(ag, Q_NEGATIVE):
+            return
+        ag.apply_status(status, seconds)
 
     def add_spirit_link(self, ag: Agent, duration: float, share_pct: float,
                         extra_allies: int) -> None:
@@ -872,11 +927,12 @@ class Battle:
         ubc = units_by_class(self.tables)
         if cls not in ubc:
             return
-        spec = build_unit(ubc, cls, level, name=f"{cls}(summon)")
+        spec = self._summon_bonus(ag, build_unit(ubc, cls, level, name=f"{cls}(summon)"))
         new = Agent(spec=spec, team=ag.team,
                     x=ag.x + self.rng.uniform(-spec.radius, spec.radius),
                     y=ag.y + self.rng.uniform(-spec.radius, spec.radius),
                     hp=spec.health, summoned=True)
+        new.summon_bonus = list(ag.summon_bonus)
         new.actions = build_actions(spec, None)
         # `SubscribeUnits`: a unit that joins after a threshold gets the status
         # when it arrives.
@@ -886,6 +942,19 @@ class Battle:
             new.dying_due = self.tick_count + self.dying_period
         self._init_agent(new)
         self.agents.append(new)
+
+    @staticmethod
+    def _summon_bonus(caster: Agent, spec):
+        """What a summoned unit gets from its team's Summon-kind StatBonus rows
+        (the grid's Fhtagn, Mglw'nafh and Wgah'nagl). Every summon skill and
+        summon class-skill group creates its unit with `SummonKind` 4, Summon
+        (`C_SummonSkill.get_SummonKind`; Animate and BlackSwan override it), and
+        `C_StatBonusMutation.OnTeamInserted` gives the unit the status as it
+        joins the team. Percentages of health, damage and attack speed, each
+        multiplying in turn, as `RecalculateStatMult` does."""
+        for name, pct in caster.summon_bonus:
+            spec = dataclasses.replace(spec, **{name: getattr(spec, name) * (1.0 + pct / 100.0)})
+        return spec
 
     def absorb(self, caster: Agent, action) -> None:
         """Novicator, `C_AbsorbingSummonCSGroup` (mutation 306).
@@ -925,10 +994,18 @@ class Battle:
             armor=sum(o.spec.armor for o in members),
             mana=sum(o.spec.mana for o in members),
         )
+        hp = sum(o.hp for o in members)
+        # The summon bonus on top of the sums; when the game's status lands
+        # against `OnSummoned` replacing the numbers was not read.
+        boosted = self._summon_bonus(caster, spec)
+        if spec.health > 0.0:
+            hp *= boosted.health / spec.health
+        spec = boosted
         new = Agent(spec=spec, team=caster.team,
                     x=caster.x + self.rng.uniform(-spec.radius, spec.radius),
                     y=caster.y + self.rng.uniform(-spec.radius, spec.radius),
-                    hp=sum(o.hp for o in members), summoned=True)
+                    hp=hp, summoned=True)
+        new.summon_bonus = list(caster.summon_bonus)
         new.mana = sum(o.mana for o in members)
         new.actions = build_actions(spec, None)
         if self.fury_on:

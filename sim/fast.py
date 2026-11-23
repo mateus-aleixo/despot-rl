@@ -42,7 +42,10 @@ STATUS_SLOT = {"stun": 0, "silence": 1, "panic": 2, "blinked": 3}
  P_UNTOUCHABLE, P_BUFF_ON_CAST, P_MULTICAST, P_BUFF_ON_DEATH, P_STICKY_BLOOD,
  P_RESURRECT, P_COMPENSATION, P_MODIFY_DAMAGE, P_CS_LINK,
  P_DEATH_DAMAGE, P_DEATH_SUMMON, P_EVASION, P_VAMPIRISM,
- P_EXPLODE, P_KNOCKBACK, P_REVENGE, P_SUSTAIN, P_AOE_BURN) = range(23)
+ P_EXPLODE, P_KNOCKBACK, P_REVENGE, P_SUSTAIN, P_AOE_BURN,
+ P_STATUS_EVASION, P_SUMMON_BONUS) = range(25)
+# `P_SUMMON_BONUS` rows name the stat by these codes.
+SUMMON_BONUS_STAT = {"health": 1, "damage": 2, "attack_speed": 3}
 
 PASSIVE_KIND = {
     "BuffAttack": P_BUFF_ATTACK, "FearsomeAttack": P_FEARSOME,
@@ -350,6 +353,19 @@ def passive_rows(a, i: int, templates: "_Templates | None" = None) -> list[list[
         for chance, threshold, jump_back in getattr(a, "evasions", ()):
             row = blank(i, P_EVASION)
             row[3], row[8], row[10] = chance, threshold, 1.0 if jump_back else 0.0
+            rows.append(row)
+
+        # StatusEvasion, one row per source: the chance and the `StatusType`
+        # mask (`Battle.resists`).
+        for chance, mask in getattr(a, "status_evasions", ()):
+            row = blank(i, P_STATUS_EVASION)
+            row[3], row[7] = chance, float(mask)
+            rows.append(row)
+
+        # The team's summon bonus, carried by the unit (`Battle._summon_bonus`).
+        for name, pct in getattr(a, "summon_bonus", ()):
+            row = blank(i, P_SUMMON_BONUS)
+            row[7], row[8] = float(SUMMON_BONUS_STAT[name]), pct
             rows.append(row)
 
         if getattr(a, "sustain", 1.0) != 1.0:
