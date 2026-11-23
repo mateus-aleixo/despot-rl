@@ -281,7 +281,12 @@ against Batch 1's baseline.
 - **The heal walks to its ally.** The Medic's heal targets the lowest-health
   damaged ally (ported 2026-11-06) within the class skill's range, 24 world
   units or 80 with CSRange (233), and the tree walks the Medic there. Both
-  engines still gate it on the enemy target at the attack range.
+  engines still gate it on the enemy target at the attack range. Read further
+  on 2026-11-23 (`notes/reference-sim.md`, "The heal's walk, read so far"): the
+  tree is `NC-HealCSkill`, which walks and then waits out the cooldown in
+  range, and nothing filters it out of the action list on cooldown, so a
+  Medic with mana and a hurt ally mostly heals. Open before building it:
+  `StartExecution`'s `checkReadiness`, and when the heal's target refreshes.
 - **An audit of the 79 that do have handlers.** Three read the wrong key and did
   nothing while counting as implemented (`vampirism` reading `percent` where the
   rows say `value`, then `ExplodeProjectile`, then `EventualKnockback`). There
@@ -289,8 +294,9 @@ against Batch 1's baseline.
   2026-11-06** with `tools/audit_mutations.py` (`notes/reference-sim.md`, "The
   audit"): the eight active mutations were never applied, CooldownReduction
   cut the default attack, and a row's `kind` was ignored; all three fixed.
-  Open: `stackBehaviour` ProlongDuration (350), the Fly knockback (338),
-  StatusEvasion's `clearNegative` (324), Animate's corpse rules (230).
+  Open: the Fly knockback (338), Animate's corpse rules (230).
+  `stackBehaviour` (350 and the other ProlongDuration rows) and StatusEvasion's
+  `clearNegative` (324) were done on 2026-11-23, in both engines.
 - **Class and unit skill coverage**, the same way: how much of `Meta.Classes`
   the sim can actually field, and which `ClassSkills` and `Skills` rows resolve
   to a real effect rather than a no-op. **Started 2026-11-06** with

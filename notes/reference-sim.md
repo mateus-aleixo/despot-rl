@@ -2775,6 +2775,24 @@ the chosen one. The sim gates the heal on the enemy target at the attack range,
 so a range for the heal has nothing to act on until the heal walks to its
 ally, in both engines.
 
+**The heal's walk, read so far (2026-11-23), not built.** The Medic's heal runs
+`NC-HealCSkill`, not `NC-Skill`: a dynamic Sequencer of IsEnoughMana, then a
+Selector of ReadyToAct or FollowPath (so it walks to its target when out of
+range), then a Selector of StopIfRunning or IsNotOnCooldownContinuous (so in
+range it stops, then waits out the cooldown standing), then the same
+StartExecution, animation and recovery as every action. NC-Skill has no
+FollowPath at all, which is why the sim's skills cast only from where they
+stand. `C_Unit.TryResolveAction(subgraph, out action)` only binds a subgraph to
+the unit's action by name; it does not filter on cooldown or mana. So in the
+game a Medic with mana for the heal and a hurt ally to heal stays in the heal
+subtree, walking to the ally and waiting out the cooldown there, and attacks
+only when no ally is hurt or the mana is short. Two things need reading before
+either engine is changed: what `StartExecution`'s `checkReadiness` parameter
+does (both engines ignore it; the default attack's StopIfRunning path starts a
+swing on arrival whatever the cooldown), and whether `M_Action.target` for the
+heal is refreshed every tick by `GetMostDamagedTarget` or only when it is
+dropped.
+
 **The heal's target, implemented on the way.** `C_HealCSkill.
 GetMostDamagedTarget` starts from float.MaxValue and keeps the unit with
 strictly lower `health` among the `targets` that `CanBeTargeted` (vtable slot
