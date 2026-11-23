@@ -3201,8 +3201,8 @@ Not settled:
   was a mutation he took at an altar. The drops fit a 30% cut exactly (`round(0.7
   * n)` for every squad size seen), and the only food cut in the tables is
   UnderFeed at 20% (269), so either that row comes to 30% in the game or another
-  row does it. The recording is deleted; a Default one with the mutation held
-  would settle which.
+  row does it. Settled the same day: the game plays the server's data, where
+  269 cuts 30% ("The live data, found" below).
 * The mutation shop shows "REROLLS: 3" in one run and "REROLLS: 5" in another,
   where the sim gave 2 per shop (`C_Room..ctor`). Settled 2026-11-23: every
   run has the grid table's always-on AdditionalRerolls 1, so an altar gives 3,
@@ -3350,3 +3350,38 @@ on it reads 3.680, -0.010 [-0.017, -0.002], 81 runs different: the grid's
 StatusEvasion node no longer gives a dodge, and the summon nodes now act;
 which of the two moved it was not split. The grid against no grid is now
 +0.383 [+0.328, +0.438].
+
+## The live data, found (2026-11-23)
+
+The game does not play the tables it ships. `C_ClientData` (a persistent
+model, `Filename` clientData) keeps a copy of the client data that the server
+hands out, in `clientData.bin` under the player's `LocalLow/Konfa Games/Despot's
+Game`. `C_PersistentModel<object>.Load` reads it with `FS.LoadBytes`, then
+`StringCipher.Decrypt` with a 32-character literal of its own (a different one
+from the asset passphrase; it sits in that function as a string literal), then
+`FS.Unzip` (gzip). Inside is JSON: `version`, `data`, `hash` and `date`. `data`
+is base64 of the same scheme the shipped TextAssets use (`StringCipher` with
+the asset passphrase, then gzip), and the plain payload has their
+`path\n<body>\n` layout.
+
+The copy on this machine was written on 2026-11-22, when the recording began,
+and says version 1.12.2, dated 2026-11-05. Against the tables extracted on
+2026-08-26 from the install's TextAssets, 27 of its 99 files differ. In the
+Default tables:
+
+* UnderFeed (269) cuts food by 30%, not 20%. That is the 30% the recording
+  showed, and the mutation he took at the altar.
+* The Novice's damage doubled at every level (20, 30, 40 became 40, 60, 80),
+  and MiniTurret went from 65 to 100.
+* 50 of the 56 items cost less (broadsword 4 to 3, casket 43 to 36).
+* 10 of the 20 class skills changed; the summoning ones cost half the mana
+  (CatBot 10 to 5, Fish 40 to 20, BladeMailer 40 to 20, DeathKnight 50 to 25).
+* 46 of the 155 mutation rows changed (200 ExplodeProjectile 100 to 400; 208
+  and 212 halve a value and add 1 to another; 11 drops the Dodger), and the
+  mutation offers per level moved.
+* Skills 10, 11 and 12 rose by 5 in six of their values.
+
+So the sim has been playing a ruleset the game no longer runs. The extraction
+should read this file (when it is newer than the install) rather than the
+TextAssets alone. The tables here are left as they are until that switch is
+made, since it moves every number measured so far.
