@@ -140,6 +140,16 @@ const Q_POSITIVE: i32 = 1;
 const Q_NEGATIVE: i32 = 2;
 const Q_MECHANICS: i32 = 4;
 
+/// `StatusStackBehaviour`, as `stack_behaviour` reads it (a passive row's
+/// `amount2` for the buff kinds).
+const STACK_PROLONG: i32 = 1;
+const STACK_CREATE_NEW: i32 = 2;
+
+/// `Battle.source_key`: the unit, which passive list, the passive's place.
+fn source_key(i: usize, hook: usize, k: usize) -> i32 {
+    (i * 64 + hook * 16 + k) as i32
+}
+
 /// `DamageType`, the flags enum from the game. Only the bits the gates read.
 const DT_PHYSICAL: i32 = 1;
 const DT_MAGICAL: i32 = 2;
@@ -323,6 +333,8 @@ struct Buff {
     nstats: usize,
     /// Compensation's buff is recomputed every tick and replaced, not stacked.
     standing: bool,
+    /// The status's `reference` for the stack rule (`Battle.source_key`), or -1.
+    source: i32,
 }
 
 impl Buff {
@@ -332,6 +344,7 @@ impl Buff {
             stats: [(-1, 0.0, false); MAX_BUFF_STATS],
             nstats: 0,
             standing: false,
+            source: -1,
         };
         for &st in stats.iter().take(MAX_BUFF_STATS) {
             out.stats[out.nstats] = st;
@@ -572,16 +585,29 @@ impl Sim {
         p.chance >= 100.0 || (self.rng.random() as f32) * 100.0 < p.chance
     }
 
-    fn add_stat_buff(&mut self, i: usize, duration: f32, p: &Passive) {
+    fn add_stat_buff(&mut self, i: usize, duration: f32, p: &Passive, source: i32, stack: i32) {
         if duration <= 0.0 || p.nstats == 0 {
             return;
+        }
+        // The stack rule, as `Battle.add_stat_buff` has it.
+        if source >= 0 && stack != STACK_CREATE_NEW {
+            if let Some(b) = self.agents[i]
+                .buffs
+                .iter_mut()
+                .find(|b| b.source == source && b.remaining > 0.0)
+            {
+                if stack == STACK_PROLONG && duration > b.remaining {
+                    b.remaining = duration;
+                }
+                return;
+            }
         }
         if self.resists(i, quality(&p.stats[..p.nstats])) {
             return;
         }
-        self.agents[i]
-            .buffs
-            .push(Buff::from_stats(duration, &p.stats[..p.nstats]));
+        let mut b = Buff::from_stats(duration, &p.stats[..p.nstats]);
+        b.source = source;
+        self.agents[i].buffs.push(b);
     }
 
     /// `C_StatusEvasionSkill.OnStatusConfirm`, once per source, as
@@ -626,7 +652,8 @@ impl Sim {
                 P_BUFF_ATTACK => {
                     // `castTarget` picks which end of the damage it lands on.
                     let who = if p.cast_source { attacker } else { tgt };
-                    self.add_stat_buff(who, p.duration, &p);
+                    self.add_stat_buff(who, p.duration, &p, source_key(attacker, 1, k),
+                                       p.amount2 as i32);
                 }
                 P_FEARSOME => self.afflict(tgt, S_PANIC, p.duration),
                 P_PASSIVE_STUN => self.afflict(tgt, S_STUN, p.duration),
@@ -653,7 +680,9 @@ impl Sim {
                     let st = if p.status == 2 { S_SILENCE } else { S_STUN };
                     self.afflict(attacker, st, p.duration);
                 }
-                P_UNTOUCHABLE => self.add_stat_buff(attacker, p.duration, &p),
+                P_UNTOUCHABLE => {
+                    self.add_stat_buff(attacker, p.duration, &p, -1, STACK_CREATE_NEW)
+                }
                 _ => {}
             }
         }
@@ -664,7 +693,9 @@ impl Sim {
         for k in 0..self.agents[i].on_cast.len() {
             let p = self.agents[i].on_cast[k].clone();
             match p.kind {
-                P_BUFF_ON_CAST => self.add_stat_buff(i, p.duration, &p),
+                P_BUFF_ON_CAST => {
+                    self.add_stat_buff(i, p.duration, &p, source_key(i, 2, k), p.amount2 as i32)
+                }
                 P_MULTICAST => {
                     if p.chance <= 0.0 || (self.rng.random() as f32) * 100.0 >= p.chance {
                         continue;
@@ -693,7 +724,7 @@ impl Sim {
             let p = self.agents[i].cs_link[k].clone();
             for &m in members {
                 if self.agents[m].class_id == p.target_class {
-                    self.add_stat_buff(m, duration, &p);
+                    self.add_stat_buff(m, duration, &p, -1, STACK_CREATE_NEW);
                 }
             }
         }
@@ -842,11 +873,16 @@ impl Sim {
                 }
                 _ => Vec::new(),
             };
+            let (source, stack) = if p.kind == P_BUFF_ON_DEATH {
+                (source_key(i, 3, k), p.amount2 as i32)
+            } else {
+                (-1, STACK_CREATE_NEW)
+            };
             for j in victims {
                 if p.kind == P_REVENGE {
                     self.agents[j].revenged = true;
                 }
-                self.add_stat_buff(j, p.duration, &p);
+                self.add_stat_buff(j, p.duration, &p, source, stack);
             }
         }
     }

@@ -2886,12 +2886,11 @@ ticks, so 350 is the total, which the sim deals at once); ManaBurn's
 `percentage` false (the amount is flat, as read); ClassDiversity 365 counts
 Novices, which no item makes.
 
-Still open, each a mechanic the sim does not have: `stackBehaviour`
-`ProlongDuration` (350's armour on cast prolongs one status where the sim
-stacks another), EventualKnockback's `knockbackType` `Fly` (338; the sim
+Still open, each a mechanic the sim does not have: EventualKnockback's `knockbackType` `Fly` (338; the sim
 pushes), Animate's corpse rules (`animateRadius`, `pushAway`).
 StatusEvasion's `clearNegative` (324) was read on 2026-11-23: see
-"StatusEvasion and the summon bonus, read".
+"StatusEvasion and the summon bonus, read"; so was `stackBehaviour`: see "The
+stack rule, read".
 
 On the heuristic, paired over 2400 seeds from 40000: the actives -0.003
 [-0.007, +0.002], CooldownReduction -0.001 [-0.002, +0.001], `kind` +0.000
@@ -3402,3 +3401,37 @@ The live data alone is +0.310 [+0.265, +0.353] with the grid off and +0.331
 +0.460]; the boundary as decided, install with no grid to live with the grid,
 is +0.714 [+0.657, +0.769]. `dialogs.py` still reads the install's
 `dialogs.json` directly, which the switch has to move too.
+
+## The stack rule, read (2026-11-23)
+
+A stat status from a passive does not always add another copy.
+`StatusExtensions.ApplyBehaviour<TStatus>` (called from
+`C_BuffOnCastedSkill.OnSkillCasted`, `C_BuffOnDeathSkill.OnDeath` and
+`C_BuffOnForeignDeathSkill.OnParticipantDeath`; BuffAttack carries the same
+`StackBehaviour` on its damage add-on) looks for a status on the target with the
+same `reference`, the source that made it. If there is one and it is still
+active, `StatusStackBehaviour` decides: None (0) returns and adds nothing,
+ProlongDuration (1) sets the running status up again and activates it with the
+new duration, CreateNew (2) builds another. A status found but no longer active
+is set up and activated again, which comes to a new one. Activating a running
+status goes through `C_Status.ProlongTime`, which keeps the time left when it is
+longer than the new duration (less a small constant) and otherwise sets it to
+the new one.
+
+The default is ProlongDuration: the `[DefaultValue]` on `stackBehaviour` boxes
+1 in `M_BuffAttackSkill`, `M_BuffOnCastedSkill`, `M_BuffOnDeathSkill`,
+`M_BuffOnForeignDeathSkill` and the BuffAttack, BuffOnCasted and BuffOnDeath
+mutations. The sim had stacked a copy on every trigger. The rows that differ:
+mutations 226 (-30% attack speed on the target), 234, 299, 321 (-50 armour on
+the target), 322 (-50% resistance), 350 (+75 armour on a cast) and skill 84
+(the Scorpotaur); the rows that say CreateNew (85, 110, 112, 318, 319, 331, 351,
+353, 376) behave as before. Both engines now give a buff its source
+(`Battle.source_key`: the unit, which passive list, the passive's place, built
+alike in the core) and apply the rule in `add_stat_buff`; a refresh rolls no
+status evasion, since no status is created. `tools/validate_sim.py` has the rule
+directly and the engines exact at 1v1 on 321, 350 and 318.
+
+On the heuristic, paired over 2400 seeds from 40000: grid off 3.294, -0.003
+[-0.007, +0.001] (18 runs different); grid on 3.673, -0.007 [-0.011, -0.003]
+(22). The squad loses most of what the stacking slows and shreds gave it on
+the mutations it takes; the Scorpotaur's refresh is the other side.

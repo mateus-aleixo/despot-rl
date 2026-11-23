@@ -119,6 +119,22 @@ DYING_TICK, DYING_PCT = 3.0, 10.0
 # it (see `Battle.resists`).
 Q_POSITIVE, Q_NEGATIVE, Q_MECHANICS = 1, 2, 4
 
+# `StatusStackBehaviour` (dump.cs): what a status does when its source already
+# has one running on the unit (`StatusExtensions.ApplyBehaviour`). None leaves
+# the running one alone and adds nothing; ProlongDuration sets it up again and
+# raises its time left to the new duration when that is longer
+# (`C_Status.ProlongTime`); CreateNew adds another. BuffAttack, BuffOnCasted,
+# BuffOnDeath and BuffOnForeignDeath default to ProlongDuration: their models'
+# `[DefaultValue]` boxes 1.
+STACK_NONE, STACK_PROLONG, STACK_CREATE_NEW = 0, 1, 2
+_STACK = {"none": STACK_NONE, "prolongduration": STACK_PROLONG, "createnew": STACK_CREATE_NEW}
+
+
+def stack_behaviour(params: dict) -> int:
+    """A row's `stackBehaviour`, ProlongDuration when it names none."""
+    v = params.get("stackBehaviour", params.get("StackBehaviour"))
+    return _STACK.get(str(v).lower(), STACK_PROLONG) if v is not None else STACK_PROLONG
+
 
 # `DamageType`, verbatim from the dumped enum. It is a flags set, and the
 # agent-level passives gate on it: a skill with `damageType: Physical` fires
@@ -172,6 +188,9 @@ class Buff:
     remaining: float
     # (stat, amount, percentage) triples, the shape M_StatBonusStatus carries.
     stats: tuple = ()
+    # The status's `reference`, the source the stack rule matches on
+    # (`Battle.source_key`); -1 for a buff that stacks whatever it meets.
+    source: int = -1
 
 
 @dataclass
@@ -845,8 +864,15 @@ class Battle:
         ) if v)
         self.add_stat_buff(ag, duration, stats)
 
+    def source_key(self, agent: Agent, hook: int, k: int) -> int:
+        """A status's `reference` as one number both engines build alike: the
+        unit's index, which of its passive lists (1 on-attack, 2 on-cast, 3
+        on-death) and the passive's place in it."""
+        return self.agents.index(agent) * 64 + hook * 16 + k
+
     def add_stat_buff(self, ag: Agent, duration: float, stats,
-                      mechanic: bool = False) -> None:
+                      mechanic: bool = False, source: int = -1,
+                      stack: int = STACK_CREATE_NEW) -> None:
         """A timed `M_StatBonusStatus`: (stat, amount, percentage) triples.
 
         A Health bonus raises the ceiling only. The game's status is a stat
@@ -858,16 +884,27 @@ class Battle:
         Negative below, with Mechanics when `mechanic`; the unit's status
         evasions get their say before it lands (`resists`). A buff here can
         carry several stats, so it takes the bits of each.
+
+        `source` and `stack` are the stack rule (`stack_behaviour`): with a
+        buff from the same source still running, None adds nothing and
+        ProlongDuration raises its time left, with no new roll against status
+        evasion, since no new status is created.
         """
         stats = tuple(stats)
         if duration <= 0.0 or not stats:
             return
+        if source >= 0 and stack != STACK_CREATE_NEW:
+            for b in ag.buffs:
+                if b.source == source and b.remaining > 0.0:
+                    if stack == STACK_PROLONG:
+                        b.remaining = max(b.remaining, duration)
+                    return
         q = Q_MECHANICS if mechanic else 0
         for _, amount, _ in stats:
             q |= Q_POSITIVE if amount > 0.0 else (Q_NEGATIVE if amount < 0.0 else 0)
         if self.resists(ag, q):
             return
-        ag.buffs.append(Buff(remaining=duration, stats=stats))
+        ag.buffs.append(Buff(remaining=duration, stats=stats, source=source))
 
     def resists(self, ag: Agent, qualification: int) -> bool:
         """`C_StatusEvasionSkill.OnStatusConfirm`, once per source, as a status

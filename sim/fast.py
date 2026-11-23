@@ -327,6 +327,9 @@ def passive_rows(a, i: int, templates: "_Templates | None" = None) -> list[list[
             row[5] = param(p, "radius", "Radius")
             row[6] = 1.0 if str_param(p, "castTarget", "CastTarget") == "Source" else 0.0
             row[7] = 2.0 if str_param(p, "debuff", "Debuff", default="Stun") == "Silence" else 1.0
+            if name in ("BuffAttack", "BuffOnCasted", "BuffOnDeath"):
+                from .battle import stack_behaviour
+                row[9] = float(stack_behaviour(p))
             if name == "ManaBreak":
                 row[8] = param(p, "amount", "Amount")
             elif name == "MultiCast":

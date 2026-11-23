@@ -733,7 +733,8 @@ def status_stats(params: dict, numbered: bool = False) -> tuple:
 
 def fire_on_attack(battle, attacker, target, dtype: int) -> None:
     """`C_PassiveSkill.OnDamageCreated` for every passive this unit carries."""
-    for name, p in attacker.on_attack:
+    from .battle import stack_behaviour
+    for k, (name, p) in enumerate(attacker.on_attack):
         if not _gate(battle, p, dtype, name):
             continue
         if name == "BuffAttack":
@@ -743,7 +744,9 @@ def fire_on_attack(battle, attacker, target, dtype: int) -> None:
             who = (attacker if str_param(p, "castTarget", "CastTarget") == "Source"
                    else target)
             battle.add_stat_buff(who, param(p, "duration", "Duration"),
-                                 status_stats(p, numbered=True))
+                                 status_stats(p, numbered=True),
+                                 source=battle.source_key(attacker, 1, k),
+                                 stack=stack_behaviour(p))
         elif name == "FearsomeAttack":
             battle.afflict(target, "panic", param(p, "Duration", "duration"))
         elif name == "PassiveStun":
@@ -773,10 +776,13 @@ def fire_on_damaged(battle, victim, attacker, dtype: int) -> None:
 
 def fire_on_cast(battle, agent, action) -> None:
     """`C_OnSkillCastedSkill.OnSkillCasted`, after a skill's effect resolves."""
-    for name, p in agent.on_cast:
+    from .battle import stack_behaviour
+    for k, (name, p) in enumerate(agent.on_cast):
         if name == "BuffOnCasted":
             battle.add_stat_buff(agent, param(p, "duration", "Duration"),
-                                 status_stats(p))
+                                 status_stats(p),
+                                 source=battle.source_key(agent, 2, k),
+                                 stack=stack_behaviour(p))
         elif name == "MultiCast":
             chance = param(p, "chance", "Chance")
             if chance <= 0.0 or battle.rng.random() * 100.0 >= chance:
@@ -794,7 +800,8 @@ def fire_on_cast(battle, agent, action) -> None:
 
 def run_death_passives(agent, battle) -> None:
     """`C_BaseOnDeathSkill.OnDeath`, once, after the unit is confirmed dead."""
-    for name, p in agent.on_death_passives:
+    from .battle import stack_behaviour
+    for k, (name, p) in enumerate(agent.on_death_passives):
         if name == "Revenge":
             # `C_RevengeSkill.OnDeath`: every living ally within `radius` of
             # the dead unit gets a "Revenge" status of `amount` damage for the
@@ -817,7 +824,9 @@ def run_death_passives(agent, battle) -> None:
             # OnDeath walks the dead unit's own team, with no radius term.
             for o in battle.agents:
                 if o.team == agent.team and o.alive:
-                    battle.add_stat_buff(o, duration, stats)
+                    battle.add_stat_buff(o, duration, stats,
+                                         source=battle.source_key(agent, 3, k),
+                                         stack=stack_behaviour(p))
         elif name == "StickyBlood":
             # ApplyStatus takes an `enemy`, inside `radius` of the corpse.
             radius = param(p, "radius", "Radius")

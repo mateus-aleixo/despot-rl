@@ -3687,6 +3687,44 @@ if _core_available():
               _agree == 10 and (sum(_err) / max(1, len(_err))) < 1e-4,
               f"winners {_agree}/10, damage error {100 * sum(_err) / max(1, len(_err)):.3f}%")
 
+print("\n== the stack rule ==")
+# `StatusExtensions.ApplyBehaviour`: a source's running status is left alone
+# (None), refreshed (ProlongDuration, the default) or joined by another
+# (CreateNew).
+from sim.battle import (STACK_CREATE_NEW as _SCN, STACK_NONE as _SNO,
+                        STACK_PROLONG as _SPR, stack_behaviour as _stackb)
+
+_kb = Battle(GRID, _place_at(GRID, build_player_squad(_STRICT, [("broadsword", 1)] * 2),
+                             _CELLS[:2], team=0), seed=0, tables=_STRICT)
+_kt = _kb.agents[0]
+_slow = (("attack_speed", -30.0, True),)
+for _ in range(3):
+    _kb.add_stat_buff(_kt, 5.0, _slow, source=7, stack=_SPR)
+_one = len(_kt.buffs)
+_kt.buffs[0].remaining = 1.0
+_kb.add_stat_buff(_kt, 5.0, _slow, source=7, stack=_SPR)
+_refreshed = _kt.buffs[0].remaining
+_kb.add_stat_buff(_kt, 5.0, _slow, source=8, stack=_SNO)
+_kt.buffs[-1].remaining = 1.0
+_kb.add_stat_buff(_kt, 5.0, _slow, source=8, stack=_SNO)
+_kept = _kt.buffs[-1].remaining
+for _ in range(3):
+    _kb.add_stat_buff(_kt, 5.0, _slow, source=9, stack=_SCN)
+check("ProlongDuration keeps one status and refreshes it; None leaves it; CreateNew stacks",
+      _one == 1 and _refreshed == 5.0 and _kept == 1.0 and len(_kt.buffs) == 5,
+      f"{_one} {_refreshed} {_kept} {len(_kt.buffs)}")
+check("a row without stackBehaviour is ProlongDuration, as the models' [DefaultValue] says",
+      _stackb(mutation_params(_MBY[226])) == _SPR and _stackb(mutation_params(_MBY[318])) == _SCN
+      and _stackb(mutation_params(_MBY[350])) == _SPR,
+      f"{_stackb(mutation_params(_MBY[226]))} {_stackb(mutation_params(_MBY[318]))}")
+if _core_available():
+    for _label, _ids, _item in (("BuffAttack 321 (armour shred, ProlongDuration)", [321], "broadsword"),
+                                ("BuffOnCasted 350 (ProlongDuration)", [350], _item_for("Mage")),
+                                ("BuffAttack 318 (CreateNew on the attacker)", [318], "broadsword")):
+        _ok, _err = _core_vs_oracle(_ids, item=_item)
+        check(f"the core reproduces {_label} exactly at 1v1",
+              _ok is True and _err < 0.01, f"damage error {_err:.2f}%")
+
 print("\n== the live data ==")
 # The server's copy the game plays (`tools/decrypt_client_data.py`); only
 # checked where it has been extracted.
