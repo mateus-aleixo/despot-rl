@@ -113,6 +113,14 @@ MUTATION_REGISTRY: dict[str, Handler] = {
     "GiveGold": Handler(NOOP, note="economy, outside a fight"),
     "ItemDiscount": Handler(NOOP, note="shop economy, outside a fight"),
     "CheapReroll": Handler(NOOP, note="shop economy, outside a fight"),
+    # The mutation grid's run-side nodes and the always-on rows of other
+    # chips (`sim/grid.py`). `RunState` applies the grid's; AdditionalBuys
+    # and HumanCostStack belong to Sprint (`shortpvp`), which the sim does
+    # not play.
+    "Deposit": Handler(NOOP, note="run layer: interest at each new level"),
+    "HealAfterFight": Handler(NOOP, note="run layer: humans heal after a fight"),
+    "AdditionalBuys": Handler(NOOP, note="altar takes, outside a fight"),
+    "HumanCostStack": Handler(NOOP, note="human price, outside a fight"),
     # Class-skill variants and auras: each modifies a specific class skill or
     # adds an aura, which needs per-skill plumbing this sim does not have.
     "CSBoostAura": Handler(UNIMPLEMENTED, note="class-skill aura"),
@@ -313,7 +321,15 @@ def apply_stat_bonus(spec, params: dict):
     bonus = param(params, "bonus", "Bonus", "value", "Value")
     percentage = str(params.get("percentage", params.get("Percentage", "false"))).lower() == "true"
     current = getattr(spec, field)
-    new = current * (1.0 + bonus / 100.0) if percentage else current + bonus
+    if field == "resistance" and percentage:
+        # `C_StatBonusStatus.ApplyStatus` -> `CS_Units.AddStatMult`, and for
+        # Resistance `RecalculateStatMult` hands over to
+        # `RecalculateResistance`, which compounds each percentage into what is
+        # left: `res + (1 - res) * pct / 100`. A human starts at 0, so "+20%
+        # magic defense" is 0.2, where scaling the 0 left it at 0.
+        new = current + (1.0 - current) * bonus / 100.0
+    else:
+        new = current * (1.0 + bonus / 100.0) if percentage else current + bonus
     if field in ("health", "damage", "attack_speed", "speed", "mana", "range_world"):
         new = max(0.0, new)
     elif field == "resistance":
@@ -972,6 +988,16 @@ def apply_to_agents(agents: list, mutations: list[dict],
             elif name == "Vampirism":
                 from .unit_skills import vampirism_entry
                 a.vampirisms.append(vampirism_entry(p))
+            elif name == "Regeneration":
+                # `C_PassiveSkillMutation<M_RegenerationMutation,
+                # M_RegenerationSkill>`: `value` of `stat` every `period`. No
+                # `Mutations.json` row is one; the grid's Mana regeneration is.
+                # An agent keeps one regeneration, and only the enemy Samurai
+                # carry their own, so a squad's slot is free.
+                if a.regen is None:
+                    a.regen = (str_param(p, "stat", default="Mana"),
+                               param(p, "period", default=10.0),
+                               param(p, "value", default=0.0))
             elif name == "CriticalStrike":
                 a.crit_chance = max(a.crit_chance, param(p, "chance", "Chance"))
                 a.crit_mult = max(a.crit_mult, param(p, "mult", "value", default=1.0))

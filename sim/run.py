@@ -71,6 +71,7 @@ from typing import Any
 from .battle import Battle, BattleResult, apply_class_skills, deploy, place_at
 from .data import (items_by_name, items_by_quality,
                    parse_room_layouts, units_by_class)
+from .grid import Grid as MutationGrid, always_on_rows
 from .nav import Grid
 from .spec import MAX_UNIT_LEVEL, UnitSpec, build_player_squad, build_unit
 
@@ -296,12 +297,16 @@ class RoomMap:
     @classmethod
     def generate(cls, level_row: dict, rng: random.Random,
                  chip: str = "default", quest: dict | None = None,
-                 long_run_reward: bool = False) -> "RoomMap":
+                 long_run_reward: bool = False, extra_rooms: int = 0,
+                 extra_altars: int = 0) -> "RoomMap":
         """The level the row asks for: see `sim/mapgen.py` for what is the
         game's and what is not. `quest` is the level's quest row, see
-        `sim/quests.py`; `long_run_reward` makes the start a consumable shop."""
+        `sim/quests.py`; `long_run_reward` makes the start a consumable shop.
+        `extra_rooms` and `extra_altars` are the grid's RoomCount, see
+        `sim.mapgen.generate`."""
         from .mapgen import generate as _generate
-        spec = _generate(level_row, rng, chip, quest, long_run_reward)
+        spec = _generate(level_row, rng, chip, quest, long_run_reward,
+                         extra_rooms=extra_rooms, extra_altars=extra_altars)
         extras = spec.get("extras") or {}
         rooms = {rid: Room(id=rid, row=r, col=c, kind=kind,
                            extras=tuple(extras.get(rid, ())))
@@ -604,8 +609,9 @@ class Human:
     # unit is not healed between fights: `C_Unit.BeforeFight` restores health
     # only in KingOfTheHill and in an Arcade boss room, `C_Unit.AfterFight`
     # never writes it, and `UnitExtensions.Heal` is reached only from a heal
-    # consumable, a heal skill and `HealAfterFight` (the "Regeneration" perk of
-    # the meta-progression grid, not a run mutation). `CS_Units.LevelUp` and
+    # consumable, a heal skill and `HealAfterFight` (the "Regeneration" node of
+    # the mutation grid, `sim/grid.py`, which a run buys with its gold, and
+    # which `RunState._after_fight` applies). `CS_Units.LevelUp` and
     # `CS_Item.ApplyBonus` both rescale health as `totalMaxHealth * ratio`, so
     # a level or an item keeps the share, which is why this is a share and not
     # a number of hit points.
@@ -770,20 +776,34 @@ class RunState:
     long_run_reward: bool = False
     # Whether this run has set the flag for the next one.
     long_run_reward_earned: bool = False
+    # The mutation grid (`sim/grid.py`), which the game sells in every run for
+    # gold, in any room. None plays a run without it, which is how every
+    # number before 2026-11-23 was measured; `RunState.new(grid=True)` turns
+    # it on.
+    grid: Any = None
+    # The grid table's always-on rows (`sim.grid.always_on_rows`), which every
+    # run has whether or not anything is bought: AdditionalRerolls (1) and
+    # GetItemBack (75%) in Default.
+    always_on: list = field(default_factory=list)
+    # SALE (`C_ItemDiscountMutation.OnRoll`): the slot on discount and its
+    # price, or None.
+    sale: tuple | None = None
 
     # -- setup -------------------------------------------------------------
     @classmethod
     def new(cls, tables: dict, seed: int = 0,
             squad_name: str | None = None, chip: str = "default",
             dialogs: bool = True, quests: bool = True,
-            long_run_reward: bool = False) -> "RunState":
+            long_run_reward: bool = False, grid: bool = False) -> "RunState":
         game = tables["Game"]
         rng = random.Random(seed)
         squad, cells = starting_squad(tables, squad_name)
         st = cls(tables=tables, gold=float(game.get("Gold") or 0),
                  food=Food.from_game(game), squad=squad, rng=rng, chip=chip,
                  dialogs_on=dialogs, quests_on=quests,
-                 long_run_reward=long_run_reward)
+                 long_run_reward=long_run_reward,
+                 grid=MutationGrid.from_tables(tables) if grid else None,
+                 always_on=always_on_rows(tables))
         st.generate_level()
         st.room = st.rooms.start
         st.rooms.set_current(st.room)
@@ -816,9 +836,14 @@ class RunState:
         self.quest_dialog = None
         self.quest_queue = []
         self.prev_room = None
+        extra_rooms = extra_altars = 0
+        if self.grid is not None:
+            extra_rooms = int(self.grid.run_value("RoomCount", "rooms"))
+            extra_altars = int(self.grid.run_value("RoomCount", "rerollShrines"))
         self.rooms = RoomMap.generate(self.level_row, self.rng, self.chip,
                                       self.quest.spec if self.quest else None,
-                                      self.long_run_reward_used and self.level == 1)
+                                      self.long_run_reward_used and self.level == 1,
+                                      extra_rooms=extra_rooms, extra_altars=extra_altars)
         if self.quest is not None:
             self.quest.room = self.rooms.quest_room
             self.quest.extras = list(self.rooms.quest_extras)
@@ -873,11 +898,35 @@ class RunState:
             am = 1.0 - self.food.armor_penalty / 100.0
             specs = [dataclasses.replace(s, damage=s.damage * dm, armor=s.armor * am)
                      for s in specs]
-        if self.mutations:
+        muts = self.fight_mutations
+        if muts:
             from .mutations import apply_to_specs
-            specs = apply_to_specs(specs, self.mutations, self.rng, gold=self.gold,
+            specs = apply_to_specs(specs, muts, self.rng, gold=self.gold,
                                    hunger=self.food.hunger_level if self.food else 0)
         return specs
+
+    @property
+    def fight_mutations(self) -> list[dict]:
+        """The held mutations, and the grid's bought fight-side nodes after
+        them (`sim.grid.Grid.rows`)."""
+        if self.grid is None:
+            return self.mutations
+        return self.mutations + self.grid.rows()
+
+    @property
+    def extra_altar_rerolls(self) -> int:
+        """What AdditionalRerolls adds to every altar's rerolls: the always-on
+        row's `value` and the grid node's. `C_MutationShopAdditionalsMutation`
+        is a compositor on each altar of the level, `get` adding `value` and
+        `set` taking it back off, so the count an altar shows is its own plus
+        this, less what has been used, and it moves the moment a level is
+        bought."""
+        from .mutations import mutation_params
+        n = sum(float(mutation_params(m).get("value") or 0) for m in self.always_on
+                if m.get("Name") == "AdditionalRerolls")
+        if self.grid is not None:
+            n += self.grid.run_value("AdditionalRerolls", "value")
+        return int(n)
 
     @property
     def feed_cost(self) -> float:
@@ -914,7 +963,8 @@ class RunState:
         from .mutations import hobo_fury_active
         return (tuple((h.item, h.level, h.cls) for h in self.squad),
                 self.food.hunger_level if self.food else 0,
-                len(self.mutations), hobo_fury_active(self.mutations, self.gold))
+                len(self.mutations), hobo_fury_active(self.mutations, self.gold),
+                self.grid.key() if self.grid is not None else ())
 
     def specs_cached(self) -> list[UnitSpec]:
         """`specs()`, memoised for the length of one squad state.
@@ -1129,7 +1179,7 @@ class RunState:
         offered class to keep (see `mutation_pool_by_id_all_unlocked`).
         """
         from .mutations import applies_to, mutation_params
-        smart = [m for m in self.mutations if m["Name"] == "Intelligence"]
+        smart = [m for m in self.mutations + self.always_on if m["Name"] == "Intelligence"]
         if not smart or gain <= 0.0:
             return gain
         cls = h.cls or self.item_class(h.item)
@@ -1167,8 +1217,13 @@ class RunState:
 
     @property
     def roll_cost(self) -> float:
-        """`rollCosts[level - 1]`, the price of re-rolling the stock."""
-        return float(self.shop_row().get("RollCost") or 0)
+        """`rollCosts[level - 1]`, the price of re-rolling the stock, less the
+        grid's CheapReroll: `C_CheapRerollMutation.OnCost` sets the shop's
+        cost to `max(cost - discount, 0)` whenever it changes."""
+        cost = float(self.shop_row().get("RollCost") or 0)
+        if self.grid is not None:
+            cost = max(0.0, cost - self.grid.run_value("CheapReroll", "discount"))
+        return cost
 
     @property
     def upgrade_cost(self) -> float:
@@ -1286,6 +1341,42 @@ class RunState:
         row = items_by_name(self.tables).get(name)
         return float((row or {}).get("Cost") or 0)
 
+    def slot_cost(self, slot: int) -> float:
+        """What the shop charges for the item in `slot`: its `Cost`, or the
+        SALE price when it is the slot on discount."""
+        name = self.offer[slot] if 0 <= slot < len(self.offer) else None
+        if name is None:
+            return 0.0
+        if self.sale is not None and self.sale[0] == slot:
+            return self.sale[1]
+        return self.item_cost(name)
+
+    def _after_shop_roll(self) -> None:
+        """SALE, the grid's ItemDiscount: `C_ItemDiscountMutation.OnRoll`.
+
+        After the shop rolls, and only when no item on the shelf is on
+        discount already, one item drawn at random gets `max(1, cost * percent
+        / 100)` off, through `Math.Round` (to even, as Python's `round`) and
+        not below 0, and is marked. So a sale left unbought stays the one sale
+        through a refill of the empty slots, and a full reroll draws another.
+        The game draws with the room's random source; this uses the run's.
+        """
+        if self.grid is None:
+            return
+        pct = self.grid.run_value("ItemDiscount", "percent")
+        if pct <= 0.0:
+            return
+        if (self.sale is not None and 0 <= self.sale[0] < len(self.offer)
+                and self.offer[self.sale[0]] is not None):
+            return
+        slots = [i for i, name in enumerate(self.offer) if name is not None]
+        if not slots:
+            self.sale = None
+            return
+        i = self.rng.choice(slots)
+        cost = self.item_cost(self.offer[i])
+        self.sale = (i, max(0.0, float(round(cost - max(1.0, cost * pct / 100.0)))))
+
     def refill_offer(self) -> None:
         """Fill empty slots, free. `C_ItemShop.Roll(free, onlyEmpty)`.
 
@@ -1301,6 +1392,7 @@ class RunState:
         for i, slot in enumerate(self.offer):
             if slot is None:
                 self.offer[i] = self.roll_item()
+        self._after_shop_roll()
 
     def best_item_target(self, name: str) -> int | None:
         """Which human gains the most Power from `name`.
@@ -1634,7 +1726,7 @@ class RunState:
             # One action per slot, so the slot index is stable and the policy
             # can learn "the expensive one" rather than "an item".
             for i, name in enumerate(self.offer):
-                if name is not None and self.gold >= self.item_cost(name):
+                if name is not None and self.gold >= self.slot_cost(i):
                     acts.append(("buy_item", (i, None)))
             if self.gold >= self.roll_cost:
                 acts.append(("reroll", None))
@@ -1693,6 +1785,10 @@ class RunState:
             acts.append(("buy_human", None))
         if len(self.squad) > 1 and self.food.per_sacrifice:
             acts.append(("sacrifice", None))
+        # The mutation grid, from any room: `V_Mutation.Upgrade` asks nothing
+        # of where the squad stands. One action per cell, see `sim/grid.py`.
+        if self.grid is not None:
+            acts += [("buy_grid", k) for k in self.grid.buyable(self.gold)]
         # There is no `feed`. `C_Food.Feed` has no UI call site: moving feeds
         # the team when the larder covers it, so food is the price of a room
         # rather than something a policy decides to spend. Offering it as an
@@ -1738,16 +1834,35 @@ class RunState:
             # own Power statistic says gains most", see `best_item_target`.
             slot, target = arg if isinstance(arg, tuple) else (arg, None)
             name = self.offer[slot] if 0 <= slot < len(self.offer) else None
-            price = self.item_cost(name) if name else 0.0
+            price = self.slot_cost(slot) if name else 0.0
             if name is not None and self.gold >= price and self.squad:
                 if target is None:
                     target = self.best_item_target(name)
                 if target is not None and 0 <= target < len(self.squad):
                     self.gold -= price
                     self.offer[slot] = None
+                    if self.sale is not None and self.sale[0] == slot:
+                        self.sale = None
                     self.squad[target].item = name
                     result["bought"] = name
                     result["target"] = target
+        elif kind == "buy_grid":
+            # `C_Mutation.Upgrade`: available, below its last level, and the
+            # purse covers `cost`; the level goes up and the gold comes off.
+            # AdditionalRerolls moves the rerolls of the altars already
+            # stocked on this level at once (its compositor); the rest of the
+            # run-side nodes act at the next roll, level or fight.
+            k = int(arg)
+            if self.grid is not None and self.grid.can_buy(k, self.gold):
+                before = self.extra_altar_rerolls
+                self.gold -= self.grid.buy(k)
+                delta = self.extra_altar_rerolls - before
+                if delta:
+                    for r in self.rooms.rooms.values():
+                        if (r.kind == "mutation_shop" and r.offer_mutations is not None
+                                and r.rolls_left < UNLIMITED_ROLLS):
+                            r.rolls_left += delta
+                result["grid"] = k
         elif kind == "reroll":
             # `C_ItemShop.Roll(bool free = False, bool onlyEmpty = False)`: the
             # paid reroll takes both defaults, so it re-rolls the whole shelf
@@ -1757,6 +1872,8 @@ class RunState:
             if self.gold >= self.roll_cost:
                 self.gold -= self.roll_cost
                 self.offer = [self.roll_item() for _ in range(self.shop_quantity())]
+                self.sale = None
+                self._after_shop_roll()
                 result["rerolled"] = True
         elif kind == "upgrade_shop":
             cost = self.upgrade_cost
@@ -2045,7 +2162,7 @@ class RunState:
         if room.kind == "mutation_shop":
             if room.offer_mutations is None:
                 room.takes_left = int(MUTATION_SHOP["BuyCount"])
-                room.rolls_left = int(MUTATION_SHOP["RollCount"])
+                room.rolls_left = int(MUTATION_SHOP["RollCount"]) + self.extra_altar_rerolls
                 room.offer_mutations = self.draw_mutations(room)
             return
         if room.kind == "food_shop":
@@ -2262,6 +2379,8 @@ class RunState:
         """A free `Roll` of the shop the squad stands in, every slot."""
         if here.has("item_shop"):
             self.offer = [self.roll_item() for _ in range(self.shop_quantity())]
+            self.sale = None
+            self._after_shop_roll()
         elif here.kind == "food_shop":
             sizes, costs = self.food_packs
             here.food_stock = determine_quantities(sizes, costs, self.food_shop_budget)
@@ -2360,13 +2479,14 @@ class RunState:
         else:
             team0 = deploy(grid, layout, fielded, 0, "p", rng)
         apply_class_skills(self.tables, team0, self.mutations)
-        if self.mutations:
+        muts = self.fight_mutations
+        if muts:
             from .mutations import (apply_to_agents, boost_agent_chances,
                                     chance_bonuses, underdog)
-            apply_to_agents(team0, self.mutations, rng)
+            apply_to_agents(team0, muts, rng)
             for agent in team0:
-                boost_agent_chances(agent, chance_bonuses(self.mutations, agent.spec.cls))
-            underdog(team0, len(team1), self.mutations)
+                boost_agent_chances(agent, chance_bonuses(muts, agent.spec.cls))
+            underdog(team0, len(team1), muts)
         # Wounds carry over: each unit starts the fight with the share of its
         # health it ended the last one with. `team0` starts with the squad's
         # first `n_humans` humans, in order; allies arrive whole.
@@ -2486,6 +2606,15 @@ class RunState:
             for h, a in zip(self.squad, team0):
                 if id(a) in survivors:
                     h.hp = min(1.0, max(0.0, a.hp / max(1.0, a.spec.health)))
+            # The grid's HealAfterFight: `C_HealAfterFightMutation.OnFightEnd`
+            # heals every unit of the team `percent`% of its health
+            # (`UnitExtensions.Heal`, percentage), up to full.
+            if self.grid is not None:
+                pct = self.grid.run_value("HealAfterFight", "percent")
+                if pct > 0.0:
+                    for h, a in zip(self.squad, team0):
+                        if id(a) in survivors:
+                            h.hp = min(1.0, h.hp + pct / 100.0)
 
         # `C_Unit.Die` gives a dead enemy's `expReward` to the other team, and
         # `C_Team.GetExperience` splits it evenly over the units in the room.
@@ -2516,6 +2645,13 @@ class RunState:
             return
         self.level += 1
         self.level_won = False
+        # The grid's Deposit: `C_DepositMutation.OnLevel` -> `Profit` on every
+        # new level, `min(gold * percent / 100, threshold)` added to the purse.
+        if self.grid is not None:
+            pct = self.grid.run_value("Deposit", "percent")
+            if pct > 0.0:
+                self.gold += min(self.gold * pct / 100.0,
+                                 self.grid.run_value("Deposit", "threshold"))
         self.generate_level()
         self.room = self.rooms.start
         self.rooms.set_current(self.room)

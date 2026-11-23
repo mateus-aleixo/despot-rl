@@ -384,13 +384,21 @@ which unpark 218 and 233.
 Also 2026-11-22: the renderer was laid out after the game's own screen, and the
 sim was checked against a 90-minute recording of the game (`notes/reference-sim.md`,
 "Checked against a recorded run"). Everything compared matched; the differences
-in the footage come from the account's meta-progression perks, which the sim
-does not play. Three run-layer questions came out of it, for the batch they
+in the footage come from the mutation grid, first taken for the account's
+meta-progression. Two run-layer questions came out of it, for the batch they
 belong to: the item stash with GetItemBack's chance to return a dead unit's
-item, the mutation shop's reroll count (3 and 5 on screen, 2 here), and food
-drops smaller than UnderFeed's 20% in two runs. Which account the sim should
-play (none of the grid's perks, as now, or a seasoned one) is a choice to make
-before the batch-2 boundary re-baseline.
+item, and food drops smaller than UnderFeed's 20% in two runs.
+
+2026-11-23: the grid is the run's, bought with its gold (`notes/reference-sim.md`,
+"The mutation grid, read"), and the sim has it now, in `sim/grid.py`, off by
+default: `RunState.new(grid=True)`, `DespotRunEnv(grid=True)`, and a heuristic
+rule for it. Off, the heuristic reads 3.297 as before (no run changes); on, 3.689
+(+0.393 [+0.337, +0.448]). Every run also gets the altar's always-on extra
+reroll now, which was the "REROLLS: 3" in the recording, and percentage
+resistance bonuses compound as the game's do. Still open on the grid: the three
+summon nodes, which need per-team summon templates in the Rust core. Whether
+the boundary re-baseline turns the grid on is the next decision; the game
+always has it.
 
 The `reward3m` sweep (flat against a rising level bonus, 24 runs at 3M) was
 **stopped part-way and its checkpoints deleted** on 2026-09-02. Re-run it if

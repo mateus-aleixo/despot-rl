@@ -225,7 +225,7 @@ def record(tables, policy, seed: int, placement, max_steps: int | None,
             label = (name.replace("_", " ") if name.startswith("teleport")
                      else "move " + name)
         else:
-            label = NON_MOVE_ACTIONS[action_i - env.n_moves].replace("_", " ")
+            label = env.non_move_actions[action_i - env.n_moves].replace("_", " ")
 
         # The room state rides along so the map can be drawn as the agent sees
         # it. Drawing the whole level was fine while the sim handed the whole

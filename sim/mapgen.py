@@ -855,14 +855,25 @@ def position_rooms(gen: Generator, level_row: dict, rng: random.Random,
 
 
 def generate(level_row: dict, rng: random.Random, chip: str = "default",
-             quest: dict | None = None, long_run_reward: bool = False) -> dict:
+             quest: dict | None = None, long_run_reward: bool = False,
+             extra_rooms: int = 0, extra_altars: int = 0) -> dict:
     """One level, as `position_rooms` returns it.
 
     The room count is drawn once and kept across attempts: `C_Rooms.Generate`
     reads it from the run's precomputed list and retries with the same
     parameters, so only the shape and the placement are drawn again.
+
+    `extra_rooms` and `extra_altars` are the mutation grid's RoomCount
+    (`sim/grid.py`). `C_RoomCountMutation.OnBeforeGeneration` adds `rooms` to
+    `GenerationParams.num` and `rerollShrines` to `rerollShrinesCount` (and
+    its `itemShops`, `foodShops` and `shrines`, which the grid's node leaves
+    at 0) when `C_Rooms.Generate` raises the event, before the room count goes
+    into the square limits and the finish distance.
     """
-    num = room_count(level_row, rng)
+    num = room_count(level_row, rng) + extra_rooms
+    if extra_altars:
+        level_row = dict(level_row, RerollShrines=int(level_row.get("RerollShrines") or 0)
+                         + extra_altars)
     for _ in range(MAX_ATTEMPTS):
         gen = Generator(num, rng, min_finish_distance=min_finish_distance(num))
         gen.build()

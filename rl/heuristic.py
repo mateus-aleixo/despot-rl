@@ -23,7 +23,8 @@ USELESS_TO_BASELINE = ("unmodelled", "teleport", "reroll")
 
 
 def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
-                     upgrade: str = "last", quests: str = "pass"):
+                     upgrade: str = "last", quests: str = "pass",
+                     grid: str = "stats", grid_reserve: float = 0.0):
     """Take what a room offers, otherwise head for the boss.
 
     At an item shop the order is an item, then experience, then a shop upgrade.
@@ -57,6 +58,18 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     default) answers a quest dialog when the squad walks into one and goes no
     further out of its way, `"follow"` walks to the extra room and back for the
     reward. See `_quest_target` for why the default is the first.
+
+    `grid` is what it does with the mutation grid when the run has one
+    (`RunState.new(grid=True)`), whenever the purse covers a node, before
+    walking on: `"stats"` (the default) takes the squad's stat nodes first
+    (health, armour, damage, attack speed) and then the cheapest open node;
+    `"cheapest"` only the cheapest; `"never"` leaves the grid alone.
+    `grid_reserve` is gold kept back for the shops. Over seeds 40000-40299,
+    paired against no grid, `"stats"` gained 0.32 levels [0.18, 0.46] and
+    `"cheapest"` lost 0.08 [-0.22, +0.06]: the cheap nodes first (SALE, mana,
+    altars) spend the first rooms' gold on nothing a fight feels. A reserve
+    of 10 changed nothing, 20 and 30 gave the gain back. Without a grid there
+    is nothing to buy.
     """
     legal = list(st.legal_actions() if legal is None else legal)
     if not legal:
@@ -152,6 +165,11 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
             return kinds["reroll_mutations"][0]
         return best
 
+    if grid in ("cheapest", "stats") and kinds.get("buy_grid"):
+        pick = _grid_pick(st, kinds["buy_grid"], grid, grid_reserve)
+        if pick is not None:
+            return pick
+
     known = st.rooms.known_to_boss
     far = max(known.values(), default=1)
     moves = kinds.get("move", [])
@@ -208,6 +226,29 @@ def heuristic_action(st: RunState, legal=None, rng: random.Random | None = None,
     # end a run that is going nowhere.
     rest = [a for a in legal if a[0] != "teleport"] or legal
     return rng.choice(rest) if rng is not None else rest[0]
+
+
+# The grid's stat nodes, by cell, in the order `grid="stats"` takes them:
+# Health Multiplier, Armor Bonus, Attack Bonus, Attack Speed Bonus, Health
+# Bonus.
+_STAT_CELLS = (15, 16, 13, 10, 17)
+
+
+def _grid_pick(st: RunState, actions: list, policy: str = "cheapest",
+               reserve: float = 0.0):
+    """A grid node on offer that the sim gives an effect and that leaves
+    `reserve` gold: the cheapest, or under `"stats"` the first of
+    `_STAT_CELLS` and then the cheapest. Ties go to the lower cell."""
+    from sim.grid import inert
+    live = [a for a in actions if not inert(st.grid.nodes[a[1]])
+            and st.gold - st.grid.nodes[a[1]].cost >= reserve]
+    if not live:
+        return None
+    if policy == "stats":
+        stat = [a for a in live if a[1] in _STAT_CELLS]
+        if stat:
+            return min(stat, key=lambda a: (_STAT_CELLS.index(a[1]), a[1]))
+    return min(live, key=lambda a: (st.grid.nodes[a[1]].cost, a[1]))
 
 
 # What a dialog event is worth to the baseline, in gold. Guesses, not

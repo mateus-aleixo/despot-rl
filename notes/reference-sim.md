@@ -3180,16 +3180,17 @@ What matches:
   ("Living on Scraps ... move {slowValue}% slower in a fight"), which the sim
   applies.
 
-The account's meta-progression is in the footage. The mutation grid
-(`MutationGrid.json`, bought between runs; a node shows its next level's price)
-has these owned: ItemDiscount (SALE items at 50%), CheapReroll (reroll cost -1:
-the game's REROLL 1 against the sim's 2 at shop level 1), RoomCount level 1 (a
-room and a reroll shrine more per level), StatBonus Mana +40, MagicBonus level 2,
-AttackSpeed +20%, Health +50%, Armor +10 (the "+ 10" on the unit panels) and
-DamageSummon +20%. The sim plays an account with none of them, though with all
-eight squads, which take unlocks. So shop prices, room counts and unit stats in
-the footage differ from the sim by these perks, and which account the sim should
-play is an open choice.
+The differences in the footage come from the mutation grid
+(`MutationGrid.json`), which this note first took for the account's
+meta-progression, bought between runs. It is not: the grid is bought with the
+run's own gold, in any room, and every run starts it empty (read 2026-11-23,
+"The mutation grid, read" below). In the last run, at 72:34, the grid held 37
+levels, about 1,090 gold: SALE, CheapReroll (the game's REROLL 1 against the
+sim's 2 at shop level 1), RoomCount 2, AdditionalRerolls 1, Deposit, Mana 3,
+MagicBonus 3, ManaRegen 4, CooldownReduction 2, Vampirism 1, AttackSpeed 3,
+Resistance 2, the flat Damage 1 (the "+ 90" on the unit panel), ChanceIncrease
+1, Health Multiplier 4, Armor 2 (the "+ 30"), flat Health 1, StatusEvasion 1,
+HealAfterFight 1, DamageSummon 1 and HealthSummon 1. The sim had no grid at all.
 
 Not settled:
 
@@ -3197,10 +3198,99 @@ Not settled:
   with 33), more than UnderFeed's 20% alone accounts for. The held mutations
   and the team's make-up at those moves were not read.
 * The mutation shop shows "REROLLS: 3" in one run and "REROLLS: 5" in another,
-  where the sim gives 2 per shop (`C_Room..ctor`). Whether the counter is a pool
-  fed by reroll shrines and the grid's always-on `SimpleMutations`
-  (AdditionalRerolls 1, GetItemBack 75%) was not read.
+  where the sim gave 2 per shop (`C_Room..ctor`). Settled 2026-11-23: every
+  run has the grid table's always-on AdditionalRerolls 1, so an altar gives 3,
+  and the grid node's first level adds 2 more. See below.
 * GetItemBack (`C_GetItemBackMutation`, 75%, in that always-on list) hooks a
   unit's death and, on a pseudo-random roll, gives its item back. The game keeps
   items in a stash; the sim hands a bought item straight to a human and loses a
   dead human's item.
+
+## The mutation grid, read (2026-11-23)
+
+The grid behind the MUTATIONS button is a shop of the run, not the account's.
+`C_Mutation.Upgrade(free, onCreate)` checks `M_Mutation.available`, that the
+level is below `costs.Count`, and `M_Team.gold >= cost`; then it raises the
+level, takes `cost` off the team's gold, adds it to the run's spending
+statistic and calls `C_Mutations.OnMutationUpgrade` and the node's
+`UpgradeInternal`. The grid is `M_Team.mutations`, next to `M_Team.gold`, so a
+new run's team starts it empty. `V_Mutation.Upgrade` (a click) calls it with no
+other condition, so it sells in any room. `sim/grid.py` has it; a run gets it
+with `RunState.new(grid=True)` and the environment with `DespotRunEnv(grid=True)`.
+It is off by default, so every number measured before stays comparable.
+
+What can be bought:
+
+* `C_Mutations.CreateModels` indexes the cells `y * width + x` and calls
+  `SetupNeighbor` once per flag: `Up` links the cell `index - width + 1` (up and
+  to the right), `Right` the cell `index + 1`, `Down` the cell
+  `index + width + 1` (down and to the right). Links always point right. The
+  linked node takes the linking one as a parent and starts unavailable
+  (`set_available(false)`); a node nothing links to starts available, which is
+  the first column.
+* `OnMutationUpgrade` adds one to `totalLevels` and makes a node available when
+  `totalLevels >= Progress[x]` (0, 4, 8, 12, 16 by column) and every parent has
+  a level (the loop ands `level >= 1` over `parents`). Nothing closes a node
+  again. Resistance (2, 2) needs both MagicBonus (1, 1) and Armor (1, 3); Armor
+  needs both AttackSpeed (0, 2) and the Health Multiplier (0, 3).
+* A level's numbers: `C_Mutation.UpgradeInternal(level)` sets `cost` to
+  `costs[level]`, the next level's price, and each property with a per-level
+  list to its entry `level - 1` (`MutationReflectionUtils.GetAtIndexOrDefault`).
+  `C_Mutation.Reflect` pairs the two by the plural: `bonus` and `Bonuses`,
+  `rooms` and `roomses`, `rerollShrines` and `rerollShrineses`.
+
+What the run-side nodes do, each from its controller:
+
+* SALE (`C_ItemDiscountMutation.OnRoll`): after a shop roll, when no item on
+  the shelf is on discount, one random item gets `max(1, cost * percent / 100)`
+  off, through `Math.Round` (to even) and not below 0. A sale left unbought stays
+  the one sale through a refill; a full reroll draws another. The game draws
+  with the room's random source, the sim with the run's.
+* CheapReroll (`OnCost` and its delayed lambda): the item shop's reroll costs
+  `max(cost - discount, 0)`.
+* RoomCount (`OnBeforeGeneration`): adds `rooms` to `GenerationParams.num` and
+  `rerollShrines` to `rerollShrinesCount` (and `itemShops`, `foodShops`,
+  `shrines`, which this node leaves at 0). `C_Rooms.Generate` raises the event
+  before the room count goes into the square limits and the finish distance.
+* AdditionalRerolls (`C_MutationShopAdditionalsMutation`, a level compositor on
+  each altar): `get` adds `value`, `set` takes it back off, so an altar's
+  rerolls are its own 2 plus every AdditionalRerolls value less what was used,
+  and buying a level adds to the altars already stocked. Every run also has the
+  grid table's always-on AdditionalRerolls 1 (`SimpleMutations`, built by
+  `C_Mutations.CreateSimpleMutations`), so an altar gives 3, which is the
+  "REROLLS: 3" in the recording; level 1 of the node adds 2, the "REROLLS: 5".
+  The sim gave 2, and now gives 3 in every run, grid or not.
+* Deposit (`OnLevel` -> `Profit`): on each new level, `min(gold * percent / 100,
+  threshold)` is added to the purse.
+* HealAfterFight (`OnFightEnd`): every unit of the team heals `percent`% of its
+  health (`UnitExtensions.Heal`, percentage).
+
+The fight-side nodes are mutation rows the battle pipeline already handled
+(StatBonus, ModifyDamage, CooldownReduction, Vampirism, ChanceIncrease,
+StatusEvasion), so both engines take them unchanged, plus Regeneration, which
+now lands on `Agent.regen` (no `Mutations.json` row is one, and only the enemy
+Samurai carry a regeneration of their own). StatusEvasion keeps the sim's
+reading as an evasion, the open item row 324 already has. The three `kind:
+Summon` nodes raise the stats of units summoned in a fight; a summon's stats
+come from a template both teams share in the Rust core, so they are left
+without effect, though they can be bought and count toward `totalLevels`.
+
+Reading the Magic Defense node turned up a rule the sim had wrong for every
+percentage resistance bonus: `C_StatBonusStatus.ApplyStatus` is the one caller
+of `CS_Units.AddStatMult`, and `RecalculateStatMult` multiplies the percentages
+of every stat but Resistance, which it hands to `RecalculateResistance`:
+`res + (1 - res) * pct / 100` per entry. A human starts at 0, so
++20% is 0.2; the sim scaled the 0 and left it at 0, which also emptied the
+in-run mutation 190 (+10% resistance for the team).
+
+Measured on the heuristic, paired over 2400 seeds from 40000 (frontline
+placement, the Rust core). With the grid off the tree reads 3.297, as before,
+and not one of the 2400 runs changes: in 300 of them the heuristic used 8 altar
+rerolls and never a third, and none held 190. With the grid on, and the
+heuristic's `grid="stats"` rule (`rl/heuristic.py`), it reads **3.689, +0.393
+[+0.337, +0.448]**; the rule was chosen on seeds 40000 to 40299, and on the
+2,100 seeds after them the gain is +0.401 [+0.340, +0.460]. Buying the cheapest
+node first instead lost levels: the cheap nodes (SALE, mana, altars) take the
+first rooms' gold and no fight feels them. 5 runs stop at `max_steps` with the
+grid and 4 without. `DespotRunEnv(grid=True)` has 69 actions and a 556-wide
+observation, against 44 and 455.

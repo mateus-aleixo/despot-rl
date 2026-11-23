@@ -1759,15 +1759,19 @@ if _shop is not None:
           len(_shop.offer_mutations) == _MS["ShowCount"], f"{len(_shop.offer_mutations)}")
     check("the shelf holds no duplicates",
           len({id(m) for m in _shop.offer_mutations}) == len(_shop.offer_mutations))
-    # a reroll is a whole new shelf, free, and there are RollCount of them
+    # a reroll is a whole new shelf, free, and there are RollCount of them,
+    # plus the grid table's always-on AdditionalRerolls (1 in Default): the
+    # "REROLLS: 3" on the altar in the recorded run
+    check("Default's always-on AdditionalRerolls adds one altar reroll",
+          _stm.extra_altar_rerolls == 1, f"{_stm.extra_altar_rerolls}")
     _rolled, _shelves = 0, [[m["ID"] for m in _shop.offer_mutations]]
     _gold_before = _stm.gold
     while ("reroll_mutations", None) in _stm.legal_actions() and _rolled < 10:
         _stm.apply(("reroll_mutations", None))
         _rolled += 1
         _shelves.append([m["ID"] for m in _shop.offer_mutations])
-    check("the shelf rerolls RollCount times, for nothing",
-          _rolled == _MS["RollCount"] and _stm.gold == _gold_before
+    check("the shelf rerolls RollCount + 1 times, for nothing",
+          _rolled == _MS["RollCount"] + 1 and _stm.gold == _gold_before
           and len(_shelves[-1]) == _MS["ShowCount"],
           f"{_rolled} rerolls, shelves {_shelves}")
     check("and a reroll draws the shelf again",
@@ -1780,13 +1784,16 @@ if _shop is not None:
           f"{_taken} takes")
     check("a mutation costs nothing", _stm.gold == _gold_before, f"{_stm.gold}")
     check("the takes land in the run's mutations", len(_stm.mutations) == _taken)
-    # `OnLevelChange` reserves what the run holds, so it is never offered again
-    _held = {m["ID"] for m in _stm.mutations}
+    # `OnLevelChange` reserves what the run holds, so it is never offered
+    # again: the (id, class) pair, `ReserveMutation(int id, Class class)`, so
+    # a row offered per class can still come back for another class
+    _held = {(m["ID"], m.get("Class")) for m in _stm.mutations}
     _again = 0
     for _ in range(30):
         _shop.offer_mutations = None
         _stm.ensure_stock(_shop)
-        _again += sum(1 for m in _shop.offer_mutations if m["ID"] in _held)
+        _again += sum(1 for m in _shop.offer_mutations
+                      if (m["ID"], m.get("Class")) in _held)
     check("a mutation the run holds is never on a shelf", _held and _again == 0,
           f"held {sorted(_held)}, offered again {_again} times in 30 shelves")
 
@@ -3459,6 +3466,145 @@ _ra = sum(_rand_levels) / len(_rand_levels)
 _ga = sum(_greedy_levels) / len(_greedy_levels)
 check("playing better reaches deeper levels", _ga > _ra,
       f"random mean {_ra:.2f}, greedy mean {_ga:.2f}")
+
+print("\n== the mutation grid ==")
+# `sim/grid.py`: the 5 x 5 grid a run buys with gold, off unless asked for.
+import types as _types
+
+from sim.grid import Grid as _MutationGrid, inert as _inert
+from sim.mutations import apply_stat_bonus as _asb
+from sim.run import RoomMap as _RoomMap
+
+_g = _MutationGrid.from_tables(_STRICT)
+_cell = {(n.x, n.y): k for k, n in _g.nodes.items()}
+check("the grid is 22 nodes on 5 x 5, columns opening at 0, 4, 8, 12, 16",
+      len(_g.nodes) == 22 and (_g.width, _g.height) == (5, 5)
+      and _g.progress == [0, 4, 8, 12, 16], f"{len(_g.nodes)} {_g.progress}")
+check("only the first column is open at the start",
+      sorted(_g.nodes[k].x for k in _g.buyable(1e9)) == [0, 0, 0, 0],
+      f"{[(_g.nodes[k].x, _g.nodes[k].y) for k in _g.buyable(1e9)]}")
+_par = {xy: sorted((_g.nodes[p].x, _g.nodes[p].y) for p in _g.nodes[k].parents)
+        for xy, k in _cell.items()}
+check("links point right: Up is up-right, Down is down-right",
+      _par[(2, 2)] == [(1, 1), (1, 3)] and _par[(4, 1)] == [(3, 0), (3, 1)]
+      and _par[(1, 3)] == [(0, 2), (0, 3)] and _par[(3, 4)] == [(2, 3), (2, 4)],
+      f"{_par[(2, 2)]} {_par[(4, 1)]} {_par[(1, 3)]} {_par[(3, 4)]}")
+_g.buy(_cell[(0, 0)])
+check("a bought parent is not enough below the column's progress",
+      not _g.nodes[_cell[(1, 0)]].available, f"total {_g.total_levels}")
+for _ in range(3):
+    _g.buy(_cell[(0, 1)])
+check("four levels open column 1 under bought parents",
+      _g.nodes[_cell[(1, 0)]].available and _g.nodes[_cell[(1, 1)]].available
+      and not _g.nodes[_cell[(1, 3)]].available, f"total {_g.total_levels}")
+_mana = _g.nodes[_cell[(0, 1)]]
+check("a level's numbers are entry level - 1 of its lists, cost the next one",
+      _mana.params()["bonus"] == 150 and _mana.cost == 70.0
+      and _mana.params()["stat"] == "Mana", f"{_mana.params()} {_mana.cost}")
+_rc = _g.nodes[_cell[(2, 0)]]
+check("RoomCount's roomses and rerollShrineses read as rooms and rerollShrines",
+      _rc.params(2)["rooms"] == 2 and _rc.params(2)["rerollShrines"] == 2,
+      f"{_rc.params(2)}")
+check("the summon nodes are the three the sim leaves without effect",
+      sorted((n.x, n.y) for n in _g.nodes.values() if _inert(n))
+      == [(1, 4), (2, 4), (3, 4)])
+check("run-side nodes are not fight rows",
+      all(r["Name"] == "StatBonus" for r in _g.rows()), f"{[r['Name'] for r in _g.rows()]}")
+
+# Resistance compounds into what is left (`CS_Units.RecalculateResistance`).
+_hs = build_player_squad(_STRICT, [("broadsword", 1)])[0]
+_r1 = _asb(_hs, {"stat": "Resistance", "bonus": 20, "percentage": "true"})
+_r2 = _asb(_r1, {"stat": "Resistance", "bonus": 20, "percentage": "true"})
+check("a percentage resistance bonus compounds: 0 -> 0.2 -> 0.36",
+      abs(_r1.resistance - 0.2) < 1e-9 and abs(_r2.resistance - 0.36) < 1e-9,
+      f"{_hs.resistance} {_r1.resistance} {_r2.resistance}")
+
+# In a run: buying, the fight rows, and the run-side nodes.
+_gs = RunState.new(_STRICT, seed=31, grid=True)
+_gs.gold = 1000.0
+check("the grid is off unless asked for",
+      RunState.new(_STRICT, seed=31).grid is None
+      and not any(a[0] == "buy_grid" for a in RunState.new(_STRICT, seed=31).legal_actions()))
+_hk = _cell[(0, 3)]
+_hp0 = _gs.specs()[0].health
+_gs.apply(("buy_grid", _hk))
+check("buy_grid takes the price and raises the level",
+      _gs.gold == 990.0 and _gs.grid.nodes[_hk].level == 1, f"{_gs.gold}")
+check("Health Multiplier 1 is +50% health on a human",
+      abs(_gs.specs()[0].health - _hp0 * 1.5) < 1e-6, f"{_hp0} -> {_gs.specs()[0].health}")
+_rc0 = _gs.roll_cost
+for _xy in ((0, 0), (0, 1), (0, 1), (0, 1), (1, 0)):
+    _gs.apply(("buy_grid", _cell[_xy]))
+check("CheapReroll takes 1 off the item shop's reroll",
+      _gs.roll_cost == max(0.0, _rc0 - 1), f"{_rc0} -> {_gs.roll_cost}")
+_gs.apply(("reroll", None))
+_sale = _gs.sale
+_ok = False
+if _sale is not None:
+    _c = _gs.item_cost(_gs.offer[_sale[0]])
+    _ok = _sale[1] == max(0.0, float(round(_c - max(1.0, _c * 0.5))))
+check("SALE puts one random item of a new stock at half price, rounded to even",
+      _ok, f"{_sale} {_gs.offer}")
+_gs.level = 3
+_gs.rooms = _RoomMap.generate(_gs.level_row, _gs.rng)
+_altar = next((r for r in _gs.rooms.rooms.values() if r.kind == "mutation_shop"), None)
+check("a level-3 map has an altar to test on", _altar is not None)
+if _altar is not None:
+    _gs.ensure_stock(_altar)
+    _before = _altar.rolls_left
+    for _xy in ((1, 1), (1, 1), (1, 1), (2, 0), (2, 1), (2, 1), (3, 0)):
+        _gs.apply(("buy_grid", _cell[_xy]))
+    check("AdditionalRerolls 1 makes an altar 2 + 1 + 2 rerolls, at once",
+          _before == 3 and _altar.rolls_left == 5 and _gs.extra_altar_rerolls == 3,
+          f"{_before} -> {_altar.rolls_left}")
+_gs.gold = 100.0
+_gs.grid.nodes[_cell[(4, 0)]].level = 1
+_gs.next_level()
+check("Deposit adds 20% of the purse at a new level", _gs.gold == 120.0, f"{_gs.gold}")
+_gs.gold = 1000.0
+_gs.next_level()
+check("Deposit stops at 40", _gs.gold == 1040.0, f"{_gs.gold}")
+_gs.grid.nodes[_cell[(4, 3)]].level = 1
+_gs.squad[0].hp = 0.4
+_ns = _types.SimpleNamespace
+_t0 = [_ns(alive=True, hp=40.0, spec=_ns(health=100.0)) for _ in _gs.squad]
+_gs._after_fight(_t0, [], _ns(winner=0, seconds=1.0))
+check("HealAfterFight 1 heals 15% after a fight", abs(_gs.squad[0].hp - 0.55) < 1e-9,
+      f"{_gs.squad[0].hp}")
+_mr = _gs.grid.nodes[_cell[(2, 1)]]
+_mr.level = 4
+from sim.battle import Agent as _GAgent
+from sim.mutations import apply_to_agents as _ata
+_ga = _GAgent(spec=_gs.specs()[0], team=0, x=0.0, y=0.0, hp=100.0)
+_ata([_ga], _gs.fight_mutations, random.Random(0))
+check("Mana regeneration 4 lands as 10 mana every 0.5 s",
+      _ga.regen == ("Mana", 0.5, 10.0), f"{_ga.regen}")
+
+# RoomCount: rooms and altars added before the generator runs.
+_row = _STRICT["Levels"][2]
+_plain = [_RoomMap.generate(_row, random.Random(s)) for s in range(6)]
+_more = [_RoomMap.generate(_row, random.Random(s), extra_rooms=2, extra_altars=2)
+         for s in range(6)]
+_alt = lambda m: sum(1 for r in m.rooms.values() if r.kind == "mutation_shop")
+check("RoomCount 2 builds two rooms and two altars more",
+      all(len(b.rooms) == len(a.rooms) + 2 and _alt(b) == _alt(a) + 2
+          for a, b in zip(_plain, _more)),
+      f"{[(len(a.rooms), len(b.rooms), _alt(a), _alt(b)) for a, b in zip(_plain, _more)]}")
+
+# The environment: the grid's actions and observation only when on.
+from rl.env import DespotRunEnv as _Env
+_e0, _e1 = _Env(tables=_STRICT), _Env(tables=_STRICT, grid=True)
+check("the env adds 25 grid actions and 101 grid features only when on",
+      _e1.n_actions == _e0.n_actions + 25 and _e1.obs_dim == _e0.obs_dim + 101,
+      f"{_e0.n_actions} {_e1.n_actions} {_e0.obs_dim} {_e1.obs_dim}")
+_e1.reset(seed=5)
+_e1.state.dialog = None
+_e1.state.gold = 50.0
+_e1._mask_cache = None
+_m = _e1.action_mask()
+_gi = sorted(_e1._decode(i)[1] for i in _m.nonzero()[0] if _e1._decode(i)[0] == "buy_grid")
+check("the grid's open cells are in the env's mask",
+      bool(_gi) and _gi == _e1.state.grid.buyable(50.0), f"{_gi}")
 
 print("\n== throughput ==")
 t0 = time.perf_counter()

@@ -120,7 +120,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                  quests: bool = True,
                  long_run_reward: bool | str = False,
                  boss_distance: bool = False,
-                 blind_frontier: bool = False):
+                 blind_frontier: bool = False,
+                 grid: bool = False):
         self.tables = tables if tables is not None else load_ruleset(strict=True)
         self.max_steps = max_steps
         self.placement_policy = placement_policy
@@ -209,11 +210,26 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         # the two places the state moves: `reset`, and `apply` inside `step`.
         self._mask_cache: np.ndarray | None = None
 
-        probe = RunState.new(self.tables, seed=0)
+        # The mutation grid (`sim/grid.py`), off by default: on, every run
+        # has it, the action list gains one `buy_grid_k` per cell and the
+        # observation the grid's state. Off leaves both as they were.
+        self.grid_on = bool(grid)
+        probe = RunState.new(self.tables, seed=0, grid=self.grid_on)
+        self.grid_cells = (probe.grid.width * probe.grid.height
+                           if probe.grid is not None else 0)
+        self.non_move_actions = NON_MOVE_ACTIONS + tuple(
+            f"buy_grid_{k}" for k in range(self.grid_cells))
         self.n_moves = len(MOVE_NAMES)
         self.move_names = MOVE_NAMES
-        self.n_actions = self.n_moves + len(NON_MOVE_ACTIONS)
-        most = max(portals_count(int(r.get("MaxRooms") or r.get("MinRooms") or 7)) + 1
+        self.n_actions = self.n_moves + len(self.non_move_actions)
+        # RoomCount makes a level bigger, which can add a portal.
+        extra_rooms = 0
+        if probe.grid is not None:
+            extra_rooms = max((int(v) for n in probe.grid.nodes.values()
+                               if n.name == "RoomCount"
+                               for v in n.per_level.get("rooms", [])), default=0)
+        most = max(portals_count(int(r.get("MaxRooms") or r.get("MinRooms") or 7)
+                                 + extra_rooms) + 1
                    + secret_room_count(r, None)
                    + max([int((quest_spec(self.tables, q) or {}).get("SecretRooms") or 0)
                           for q in shortlist(r)] or [0])
@@ -326,7 +342,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                 if name is None:
                     continue
                 shelf[2 * i] = self.item_quality.get(name, 1) / 5.0
-                shelf[2 * i + 1] = 1.0 if st.gold >= st.item_cost(name) else 0.0
+                shelf[2 * i + 1] = 1.0 if st.gold >= st.slot_cost(i) else 0.0
 
         # what the food shop is holding: stock and affordability, per pack. The
         # packs are fixed ([7, 2] ... [250, 55]), so the sizes and prices are
@@ -382,7 +398,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
                 room_now.takes_left / max(1, int(MUTATION_SHOP["BuyCount"])))
             # The rerolls left, which the shop shows on its button.
             shelf_m[MUTATION_SLOTS * per_m + 2] = (
-                room_now.rolls_left / max(1, int(MUTATION_SHOP["RollCount"])))
+                room_now.rolls_left / max(1, int(MUTATION_SHOP["RollCount"])
+                                          + st.extra_altar_rerolls))
         elif room_now.kind == "mutation":
             # The shrine's one free mutation. Without this a stocked shrine and
             # a spent one encode identically and only the action mask separates
@@ -570,12 +587,27 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         if not self.blind_squad and self.squad_name in self.squads:
             who[self.squads.index(self.squad_name)] = 1.0
 
+        # The grid, when the run has one: per cell its level as a share of
+        # the last, whether it is open, whether the purse covers it now, and
+        # the next level's price; then how many levels are bought, which
+        # opens the columns.
+        grid = np.zeros(4 * self.grid_cells + (1 if self.grid_cells else 0),
+                        dtype=np.float32)
+        if st.grid is not None and self.grid_cells:
+            for k, node in st.grid.nodes.items():
+                cost = node.cost
+                grid[4 * k] = node.level / max(1, node.max_level)
+                grid[4 * k + 1] = 1.0 if node.available else 0.0
+                grid[4 * k + 2] = 1.0 if st.grid.can_buy(k, st.gold) else 0.0
+                grid[4 * k + 3] = 0.0 if cost is None else min(cost / 100.0, 5.0)
+            grid[-1] = st.grid.total_levels / 16.0
+
         return np.concatenate([
             np.asarray(scalars, dtype=np.float32),
             np.asarray(level_view, dtype=np.float32),
             np.asarray(comp, dtype=np.float32),
             here_kind, shelf, larder, shelf_m, around, who,
-            carried, on_shelf, waiting, talk, quest, qtalk,
+            carried, on_shelf, waiting, talk, quest, qtalk, grid,
         ]).astype(np.float32)
 
     @staticmethod
@@ -656,7 +688,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
         """`buy_mutation_*` or `take_mutation`, by index into the fixed layout."""
         if index < self.n_moves:
             return False
-        name = NON_MOVE_ACTIONS[index - self.n_moves]
+        name = self.non_move_actions[index - self.n_moves]
         return name.startswith("buy_mutation_") or name == "take_mutation"
 
     def _decode(self, index: int):
@@ -665,7 +697,7 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             # this decodes against the live state rather than a fixed table.
             target = self._move_targets(self.state)[index] if self.state else None
             return ("move" if index < len(MOVES) else "teleport", target)
-        name = NON_MOVE_ACTIONS[index - self.n_moves]
+        name = self.non_move_actions[index - self.n_moves]
         if name.startswith("buy_item_"):
             # (slot, target); a target of None lets the run layer choose.
             return ("buy_item", (int(name.rsplit("_", 1)[1]), None))
@@ -673,6 +705,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             return ("buy_food", int(name.rsplit("_", 1)[1]))
         if name.startswith("buy_mutation_"):
             return ("buy_mutation", int(name.rsplit("_", 1)[1]))
+        if name.startswith("buy_grid_"):
+            return ("buy_grid", int(name.rsplit("_", 1)[1]))
         for family in ("take_consumable", "use_consumable", "sell_consumable", "choose"):
             if name.startswith(family + "_"):
                 return (family, int(name.rsplit("_", 1)[1]))
@@ -705,11 +739,12 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             if slot >= MUTATION_SLOTS:
                 return None
             kind = f"buy_mutation_{slot}"
-        if kind in ("take_consumable", "use_consumable", "sell_consumable", "choose"):
+        if kind in ("take_consumable", "use_consumable", "sell_consumable", "choose",
+                    "buy_grid"):
             kind = f"{kind}_{int(arg or 0)}"
-            if kind not in NON_MOVE_ACTIONS:
+            if kind not in self.non_move_actions:
                 return None
-        return self.n_moves + NON_MOVE_ACTIONS.index(kind)
+        return self.n_moves + self.non_move_actions.index(kind)
 
     def action_mask(self) -> np.ndarray:
         # A copy, not the cached array itself: two calls used to hand back two
@@ -740,7 +775,8 @@ class DespotRunEnv(gym.Env if gym is not None else object):
             flag = bool(self.long_run_reward)
         self.state = RunState.new(self.tables, seed=self._seed,
                                   squad_name=self.squad_name, dialogs=self.dialogs,
-                                  quests=self.quests, long_run_reward=flag)
+                                  quests=self.quests, long_run_reward=flag,
+                                  grid=self.grid_on)
         # `C_Rooms.Generate` clears the flag when it takes it.
         self._long_run_flag = flag and not self.state.long_run_reward_used
         self.state.use_fast_core = self.fast_core
