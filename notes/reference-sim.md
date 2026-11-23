@@ -3433,5 +3433,4 @@ directly and the engines exact at 1v1 on 321, 350 and 318.
 
 On the heuristic, paired over 2400 seeds from 40000: grid off 3.294, -0.003
 [-0.007, +0.001] (18 runs different); grid on 3.673, -0.007 [-0.011, -0.003]
-(22). The squad loses most of what the stacking slows and shreds gave it on
-the mutations it takes; the Scorpotaur's refresh is the other side.
+(22). Which rows moved it was not split.
