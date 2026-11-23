@@ -3383,5 +3383,6 @@ Default tables:
 
 So the sim has been playing a ruleset the game no longer runs. The extraction
 should read this file (when it is newer than the install) rather than the
-TextAssets alone. The tables here are left as they are until that switch is
-made, since it moves every number measured so far.
+TextAssets alone. The tables here stay as they are until the batch-2
+boundary, where the switch is made together with turning the grid on (his
+call, 2026-11-23), since it moves every number measured so far.

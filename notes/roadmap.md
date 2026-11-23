@@ -394,8 +394,10 @@ Also 2026-11-23: the game plays the balance data its server hands out, saved
 in `clientData.bin`, not the tables in its install (`notes/reference-sim.md`,
 "The live data, found"). The live copy (1.12.2, dated 2026-11-05) differs from
 the sim's tables in 27 files: Novice damage doubled, most items cheaper, the
-summon class skills at half mana, 46 mutation rows. Switching the sim to it
-moves every number, so it waits for his call.
+summon class skills at half mana, 46 mutation rows. Decided 2026-11-23: the
+sim switches to the live data at the batch-2 boundary, together with turning
+the grid on, so everything is re-measured once; the extraction will read
+`clientData.bin` from then on, so later patches come in with it.
 
 2026-11-23: the grid is the run's, bought with its gold (`notes/reference-sim.md`,
 "The mutation grid, read"), and the sim has it now, in `sim/grid.py`, off by
